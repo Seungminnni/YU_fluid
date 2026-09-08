@@ -1,0 +1,8 @@
+# Figure colour bars use 20.000 °C; compare against Table 2's rounded 293 K.
+battery:
+  initial_temperature: "293.15 K"
+boundary:
+  inlet_temperature: "293.15 K"
+  initial_fluid_temperature: "293.15 K"
+  initial_solid_temperature: "293.15 K"
+

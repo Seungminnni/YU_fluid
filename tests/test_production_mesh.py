@@ -1,0 +1,837 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from mdpi_cfd.config import load_config
+from mdpi_cfd.openfoam_zone_validation import (
+    EXPECTED_BATTERY_ZONES,
+    validate_cell_zones,
+)
+from mdpi_cfd.openfoam_mesh_integrals import validate_mesh_integrals
+from mdpi_cfd.openfoam_interface_validation import validate_interfaces
+from mdpi_cfd.openfoam_layercheck import parse_layer_log
+from mdpi_cfd.openfoam_production_gate import (
+    REQUIRED_REPORTS,
+    aggregate_production_gate,
+)
+from mdpi_cfd.openfoam_checkmesh import parse_checkmesh_log
+from mdpi_cfd.openfoam_surfacecheck import parse_surfacecheck_log
+from mdpi_cfd.openfoam_yplus_validation import validate_yplus
+from mdpi_cfd.production_mesh import (
+    EXPECTED_BATTERY_FILES,
+    MESH_PRESETS,
+    write_production_mesh_source_bundle,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
+
+
+def _fake_cad(config, root: Path) -> Path:
+    cad = root / "cad"
+    surfaces = cad / "production_surfaces"
+    surfaces.mkdir(parents=True)
+    names = (
+        "outerDomain.stl",
+        "inlet.stl",
+        "outlet.stl",
+        "outerWall.stl",
+        *EXPECTED_BATTERY_FILES,
+    )
+    hashes = {}
+    for name in names:
+        path = surfaces / name
+        path.write_bytes(f"fixture:{name}\n".encode())
+        hashes[f"production_surfaces/{name}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = {
+        "cad_geometry_checks_passed": True,
+        "geometry_sha256": config.geometry_sha256,
+        "production_surfaces": {
+            "length_unit": "m",
+            "battery_files": [
+                f"production_surfaces/{name}" for name in EXPECTED_BATTERY_FILES
+            ],
+        },
+        "file_sha256": hashes,
+    }
+    (cad / "cad_result.json").write_text(json.dumps(result), encoding="utf-8")
+    return cad
+
+
+def _write_zone_fixture(mesh: Path, *, duplicate: bool = False) -> None:
+    mesh.mkdir(parents=True, exist_ok=True)
+    zones = [("coolant", [0])]
+    for index, name in enumerate(EXPECTED_BATTERY_ZONES, start=1):
+        zones.append((name, [0 if duplicate and index == 1 else index]))
+    blocks = []
+    for name, labels in zones:
+        blocks.append(
+            f'''{name}
+{{
+    type cellZone;
+    cellLabels List<label>
+    {len(labels)}
+    (
+        {' '.join(str(label) for label in labels)}
+    );
+}}'''
+        )
+    (mesh / "cellZones").write_text(
+        '''FoamFile
+{
+    format ascii;
+    class regIOobject;
+    object cellZones;
+}
+24
+(
+'''
+        + "\n".join(blocks)
+        + "\n)\n",
+        encoding="utf-8",
+    )
+    if not (mesh / "owner").is_file():
+        (mesh / "owner").write_text(
+            '''FoamFile
+{
+    format ascii;
+    note "nPoints:100 nCells:24 nFaces:50 nInternalFaces:10";
+    object owner;
+}
+''',
+            encoding="utf-8",
+        )
+
+
+def _write_24_cube_polymesh(mesh: Path, *, interface_boundaries: bool = False) -> None:
+    mesh.mkdir(parents=True, exist_ok=True)
+    points = []
+    faces = []
+    owners = []
+    local_faces = (
+        (0, 3, 2, 1),
+        (4, 5, 6, 7),
+        (0, 1, 5, 4),
+        (1, 2, 6, 5),
+        (2, 3, 7, 6),
+        (3, 0, 4, 7),
+    )
+    for cell in range(24):
+        base = len(points)
+        x = cell * 2.0
+        points.extend(
+            (
+                (x, 0, 0),
+                (x + 1, 0, 0),
+                (x + 1, 1, 0),
+                (x, 1, 0),
+                (x, 0, 1),
+                (x + 1, 0, 1),
+                (x + 1, 1, 1),
+                (x, 1, 1),
+            )
+        )
+        faces.extend(tuple(base + index for index in face) for face in local_faces)
+        owners.extend([cell] * 6)
+
+    def header(object_name: str) -> str:
+        return f'''FoamFile
+{{
+    format ascii;
+    object {object_name};
+}}
+'''
+
+    (mesh / "points").write_text(
+        header("points")
+        + f"{len(points)}\n(\n"
+        + "\n".join(f"({x} {y} {z})" for x, y, z in points)
+        + "\n)\n",
+        encoding="utf-8",
+    )
+    (mesh / "faces").write_text(
+        header("faces")
+        + f"{len(faces)}\n(\n"
+        + "\n".join(f"4({' '.join(str(v) for v in face)})" for face in faces)
+        + "\n)\n",
+        encoding="utf-8",
+    )
+    (mesh / "owner").write_text(
+        header("owner")
+        + f"{len(owners)}\n(\n"
+        + "\n".join(str(value) for value in owners)
+        + "\n)\n",
+        encoding="utf-8",
+    )
+    (mesh / "neighbour").write_text(
+        header("neighbour") + "0\n(\n)\n", encoding="utf-8"
+    )
+    if interface_boundaries:
+        patches = [
+            f"battery_C{index:02d}_interface {{ type mappedWall; nFaces 1; startFace {index - 1}; }}"
+            for index in range(1, 24)
+        ]
+        patches.append(
+            f"outerWall {{ type wall; nFaces {len(faces)-23}; startFace 23; }}"
+        )
+        boundary = (
+            header("boundary")
+            + f"{len(patches)}\n(\n"
+            + "\n".join(patches)
+            + "\n)\n"
+        )
+    else:
+        boundary = header("boundary") + f'''3
+(
+inlet {{ type patch; nFaces 1; startFace 0; }}
+outlet {{ type patch; nFaces 1; startFace 1; }}
+outerWall {{ type wall; nFaces {len(faces)-2}; startFace 2; }}
+)
+'''
+    (mesh / "boundary").write_text(boundary, encoding="utf-8")
+    _write_zone_fixture(mesh)
+
+
+class ProductionMeshTests(unittest.TestCase):
+    def test_l3_uses_measured_yplus_first_layer_correction(self) -> None:
+        self.assertEqual(MESH_PRESETS["L0"].first_layer_thickness_m, 15e-6)
+        self.assertEqual(MESH_PRESETS["L2"].first_layer_thickness_m, 15e-6)
+        self.assertEqual(MESH_PRESETS["L3"].first_layer_thickness_m, 14e-6)
+
+    def test_source_bundle_has_exact_23_zone_and_two_region_contract(self) -> None:
+        config = load_config(BASELINE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cad = _fake_cad(config, root)
+            output = root / "production"
+            (output / "runs" / "stale").mkdir(parents=True)
+            (output / "runs" / "stale" / "solver.log").write_text(
+                "runtime output", encoding="utf-8"
+            )
+            (output / "processor0" / "0").mkdir(parents=True)
+            (output / "processor0" / "0" / "cellLevel").write_text(
+                "runtime field", encoding="utf-8"
+            )
+            manifest = write_production_mesh_source_bundle(
+                config, cad, output, mesh_level="L0"
+            )
+            snappy = (output / "system" / "snappyHexMeshDict").read_text()
+            allmesh = (output / "AllmeshProduction").read_text()
+            fallback = (
+                output / "system" / "topoSetDict.batteryZonesFallback"
+            ).read_text()
+            self.assertEqual(manifest["battery_surface_count"], 23)
+            self.assertEqual(manifest["expected_regions"], ["coolant", "batterySolid"])
+            self.assertFalse(manifest["production_mesh_ready"])
+            self.assertFalse(
+                any(name.startswith("runs/") for name in manifest["file_sha256"])
+            )
+            self.assertFalse(
+                any(
+                    name.startswith("processor")
+                    for name in manifest["file_sha256"]
+                )
+            )
+            self.assertFalse(
+                any(
+                    name.startswith("postProcessing/")
+                    for name in manifest["file_sha256"]
+                )
+            )
+            self.assertEqual(snappy.count("cellZone battery_C"), 23)
+            self.assertEqual(snappy.count("faceZone battery_C"), 23)
+            self.assertIn("locationsInMesh", snappy)
+            self.assertIn(") none)", snappy)
+            self.assertNotIn(") coolant)", snappy)
+            self.assertNotIn(") battery_C", snappy)
+            self.assertIn("allowFreeStandingZoneFaces false;", snappy)
+            self.assertIn("outerDomain\n        {\n            level (1 2);", snappy)
+            self.assertIn("battery_C01\n        {\n            level (0 1);", snappy)
+            self.assertIn("addLayers       true", snappy)
+            self.assertIn('"battery_C[0-9][0-9]_slave"', snappy)
+            self.assertIn("nSurfaceLayers 10;", snappy)
+            self.assertIn("multiRegionFeatureSnap false;", snappy)
+            self.assertIn("minRefinementCells  10;", snappy)
+            self.assertIn("nSmoothPatch       10;", snappy)
+            self.assertIn("nSolveIter         100;", snappy)
+            self.assertIn('#includeEtc "caseDicts/meshQualityDict"', snappy)
+            self.assertIn("maxNonOrtho 75;", snappy)
+            self.assertIn("minTetQuality -1e30;", snappy)
+            self.assertIn("minFaceWeight 0.001;", snappy)
+            self.assertIn("minVolRatio 0.001;", snappy)
+            self.assertIn("nFaceSplitInterval 5;", snappy)
+            self.assertIn("nSmoothInternal    10;", snappy)
+            self.assertIn("nGrow                   0;", snappy)
+            self.assertIn("detectExtrusionIsland   true;", snappy)
+            self.assertIn("additionalReporting     true;", snappy)
+            self.assertIn("errorReduction 0.75;", snappy)
+            self.assertIn('zone_groups=\'((batterySolid "battery_C.*")(coolant coolant))\'', allmesh)
+            self.assertIn("-cellZonesOnly -addZones", allmesh)
+            self.assertIn("--mode battery_region", allmesh)
+            self.assertIn("parse_checkmesh.py", allmesh)
+            self.assertIn("parse_surfacecheck.py", allmesh)
+            self.assertIn("parse_layercheck.py", allmesh)
+            self.assertIn("--expected-target-layers 10", allmesh)
+            self.assertIn("decomposePar -case", allmesh)
+            self.assertIn("snappyHexMesh -case \"$case_dir\" -parallel", allmesh)
+            self.assertIn("reconstructParMesh -case", allmesh)
+            self.assertIn("topoSetDict.coolantZone", allmesh)
+            self.assertIn('topoSet -case "$case_dir" -constant -dict system/topoSetDict.ports', allmesh)
+            self.assertIn('rm -f "$case_dir/0/nSurfaceLayers"', allmesh)
+            self.assertIn("--mesh-dir \"$case_dir/constant/polyMesh\"", allmesh)
+            self.assertIn("validate_interfaces.py", allmesh)
+            self.assertIn("interfaces_post_split.json", allmesh)
+            self.assertIn("checkMesh_pre_split_diagnostic.log", allmesh)
+            self.assertIn("checkMesh_all_regions_extended_audit.log", allmesh)
+            self.assertIn('checkMesh -case "$case_dir" -constant -allRegions', allmesh)
+            self.assertIn(
+                'checkMesh -case "$case_dir" -constant -allRegions -meshQuality',
+                allmesh,
+            )
+            mesh_quality = (
+                output / "system" / "coolant" / "meshQualityDict"
+            ).read_text()
+            self.assertIn("maxBoundarySkewness 20;", mesh_quality)
+            self.assertIn("maxInternalSkewness 4;", mesh_quality)
+            self.assertNotIn("checkMesh_pre_split.json", allmesh)
+            self.assertIn('WM_PROJECT_VERSION:-', allmesh)
+            self.assertNotIn("foamVersion", allmesh)
+            self.assertIn("aggregate_production_gate.py", allmesh)
+            self.assertIn("production_mesh_gate.json", allmesh)
+            self.assertTrue(
+                (output / "tools" / "aggregate_production_gate.py").is_file()
+            )
+            self.assertTrue((output / "tools" / "validate_yplus.py").is_file())
+            self.assertTrue(
+                (output / "tools" / "validate_cold_flow.py").is_file()
+            )
+            self.assertTrue(
+                (output / "tools" / "validate_steady_cht.py").is_file()
+            )
+            self.assertTrue(
+                (output / "tools" / "validate_frozen_flow.py").is_file()
+            )
+            self.assertIn(
+                "from validate_cell_zones import parse_cell_zones",
+                (output / "tools" / "validate_mesh_integrals.py").read_text(),
+            )
+            self.assertEqual(fallback.count("source cylinderToCell;"), 23)
+            self.assertTrue((output / "constant" / "triSurface" / "battery_C23.stl").is_file())
+            self.assertIn(
+                "mdpi-openfoam-v2512-python3:local",
+                (output / "compose.yaml").read_text(),
+            )
+            self.assertIn(
+                'OPENFOAM_MPI_RANKS: "${OPENFOAM_MPI_RANKS:-10}"',
+                (output / "compose.yaml").read_text(),
+            )
+            self.assertTrue((output / "AllcontinueSteadyPilot").is_file())
+            self.assertTrue((output / "run-steady-continue.sh").is_file())
+            self.assertTrue((output / "AllcontinueColdFlowPilot").is_file())
+            self.assertTrue((output / "run-cold-flow-continue.sh").is_file())
+            continuation = (output / "AllcontinueSteadyPilot").read_text()
+            self.assertIn("STEADY_ADDITIONAL_ITERATIONS:-2000", continuation)
+            self.assertIn("startFrom -set latestTime", continuation)
+            self.assertIn("processor directory count", continuation)
+            self.assertIn("validate_steady_cht.py", continuation)
+            self.assertIn("relaxationFactors.fields.p_rgh -set 0.3", continuation)
+            self.assertIn("relaxationFactors.equations.U -set 0.15", continuation)
+            self.assertIn("relaxationFactors.equations.h -set 0.5", continuation)
+            cold_continuation = (output / "AllcontinueColdFlowPilot").read_text()
+            self.assertIn("COLD_FLOW_ADDITIONAL_ITERATIONS:-500", cold_continuation)
+            self.assertIn("relaxationFactors.equations.h -set 0.5", cold_continuation)
+            self.assertIn("validate_cold_flow.py", cold_continuation)
+            decompose = (output / "system" / "decomposeParDict").read_text()
+            self.assertIn("numberOfSubdomains 10;", decompose)
+            self.assertIn("method scotch;", decompose)
+            self.assertEqual(
+                (output / "system" / "coolant" / "decomposeParDict").read_text(),
+                decompose,
+            )
+            self.assertEqual(
+                (
+                    output
+                    / "system"
+                    / "batterySolid"
+                    / "decomposeParDict"
+                ).read_text(),
+                decompose,
+            )
+            self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], 10)
+            coolant_zone = (output / "system" / "topoSetDict.coolantZone").read_text()
+            self.assertEqual(coolant_zone.count("source zoneToCell;"), 23)
+            self.assertIn("source setToCellZone;", coolant_zone)
+            port_faces = (output / "system" / "topoSetDict.ports").read_text()
+            self.assertEqual(port_faces.count("source patchToFace;"), 2)
+            self.assertEqual(port_faces.count("patch outerDomain;"), 2)
+            self.assertEqual(port_faces.count("action subset;"), 2)
+            dockerfile = (output / "Dockerfile.openfoam").read_text()
+            self.assertIn("FROM opencfd/openfoam-default:2512", dockerfile)
+            self.assertIn("apt-get install", dockerfile)
+            self.assertIn("python3", dockerfile)
+            self.assertIn(
+                "/Applications/Docker.app/Contents/Resources/bin/docker",
+                (output / "run-production-mesh.sh").read_text(),
+            )
+            self.assertTrue((output / "run-production-mesh.sh").is_file())
+            self.assertTrue((output / "run-production-mesh.ps1").is_file())
+            cold_solution = (
+                output
+                / "profiles"
+                / "steady_cold_flow"
+                / "system"
+                / "coolant"
+                / "fvSolution"
+            ).read_text()
+            self.assertIn("nNonOrthogonalCorrectors 2;", cold_solution)
+            self.assertIn("p_rgh 0.3;", cold_solution)
+            self.assertIn("U 0.15;", cold_solution)
+            steady_solution = (
+                output / "profiles" / "steady" / "system" / "coolant" / "fvSolution"
+            ).read_text()
+            self.assertIn("nNonOrthogonalCorrectors 2;", steady_solution)
+            self.assertIn("p_rgh 0.3;", steady_solution)
+            self.assertIn("h 0.5;", steady_solution)
+            steady_solid_solution = (
+                output / "profiles" / "steady" / "system" / "batterySolid" / "fvSolution"
+            ).read_text()
+            self.assertIn("h 0.5;", steady_solid_solution)
+            self.assertEqual(
+                manifest["solver_source"]["battery_temperature_function_objects"],
+                115,
+            )
+            self.assertEqual(
+                manifest["solver_source"][
+                    "battery_surface_temperature_function_objects"
+                ],
+                69,
+            )
+            self.assertTrue((output / "constant" / "regionProperties").is_file())
+            self.assertTrue(
+                (output / "constant" / "batterySolid" / "fvOptions").is_file()
+            )
+            self.assertTrue((output / "0" / "coolant" / "alphat").is_file())
+            self.assertTrue((output / "0" / "batterySolid" / "T").is_file())
+            solid_p = (output / "0" / "batterySolid" / "p").read_text()
+            self.assertIn("type calculated;", solid_p)
+            self.assertIn("internalField   uniform 101325;", solid_p)
+            self.assertTrue((output / "system" / "coolant" / "fvSolution").is_file())
+            self.assertTrue((output / "system" / "fvSchemes").is_file())
+            control = (output / "system" / "controlDict").read_text()
+            self.assertEqual(control.count("type volFieldValue;"), 46)
+            self.assertEqual(control.count("type surfaceFieldValue;"), 75)
+            self.assertIn("regionType cellZone;", control)
+            self.assertIn("regionType patch;", control)
+            self.assertIn('names (".*battery_C23_interface.*");', control)
+            self.assertIn("operation areaAverage;", control)
+            self.assertIn("type yPlus;", control)
+            self.assertIn("coolant_inlet_mass_flow", control)
+            self.assertIn("coolant_outlet_mass_flow", control)
+            self.assertIn("coolant_inlet_pressure_avg", control)
+            self.assertIn("coolant_outlet_pressure_avg", control)
+            self.assertIn("coolant_inlet_mass_weighted_temperature", control)
+            self.assertIn("coolant_outlet_mass_weighted_temperature", control)
+            self.assertIn("selectionMode   all;", (output / "constant" / "batterySolid" / "fvOptions").read_text())
+            frozen_solution = (
+                output
+                / "profiles"
+                / "frozen_flow"
+                / "system"
+                / "coolant"
+                / "fvSolution"
+            ).read_text()
+            frozen_control = (
+                output / "profiles" / "frozen_flow" / "system" / "controlDict"
+            ).read_text()
+            actual_control = (
+                output
+                / "profiles"
+                / "frozen_flow_actual_1s"
+                / "system"
+                / "controlDict"
+            ).read_text()
+            transient_root = (
+                output / "profiles" / "frozen_flow" / "system" / "fvSolution"
+            ).read_text()
+            full_solution = (
+                output
+                / "profiles"
+                / "full_transient_dt"
+                / "system"
+                / "coolant"
+                / "fvSolution"
+            ).read_text()
+            half_control = (
+                output
+                / "profiles"
+                / "full_transient_dt_half"
+                / "system"
+                / "controlDict"
+            ).read_text()
+            self.assertIn("application chtMultiRegionFoam;", frozen_control)
+            self.assertIn("deltaT 1;", frozen_control)
+            self.assertIn("writeInterval 15;", frozen_control)
+            self.assertIn("writeFormat binary;", frozen_control)
+            self.assertIn("writeCompression on;", frozen_control)
+            self.assertIn("writeInterval 1800;", actual_control)
+            self.assertIn("actual_xy_temperature_1s", actual_control)
+            self.assertIn("actual_xy15_temperature_1s", actual_control)
+            self.assertIn("actual_xy85_temperature_1s", actual_control)
+            self.assertIn("actual_battery_near_surface_temperature_1s", actual_control)
+            self.assertEqual(actual_control.count("interpolationScheme cell;"), 11)
+            self.assertIn("coolant_yPlus", frozen_control)
+            self.assertIn("writeInterval 1800;", frozen_control)
+            self.assertIn("frozenFlow yes;", frozen_solution)
+            self.assertIn("momentumPredictor no;", frozen_solution)
+            self.assertIn("nOuterCorrectors 3;", transient_root)
+            self.assertIn("frozenFlow no;", full_solution)
+            self.assertIn("momentumPredictor yes;", full_solution)
+            self.assertIn("maxCo 5;", half_control)
+            self.assertIn("deltaT 0.05;", half_control)
+            self.assertTrue((output / "AllrunFrozenFlowThermalPilot").is_file())
+            self.assertTrue((output / "AllrunFrozenFlowThermalActual1s").is_file())
+            self.assertTrue((output / "AllrunColdFlowPilot").is_file())
+            self.assertTrue((output / "run-cold-flow-pilot.sh").is_file())
+            self.assertTrue((output / "run-cold-flow-pilot.ps1").is_file())
+            self.assertTrue((output / "run-frozen-flow-pilot.sh").is_file())
+            self.assertTrue((output / "run-frozen-flow-pilot.ps1").is_file())
+            frozen_script = (output / "AllrunFrozenFlowThermalPilot").read_text()
+            cold_script = (output / "AllrunColdFlowPilot").read_text()
+            self.assertIn("validate_yplus.py", cold_script)
+            self.assertIn("validate_cold_flow.py", cold_script)
+            self.assertIn("potentialFoam", cold_script)
+            self.assertNotIn("-writephi", cold_script)
+            self.assertIn("decomposePar -case \"$run_dir\" -allRegions", frozen_script)
+            self.assertNotIn("-copyZero", frozen_script)
+            self.assertIn("chtMultiRegionFoam -case \"$run_dir\" -parallel", frozen_script)
+            self.assertIn("reconstructPar -case \"$run_dir\" -allRegions", frozen_script)
+            self.assertIn("for field in U p p_rgh k omega nut alphat phi", frozen_script)
+            self.assertIn('steady_dir="$case_dir/runs/steady_cold_flow"', frozen_script)
+            self.assertIn("COLD_FLOW_VALIDATION_PASSED", frozen_script)
+            self.assertIn("STEADY_CHT_VALIDATION_PASSED", frozen_script)
+            self.assertIn("validate_frozen_flow.py", frozen_script)
+            self.assertNotIn(
+                'reconstructPar -case "$run_dir" -allRegions -latestTime',
+                frozen_script,
+            )
+            self.assertNotIn('cp "$source_field" "$run_dir/0/coolant/T"', frozen_script)
+            steady_script = (output / "AllrunSteadyPilot").read_text()
+            self.assertIn("COLD_FLOW_VALIDATION_PASSED", steady_script)
+            self.assertIn("validate_steady_cht.py", steady_script)
+            cold_source = (
+                output
+                / "profiles"
+                / "steady_cold_flow"
+                / "constant"
+                / "batterySolid"
+                / "fvOptions"
+            ).read_text()
+            self.assertIn("heat source intentionally disabled", cold_source)
+            self.assertNotIn("scalarSemiImplicitSource", cold_source)
+            cold_control = (
+                output
+                / "profiles"
+                / "steady_cold_flow"
+                / "system"
+                / "controlDict"
+            ).read_text()
+            self.assertEqual(cold_control.count("type surfaceFieldValue;"), 6)
+            self.assertNotIn("type volFieldValue;", cold_control)
+            self.assertIn("type fieldMinMax;", cold_control)
+
+    def test_aggregate_production_gate_requires_every_exact_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reports = Path(directory)
+            for name, status in REQUIRED_REPORTS.items():
+                (reports / name).write_text(
+                    json.dumps({"status": status}), encoding="utf-8"
+                )
+            passed = aggregate_production_gate(reports)
+            self.assertEqual(passed["status"], "PRODUCTION_MESH_GATE_PASSED")
+            self.assertTrue(passed["runnable_solver_pilots"])
+            self.assertFalse(passed["publication_results_authorized"])
+            self.assertEqual(passed["required_report_count"], 30)
+
+            (reports / "surfaceCheck_battery_C23.json").unlink()
+            failed = aggregate_production_gate(reports)
+            self.assertEqual(failed["status"], "PRODUCTION_MESH_GATE_FAILED")
+            self.assertFalse(failed["runnable_solver_pilots"])
+            self.assertEqual(
+                failed["errors"]["surfaceCheck_battery_C23.json"],
+                "missing report",
+            )
+
+    def test_zone_validator_requires_full_exclusive_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mesh = Path(directory) / "polyMesh"
+            _write_zone_fixture(mesh)
+            report = validate_cell_zones(mesh)
+            self.assertEqual(report["status"], "CELLZONE_VALIDATION_PASSED")
+            self.assertEqual(report["covered_cell_count"], 24)
+            self.assertEqual(report["duplicate_cell_label_count"], 0)
+
+            _write_zone_fixture(mesh, duplicate=True)
+            failed = validate_cell_zones(mesh)
+            self.assertEqual(failed["status"], "CELLZONE_VALIDATION_FAILED")
+            self.assertFalse(failed["checks"]["cell_labels_unique_across_zones"])
+            self.assertFalse(failed["checks"]["all_mesh_cells_covered"])
+
+    def test_battery_region_allows_only_empty_retained_coolant_zone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mesh = Path(directory) / "polyMesh"
+            mesh.mkdir(parents=True)
+            blocks = []
+            for index, name in enumerate(EXPECTED_BATTERY_ZONES):
+                blocks.append(
+                    f'''{name}
+{{
+    type cellZone;
+    cellLabels List<label>
+    1
+    (
+        {index}
+    );
+}}'''
+                )
+            blocks.append(
+                '''coolant
+{
+    type cellZone;
+    cellLabels List<label>
+    0
+    (
+    );
+}'''
+            )
+            (mesh / "cellZones").write_text(
+                '''FoamFile
+{
+    format ascii;
+    class regIOobject;
+    object cellZones;
+}
+24
+(
+'''
+                + "\n".join(blocks)
+                + "\n)\n",
+                encoding="utf-8",
+            )
+            (mesh / "owner").write_text(
+                '''FoamFile
+{
+    format ascii;
+    note "nPoints:100 nCells:23 nFaces:50 nInternalFaces:10";
+    object owner;
+}
+''',
+                encoding="utf-8",
+            )
+            report = validate_cell_zones(mesh, mode="battery_region")
+            self.assertEqual(report["status"], "CELLZONE_VALIDATION_PASSED")
+            self.assertEqual(report["permitted_empty_foreign_zones"], ["coolant"])
+
+            cell_zones = (mesh / "cellZones").read_text(encoding="utf-8")
+            (mesh / "cellZones").write_text(
+                cell_zones.replace(
+                    "cellLabels List<label>\n    0\n    (\n    );\n}",
+                    "cellLabels List<label>\n    1\n    (\n        0\n    );\n}",
+                ),
+                encoding="utf-8",
+            )
+            failed = validate_cell_zones(mesh, mode="battery_region")
+            self.assertEqual(failed["status"], "CELLZONE_VALIDATION_FAILED")
+            self.assertEqual(failed["nonempty_permitted_foreign_zones"], ["coolant"])
+
+    def test_mesh_integrals_use_polymesh_geometry_not_config_arithmetic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mesh = Path(directory) / "polyMesh"
+            _write_24_cube_polymesh(mesh)
+            report = validate_mesh_integrals(
+                mesh,
+                expected_battery_volume_m3=23.0,
+                expected_coolant_volume_m3=1.0,
+                expected_inlet_area_m2=1.0,
+                expected_outlet_area_m2=1.0,
+            )
+            self.assertEqual(report["status"], "MESH_INTEGRAL_VALIDATION_PASSED")
+            self.assertAlmostEqual(report["actual"]["battery_total_volume_m3"], 23.0)
+            self.assertAlmostEqual(report["actual"]["zone_volumes_m3"]["coolant"], 1.0)
+            self.assertAlmostEqual(report["actual"]["patch_areas_m2"]["inlet"], 1.0)
+
+    def test_post_split_interface_gate_requires_23_paired_nonempty_areas(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            coolant = root / "coolant" / "polyMesh"
+            solid = root / "batterySolid" / "polyMesh"
+            _write_24_cube_polymesh(coolant, interface_boundaries=True)
+            _write_24_cube_polymesh(solid, interface_boundaries=True)
+            report = validate_interfaces(
+                coolant,
+                solid,
+                expected_each_area_m2=1.0,
+            )
+            self.assertEqual(report["status"], "INTERFACE_VALIDATION_PASSED")
+            self.assertEqual(report["actual"]["coolant_total_area_m2"], 23.0)
+
+            boundary = solid / "boundary"
+            boundary.write_text(
+                boundary.read_text().replace(
+                    "battery_C23_interface", "missing_C23_interface"
+                ),
+                encoding="utf-8",
+            )
+            failed = validate_interfaces(
+                coolant,
+                solid,
+                expected_each_area_m2=1.0,
+            )
+            self.assertEqual(failed["status"], "INTERFACE_VALIDATION_FAILED")
+            self.assertEqual(failed["missing_solid_interfaces"], ["C23"])
+
+    def test_yplus_validator_uses_area_weighted_battery_patch_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mesh = root / "polyMesh"
+            _write_24_cube_polymesh(mesh, interface_boundaries=True)
+            blocks = []
+            for index in range(1, 24):
+                value = 2.0 if index == 23 else 0.5
+                blocks.append(
+                    f"battery_C{index:02d}_interface "
+                    f"{{ type calculated; value uniform {value}; }}"
+                )
+            blocks.append("outerWall { type calculated; value uniform 0; }")
+            field = root / "yPlus"
+            field.write_text(
+                '''FoamFile
+{
+    format ascii;
+    class volScalarField;
+    object yPlus;
+}
+internalField uniform 0;
+boundaryField
+{
+'''
+                + "\n".join(blocks)
+                + "\n}\n",
+                encoding="utf-8",
+            )
+            report = validate_yplus(mesh, field)
+            self.assertEqual(report["status"], "YPLUS_VALIDATION_PASSED")
+            self.assertAlmostEqual(
+                report["battery_surface"]["area_fraction_below_1"], 22 / 23
+            )
+            self.assertEqual(report["battery_surface"]["maximum"], 2.0)
+
+    def test_layer_parser_requires_coverage_for_every_battery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "snappyHexMesh.log"
+            rows = [
+                f"battery_C{index:02d} 100 5 4.5 0.00015 80"
+                for index in range(1, 24)
+            ]
+            log.write_text(
+                "trapFpe: Floating point exception trapping enabled (FOAM_SIGFPE).\n"
+                + "\n".join(rows),
+                encoding="utf-8",
+            )
+            report = parse_layer_log(log)
+            self.assertEqual(report["status"], "LAYER_VALIDATION_PASSED")
+            self.assertAlmostEqual(
+                report["battery_summaries"]["C01"]["layer_coverage_fraction"],
+                0.9,
+            )
+
+            rows[-1] = "battery_C23 100 5 2.0 0.00005 30"
+            log.write_text("\n".join(rows), encoding="utf-8")
+            failed = parse_layer_log(log)
+            self.assertEqual(failed["status"], "LAYER_VALIDATION_FAILED")
+            self.assertEqual(failed["low_coverage_batteries"], ["C23"])
+            self.assertEqual(failed["low_thickness_batteries"], ["C23"])
+
+    def test_checkmesh_parser_records_quality_metrics_and_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "checkMesh.log"
+            log.write_text(
+                '''trapFpe: Floating point exception trapping enabled (FOAM_SIGFPE).
+Checking geometry...
+Min volume = 1.2e-12. Max volume = 9e-10.
+Mesh non-orthogonality Max: 64.5 average: 11.2
+Max skewness = 3.1 OK.
+Minimum determinant = 0.012
+Mesh OK.
+''',
+                encoding="utf-8",
+            )
+            passed = parse_checkmesh_log(log)
+            self.assertEqual(passed["status"], "CHECKMESH_LOG_PASSED")
+            self.assertEqual(passed["metrics"]["max_non_orthogonality"], 64.5)
+            self.assertEqual(passed["metrics"]["max_skewness"], 3.1)
+
+            log.write_text(log.read_text() + "***Max skewness = 25 Failed\n")
+            failed = parse_checkmesh_log(log)
+            self.assertEqual(failed["status"], "CHECKMESH_LOG_FAILED")
+
+            log.write_text(
+                '''Min volume = 1.2e-12. Max volume = 9e-10.
+Mesh non-orthogonality Max: 74.9 average: 11.2
+***Max skewness = 4.7, 2 highly skew faces detected
+Checking faces in error :
+    non-orthogonality > 75 degrees : 0
+    faces with face pyramid volume < 1e-20 : 0
+    faces with concavity > 80 degrees : 0
+    faces with skewness > 4 (internal) or 20 (boundary) : 0
+    faces with interpolation weights < 0.001 : 0
+    faces with volume ratio < 0.001 : 0
+    faces with face twist < 0.02 : 0
+    faces on cells with determinant < 0.0001 : 0
+Failed 1 mesh checks.
+Min volume = 3.0e-10. Max volume = 9e-10.
+Mesh non-orthogonality Max: 52.9 average: 4.2
+Max skewness = 3.4 OK.
+Checking faces in error :
+    non-orthogonality > 75 degrees : 0
+    faces with face pyramid volume < 1e-20 : 0
+    faces with concavity > 80 degrees : 0
+    faces with skewness > 4 (internal) or 20 (boundary) : 0
+    faces with interpolation weights < 0.001 : 0
+    faces with volume ratio < 0.001 : 0
+    faces with face twist < 0.02 : 0
+    faces on cells with determinant < 0.0001 : 0
+Mesh OK.
+''',
+                encoding="utf-8",
+            )
+            overridden = parse_checkmesh_log(log, expected_mesh_ok_count=2)
+            self.assertEqual(overridden["status"], "CHECKMESH_LOG_PASSED")
+            self.assertEqual(overridden["metrics"]["max_skewness"], 4.7)
+            self.assertEqual(overridden["metrics"]["user_quality_pass_count"], 2)
+
+    def test_surfacecheck_parser_requires_closed_connected_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "surfaceCheck.log"
+            log.write_text(
+                '''trapFpe: Floating point exception trapping enabled (FOAM_SIGFPE).
+Surface is closed. All edges connected to two faces.
+Number of unconnected parts : 1
+''',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                parse_surfacecheck_log(log)["status"], "SURFACECHECK_LOG_PASSED"
+            )
+            log.write_text("Surface is not closed.\n", encoding="utf-8")
+            self.assertEqual(
+                parse_surfacecheck_log(log)["status"], "SURFACECHECK_LOG_FAILED"
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

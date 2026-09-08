@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdpi-cfd"
+version = "0.1.0"
+description = "Traceable 23-cell immersion-cooling CFD case generator"
+requires-python = ">=3.12"
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+overlay = ["Pillow>=10"]
+cad = ["cadquery>=2.5"]
+mesh = ["gmsh>=4.13"]
+gui = ["PySide6>=6.8", "pyvista>=0.44", "vtk>=9.3"]
+results = ["numpy>=2.0", "matplotlib>=3.9", "vtk>=9.3"]
+
+[project.scripts]
+mdpi-cfd = "mdpi_cfd.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,113 @@
+schema_version: 3
+case_name: baseline_23cell
+mode: paper_geometry_baseline
+
+# Canonical geometry source: dimensioned PPT slide 2. Paper Figure 8
+# digitizations are separate sensitivity overlays and never silently merged.
+
+geometry:
+  enclosure:
+    profile: pptx_measured_v1
+    width_x: "114 mm"
+    length_y: "121 mm"
+    height_z: "82 mm"
+    outline_polygon_mm:
+      - [4.1, 121.0]
+      - [0.0, 109.6]
+      - [0.0, 11.6]
+      - [3.9, 0.0]
+      - [23.0, 0.0]
+      - [27.0, 11.25]
+      - [38.0, 11.25]
+      - [42.0, 0.0]
+      - [61.0, 0.0]
+      - [65.0, 11.25]
+      - [76.0, 11.25]
+      - [80.0, 0.0]
+      - [114.0, 0.0]
+      - [114.0, 121.0]
+      - [80.0, 121.0]
+      - [76.0, 109.75]
+      - [65.0, 109.75]
+      - [61.0, 121.0]
+      - [42.0, 121.0]
+      - [38.0, 109.75]
+      - [27.0, 109.75]
+      - [23.0, 121.0]
+    notch:
+      mouth: "19 mm"
+      inner: "11 mm"
+      depth: "11.25 mm"
+      columns: [2, 4]
+    label_24mm_status: drawing_label_inconsistent_adopt_34mm_measured_land
+  cells:
+    count: 23
+    diameter: "19 mm"
+    length: "68 mm"
+    topology: staggered_5_4_5_4_5
+    placement_profile: drawing_measured_19mm
+    column_pitch_x: "19 mm"
+    row_pitch_y: "22.5 mm"
+    stagger_offset_y: "11.25 mm"
+    left_wall_clearance: "4.1 mm"
+    five_cell_column_first_y: "15.2 mm"
+    paper_nominal_surface_gap: "3.5 mm"
+    regular_triangular_alternative_pitch_x: "19.48557 mm"
+  ports:
+    inlet_diameter: "19 mm"
+    outlet_diameter: "19 mm"
+    external_length: "32 mm"
+    inlet_face: top
+    outlet_face: bottom
+    inlet_center_xy_mm: [89.6, 105.2]
+    outlet_center_xy_mm: [13.6, 15.2]
+    placement: end_cell_center
+    inlet_column: 5
+    inlet_column_options: [5, 1]
+    placement_options: [end_cell_center, corner_4mm_clearance]
+    center_source: ASSUMPTION_A04
+
+fluid:
+  name: deionized_water
+  density: "998.2 kg/m^3"
+  specific_heat: "4182 J/(kg*K)"
+  thermal_conductivity: "0.598 W/(m*K)"
+  dynamic_viscosity: "0.00112 Pa*s"
+
+battery:
+  density: "2000 kg/m^3"
+  specific_heat: "900 J/(kg*K)"
+  thermal_conductivity: "27 W/(m*K)"
+  initial_temperature: "293 K"
+  heat_source:
+    mode: constant_qvol
+    qvol: "16325 W/m^3"
+  electrical_metadata:
+    nominal_voltage: "3.7 V"
+    capacity: "2 Ah"
+    discharge_rate_c: 2.0
+
+boundary:
+  inlet_velocity: "0.4 m/s"
+  inlet_temperature: "293 K"
+  turbulence_intensity: 0.05
+  outlet_absolute_pressure: "101325 Pa"
+  pressure_reference_absolute: "101325 Pa"
+  initial_fluid_temperature: "293 K"
+  initial_solid_temperature: "293 K"
+  outer_wall_thermal: adiabatic
+  gravity: [0, 0, 0]
+
+solver:
+  distribution: OpenCFD
+  version: v2512
+  energy_field: h
+  steady_algorithm: SIMPLE
+  transient_algorithm: PIMPLE
+  turbulence_model: kOmegaSST
+  full_transient_validation:
+    mesh_scope: coarse_only
+    expose_in_gui: false
+    max_courant: 5
+    min_outer_correctors: 3
+    require_delta_t_half_comparison: true

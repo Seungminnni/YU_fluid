@@ -1,0 +1,6 @@
+# Sensitivity-only override. Geometry remains at the drawing-supported 19 mm.
+# This viscosity reproduces the paper's reported Re=8782 at U=0.4 m/s.
+fluid:
+  dynamic_viscosity: "8.63849e-4 Pa*s"
+mode: viscosity_re8782_sensitivity
+

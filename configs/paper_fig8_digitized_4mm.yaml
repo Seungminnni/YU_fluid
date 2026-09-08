@@ -1,0 +1,49 @@
+# Figure 8 direct-digitization candidate (approximately ±0.5 mm).
+geometry:
+  enclosure:
+    profile: paper_fig8_digitized
+    outline_polygon_mm:
+      - [7.2, 121.0]
+      - [1.7, 111.4]
+      - [0.0, 111.1]
+      - [0.0, 10.0]
+      - [1.7, 9.7]
+      - [7.1, 0.0]
+      - [24.0, 0.0]
+      - [30.7, 11.5]
+      - [40.4, 11.5]
+      - [47.0, 0.0]
+      - [64.0, 0.0]
+      - [70.6, 11.5]
+      - [80.3, 11.5]
+      - [87.1, 0.0]
+      - [113.9, 0.0]
+      - [113.9, 121.0]
+      - [87.1, 121.0]
+      - [80.3, 109.6]
+      - [70.6, 109.6]
+      - [64.0, 121.0]
+      - [47.0, 121.0]
+      - [40.4, 109.6]
+      - [30.7, 109.6]
+      - [24.0, 121.0]
+    notch:
+      mouth: "23 mm"
+      inner: "9.7 mm"
+      depth: "11.5 mm"
+      columns: [2, 4]
+    label_24mm_status: rejected_by_fig8_contour_and_114mm_closure
+  cells:
+    placement_profile: fig8_digitized_4mm
+    column_pitch_x: "20 mm"
+    row_pitch_y: "23 mm"
+    stagger_offset_y: "11.5 mm"
+    left_wall_clearance: "6.2 mm"
+    five_cell_column_first_y: "14.5 mm"
+  ports:
+    inlet_center_xy_mm: [15.7, 14.5]
+    outlet_center_xy_mm: [95.7, 106.5]
+    inlet_column: 1
+    placement: end_cell_center
+    center_source: DIGITIZED_FIG8_CONCENTRIC_INFERENCE
+

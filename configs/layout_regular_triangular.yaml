@@ -1,0 +1,6 @@
+# Override fragment for the paper's nominal 3.5 mm nearest-neighbour gap.
+geometry:
+  cells:
+    placement_profile: regular_triangular_19_486mm
+    column_pitch_x: "19.48557 mm"
+

@@ -1,0 +1,8 @@
+# Joule-only surrogate example. This is not the unpublished paper UDF.
+battery:
+  heat_source:
+    mode: electrical_joule
+    current_profile_path: "../examples/current_profile.csv"
+    resistance_profile_path: "../examples/resistance_profile.csv"
+    outside_policy: hold
+

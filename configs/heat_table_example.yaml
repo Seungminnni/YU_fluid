@@ -1,0 +1,7 @@
+# User-extension example. This is not the unpublished paper UDF.
+battery:
+  heat_source:
+    mode: table_qvol
+    table_path: "../examples/qvol_profile.csv"
+    outside_policy: hold
+

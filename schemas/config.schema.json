@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/mdpi-cfd/config.schema.json",
+  "title": "MDPI CFD case configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_name",
+    "mode",
+    "geometry",
+    "fluid",
+    "battery",
+    "boundary",
+    "solver"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "case_name": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["paper_geometry_baseline", "viscosity_re8782_sensitivity"]},
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enclosure", "cells", "ports"],
+      "properties": {
+        "enclosure": {"$ref": "#/$defs/enclosure"},
+        "cells": {"$ref": "#/$defs/cells"},
+        "ports": {"$ref": "#/$defs/ports"}
+      }
+    },
+    "fluid": {"$ref": "#/$defs/material"},
+    "battery": {"$ref": "#/$defs/battery"},
+    "boundary": {"$ref": "#/$defs/boundary"},
+    "solver": {"$ref": "#/$defs/solver"}
+  },
+  "$defs": {
+    "quantity": {"oneOf": [{"type": "number"}, {"type": "string", "minLength": 2}]},
+    "pointMm": {
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}],
+      "items": false
+    },
+    "enclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "width_x", "length_y", "height_z", "outline_polygon_mm", "notch", "label_24mm_status"],
+      "properties": {
+        "profile": {"enum": ["pptx_measured_v1", "paper_fig8_digitized"]},
+        "width_x": {"$ref": "#/$defs/quantity"},
+        "length_y": {"$ref": "#/$defs/quantity"},
+        "height_z": {"$ref": "#/$defs/quantity"},
+        "outline_polygon_mm": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pointMm"},
+          "minItems": 22,
+          "maxItems": 24
+        },
+        "notch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mouth", "inner", "depth", "columns"],
+          "properties": {
+            "mouth": {"$ref": "#/$defs/quantity"},
+            "inner": {"$ref": "#/$defs/quantity"},
+            "depth": {"$ref": "#/$defs/quantity"},
+            "columns": {
+              "type": "array",
+              "prefixItems": [{"const": 2}, {"const": 4}],
+              "items": false
+            }
+          }
+        },
+        "label_24mm_status": {"type": "string"}
+      }
+    },
+    "cells": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "diameter", "length", "topology", "placement_profile", "column_pitch_x", "row_pitch_y", "stagger_offset_y", "left_wall_clearance", "five_cell_column_first_y", "paper_nominal_surface_gap", "regular_triangular_alternative_pitch_x"],
+      "properties": {
+        "count": {"const": 23},
+        "diameter": {"$ref": "#/$defs/quantity"},
+        "length": {"$ref": "#/$defs/quantity"},
+        "topology": {"const": "staggered_5_4_5_4_5"},
+        "placement_profile": {"type": "string"},
+        "column_pitch_x": {"$ref": "#/$defs/quantity"},
+        "row_pitch_y": {"$ref": "#/$defs/quantity"},
+        "stagger_offset_y": {"$ref": "#/$defs/quantity"},
+        "left_wall_clearance": {"$ref": "#/$defs/quantity"},
+        "five_cell_column_first_y": {"$ref": "#/$defs/quantity"},
+        "paper_nominal_surface_gap": {"$ref": "#/$defs/quantity"},
+        "regular_triangular_alternative_pitch_x": {"$ref": "#/$defs/quantity"}
+      }
+    },
+    "ports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inlet_diameter", "outlet_diameter", "external_length", "inlet_face", "outlet_face", "inlet_center_xy_mm", "outlet_center_xy_mm", "placement", "inlet_column", "inlet_column_options", "placement_options", "center_source"],
+      "properties": {
+        "inlet_diameter": {"$ref": "#/$defs/quantity"},
+        "outlet_diameter": {"$ref": "#/$defs/quantity"},
+        "external_length": {"$ref": "#/$defs/quantity"},
+        "inlet_face": {"const": "top"},
+        "outlet_face": {"const": "bottom"},
+        "inlet_center_xy_mm": {"$ref": "#/$defs/pointMm"},
+        "outlet_center_xy_mm": {"$ref": "#/$defs/pointMm"},
+        "placement": {"enum": ["end_cell_center", "corner_4mm_clearance"]},
+        "inlet_column": {"enum": [1, 5]},
+        "inlet_column_options": {"const": [5, 1]},
+        "placement_options": {"const": ["end_cell_center", "corner_4mm_clearance"]},
+        "center_source": {"type": "string"}
+      }
+    },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "density", "specific_heat", "thermal_conductivity", "dynamic_viscosity"],
+      "properties": {
+        "name": {"type": "string"},
+        "density": {"$ref": "#/$defs/quantity"},
+        "specific_heat": {"$ref": "#/$defs/quantity"},
+        "thermal_conductivity": {"$ref": "#/$defs/quantity"},
+        "dynamic_viscosity": {"$ref": "#/$defs/quantity"}
+      }
+    },
+    "heatSource": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["constant_qvol", "table_qvol", "electrical_joule"]},
+        "qvol": {"$ref": "#/$defs/quantity"},
+        "table_path": {"type": "string"},
+        "current_profile_path": {"type": "string"},
+        "resistance_profile_path": {"type": "string"},
+        "outside_policy": {"enum": ["hold", "error"]}
+      }
+    },
+    "battery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["density", "specific_heat", "thermal_conductivity", "initial_temperature", "heat_source", "electrical_metadata"],
+      "properties": {
+        "density": {"$ref": "#/$defs/quantity"},
+        "specific_heat": {"$ref": "#/$defs/quantity"},
+        "thermal_conductivity": {"$ref": "#/$defs/quantity"},
+        "initial_temperature": {"$ref": "#/$defs/quantity"},
+        "heat_source": {"$ref": "#/$defs/heatSource"},
+        "electrical_metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nominal_voltage", "capacity", "discharge_rate_c"],
+          "properties": {
+            "nominal_voltage": {"$ref": "#/$defs/quantity"},
+            "capacity": {"$ref": "#/$defs/quantity"},
+            "discharge_rate_c": {"type": "number", "exclusiveMinimum": 0}
+          }
+        }
+      }
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inlet_velocity", "inlet_temperature", "turbulence_intensity", "outlet_absolute_pressure", "pressure_reference_absolute", "initial_fluid_temperature", "initial_solid_temperature", "outer_wall_thermal", "gravity"],
+      "properties": {
+        "inlet_velocity": {"$ref": "#/$defs/quantity"},
+        "inlet_temperature": {"$ref": "#/$defs/quantity"},
+        "turbulence_intensity": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "outlet_absolute_pressure": {"$ref": "#/$defs/quantity"},
+        "pressure_reference_absolute": {"$ref": "#/$defs/quantity"},
+        "initial_fluid_temperature": {"$ref": "#/$defs/quantity"},
+        "initial_solid_temperature": {"$ref": "#/$defs/quantity"},
+        "outer_wall_thermal": {"type": "string"},
+        "gravity": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}], "items": false}
+      }
+    },
+    "solver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["distribution", "version", "energy_field", "steady_algorithm", "transient_algorithm", "turbulence_model", "full_transient_validation"],
+      "properties": {
+        "distribution": {"const": "OpenCFD"},
+        "version": {"const": "v2512"},
+        "energy_field": {"type": "string"},
+        "steady_algorithm": {"const": "SIMPLE"},
+        "transient_algorithm": {"const": "PIMPLE"},
+        "turbulence_model": {"const": "kOmegaSST"},
+        "full_transient_validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mesh_scope", "expose_in_gui", "max_courant", "min_outer_correctors", "require_delta_t_half_comparison"],
+          "properties": {
+            "mesh_scope": {"const": "coarse_only"},
+            "expose_in_gui": {"const": false},
+            "max_courant": {"type": "number", "exclusiveMinimum": 0, "maximum": 5},
+            "min_outer_correctors": {"type": "integer", "minimum": 3},
+            "require_delta_t_half_comparison": {"const": true}
+          }
+        }
+      }
+    }
+  }
+}

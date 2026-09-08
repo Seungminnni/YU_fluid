@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.venv/
+venv/
+env/
+node_modules/
+*.egg-info/
+build/
+dist/
+tmp/
+
+# Local configuration and generated logs
+.env
+.env.*
+*.log
+
+# Generated archives are release artifacts, not source files
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# Local research and design documents
+document/
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
