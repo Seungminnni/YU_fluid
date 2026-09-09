@@ -19,7 +19,9 @@ The precision result is preserved under the historical directory
 and is not exposed as a user-facing calculation level. The active production
 generator accepts one profile only: `single`. It never labels target counts as
 measured counts, and it never displays precision-mesh fields as standard-mesh
-results.
+results. The superseded L0, L1 and L2 production directories were removed after
+their validation summaries were consolidated; only the precision result and
+the active standard calculation are retained.
 
 Exact provenance for the preserved result:
 
