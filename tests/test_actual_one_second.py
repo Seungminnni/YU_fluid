@@ -62,10 +62,18 @@ class ActualOneSecondTests(unittest.TestCase):
                     "xz15", "xz33", "xz50", "xz68", "xz85", "cell_surface",
                 )
             }
-            with patch("cfd_twin.actual_one_second._probe_specs", return_value=specs):
+            with (
+                patch("cfd_twin.actual_one_second._probe_specs", return_value=specs),
+                patch(
+                    "cfd_twin.actual_one_second._mesh_identity",
+                    return_value=("single", 216_577),
+                ),
+            ):
                 manifest = build_actual_one_second_bundle(
                     root, root / "output", initial_temperature_k=293.15, end_time_s=2
                 )
+            self.assertEqual(manifest["mesh_level"], "single")
+            self.assertEqual(manifest["mesh_cell_count"], 216_577)
             self.assertFalse(manifest["temporal_interpolation"])
             self.assertFalse(manifest["spatial_interpolation"])
             self.assertFalse(manifest["padding"])

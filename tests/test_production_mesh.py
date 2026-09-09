@@ -227,6 +227,7 @@ class ProductionMeshTests(unittest.TestCase):
                 config, cad, output, mesh_level="single"
             )
             snappy = (output / "system" / "snappyHexMeshDict").read_text()
+            block_mesh = (output / "system" / "blockMeshDict").read_text()
             allmesh = (output / "AllmeshProduction").read_text()
             fallback = (
                 output / "system" / "topoSetDict.batteryZonesFallback"
@@ -258,6 +259,8 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("allowFreeStandingZoneFaces false;", snappy)
             self.assertIn("outerDomain\n        {\n            level (1 2);", snappy)
             self.assertIn("battery_C01\n        {\n            level (0 1);", snappy)
+            self.assertIn("battery_C11\n        {\n            level (0 1);", snappy)
+            self.assertIn("(-0.005 -0.005 -0.037)", block_mesh)
             self.assertIn("addLayers       true", snappy)
             self.assertIn('"battery_C[0-9][0-9]_slave"', snappy)
             self.assertIn("nSurfaceLayers 10;", snappy)
@@ -273,6 +276,10 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("nFaceSplitInterval 5;", snappy)
             self.assertIn("nSmoothInternal    10;", snappy)
             self.assertIn("nGrow                   0;", snappy)
+            self.assertIn("featureAngle            60;", snappy)
+            self.assertIn("maxFaceThicknessRatio   0.5;", snappy)
+            self.assertIn("maxThicknessToMedialRatio 0.3;", snappy)
+            self.assertIn("nBufferCellsNoExtrude   1;", snappy)
             self.assertIn("detectExtrusionIsland   true;", snappy)
             self.assertIn("additionalReporting     true;", snappy)
             self.assertIn("errorReduction 0.75;", snappy)
@@ -285,12 +292,24 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("--expected-target-layers 10", allmesh)
             self.assertIn("decomposePar -case", allmesh)
             self.assertIn("snappyHexMesh -case \"$case_dir\" -parallel", allmesh)
+            self.assertIn('if [ "$mesh_mpi_ranks" -eq 1 ]', allmesh)
+            self.assertIn('snappyHexMesh -case "$case_dir" -overwrite', allmesh)
             self.assertIn("reconstructParMesh -case", allmesh)
             self.assertIn("topoSetDict.coolantZone", allmesh)
+            self.assertIn("topoSetDict.batteryCore", allmesh)
+            self.assertIn("refineMeshDict.batteryCore", allmesh)
+            self.assertIn("refineMesh -case", allmesh)
+            self.assertIn('rm -f "$case_dir/0/polyMesh/cellMap"', allmesh)
+            self.assertIn('if [ -f "$case_dir/0/polyMesh/points" ]', allmesh)
+            self.assertIn("--minimum-layer-coverage 0.75", allmesh)
+            self.assertIn("--minimum-thickness-fraction 0.45", allmesh)
             self.assertIn('topoSet -case "$case_dir" -constant -dict system/topoSetDict.ports', allmesh)
             self.assertIn('rm -f "$case_dir/0/nSurfaceLayers"', allmesh)
+            self.assertIn('"$case_dir/0/cellLevel"', allmesh)
+            self.assertIn('"$case_dir/0/pointLevel"', allmesh)
             self.assertIn("--mesh-dir \"$case_dir/constant/polyMesh\"", allmesh)
             self.assertIn("validate_interfaces.py", allmesh)
+            self.assertIn("--geometry-tolerance 0.06", allmesh)
             self.assertIn("interfaces_post_split.json", allmesh)
             self.assertIn("checkMesh_pre_split_diagnostic.log", allmesh)
             self.assertIn("checkMesh_all_regions_extended_audit.log", allmesh)
@@ -333,7 +352,7 @@ class ProductionMeshTests(unittest.TestCase):
                 (output / "compose.yaml").read_text(),
             )
             self.assertIn(
-                'OPENFOAM_MPI_RANKS: "${OPENFOAM_MPI_RANKS:-10}"',
+                'OPENFOAM_MESH_MPI_RANKS: "${OPENFOAM_MESH_MPI_RANKS:-1}"',
                 (output / "compose.yaml").read_text(),
             )
             self.assertTrue((output / "AllcontinueSteadyPilot").is_file())
@@ -369,6 +388,7 @@ class ProductionMeshTests(unittest.TestCase):
                 decompose,
             )
             self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], 10)
+            self.assertEqual(manifest["parallel_execution"]["default_mesh_mpi_ranks"], 1)
             coolant_zone = (output / "system" / "topoSetDict.coolantZone").read_text()
             self.assertEqual(coolant_zone.count("source zoneToCell;"), 23)
             self.assertIn("source setToCellZone;", coolant_zone)
@@ -504,6 +524,10 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("writeFormat binary;", frozen_control)
             self.assertIn("writeCompression on;", frozen_control)
             self.assertIn("writeInterval 1800;", actual_control)
+            self.assertEqual(actual_control.count("type writeObjects;"), 2)
+            self.assertIn("dynamic_coolant_temperature", actual_control)
+            self.assertIn("dynamic_batterySolid_temperature", actual_control)
+            self.assertIn("fields (T);", actual_control)
             self.assertIn("actual_xy_temperature_1s", actual_control)
             self.assertIn("actual_xy15_temperature_1s", actual_control)
             self.assertIn("actual_xy85_temperature_1s", actual_control)
@@ -549,6 +573,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("COLD_FLOW_VALIDATION_PASSED", frozen_script)
             self.assertIn("STEADY_CHT_VALIDATION_PASSED", frozen_script)
             self.assertIn("validate_frozen_flow.py", frozen_script)
+            self.assertIn("--field-interval 1", frozen_script)
             self.assertIn("extract_transient_residuals.py", full_actual_script)
             self.assertIn("transient_residuals.csv", full_actual_script)
             self.assertTrue((output / "tools/extract_transient_residuals.py").is_file())

@@ -33,7 +33,9 @@ CURRENT_PRECISION_MESH = {
 }
 
 
-def _mesh_runs_payload(case: Path, *, precision_data_ready: bool) -> list[dict[str, object]]:
+def _mesh_runs_payload(
+    case: Path, *, precision_data_ready: bool, standard_data_ready: bool = False
+) -> list[dict[str, object]]:
     """Describe selectable datasets without assigning one mesh's fields to another."""
 
     precision = dict(CURRENT_PRECISION_MESH)
@@ -73,12 +75,18 @@ def _mesh_runs_payload(case: Path, *, precision_data_ready: bool) -> list[dict[s
         },
         {
             "id": "single",
-            "label": "표준 계산 · 목표 207,390셀",
-            "state_label": "메시 검증 완료" if mesh_ready else "계산 전",
+            "label": (
+                f"표준 계산 · {int(target_actual['total_cells']):,}셀"
+                if mesh_ready and target_actual
+                else "표준 계산 · 목표 207,390셀"
+            ),
+            "state_label": (
+                "계산 완료"
+                if standard_data_ready
+                else ("메시 검증 완료" if mesh_ready else "계산 전")
+            ),
             "mesh_ready": mesh_ready,
-            # No single-profile field loader exists until that calculation has
-            # produced its own validated result package. Never reuse precision.
-            "data_ready": False,
+            "data_ready": standard_data_ready,
             "counts": target_actual or {
                 "total_cells": SINGLE_MESH_TARGET_COUNTS["total_cells"],
                 "fluid_cells": SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
@@ -86,9 +94,15 @@ def _mesh_runs_payload(case: Path, *, precision_data_ready: bool) -> list[dict[s
                 "points": SINGLE_MESH_TARGET_COUNTS["points"],
             },
             "counts_are_targets": not mesh_ready,
-            "element_family": "hexa-dominant target (≥80% hexahedra)",
+            "element_family": (
+                f"hexa-dominant body-fitted ({100 * float(target_actual['hexahedron_fraction']):.3f}% hexahedra)"
+                if mesh_ready and target_actual
+                else "hexa-dominant target (≥80% hexahedra)"
+            ),
             "note": (
-                "새 단일 계산 프로파일입니다. 자체 CFD 필드가 생성되기 전에는 "
+                "0–1800 s 직접 결과가 연결된 표준 메시입니다."
+                if standard_data_ready
+                else "새 단일 계산 프로파일입니다. 자체 CFD 필드가 생성되기 전에는 "
                 "정밀 결과를 대신 표시하지 않습니다."
             ),
         },
@@ -99,6 +113,8 @@ def _convergence_payload(case: Path) -> dict[str, object]:
     """Extract a compact, truthful residual history for the browser."""
 
     transient_candidates = (
+        case
+        / "production/single/runs/frozen_flow_actual_1s/reports/solver/transient_residuals.csv",
         case
         / "production/single/runs/full_transient_actual_1s/reports/solver/transient_residuals.csv",
         case
@@ -145,7 +161,11 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         if summary_path.is_file():
             transient_summary = json.loads(summary_path.read_text(encoding="utf-8"))
             source_logs.append(str(summary_path.relative_to(case)))
-        axis_mode = "cumulative_pimple_outer_iteration"
+        axis_mode = (
+            "transient_time_step_iteration"
+            if "frozen_flow_actual_1s" in transient_residual_path.parts
+            else "cumulative_pimple_outer_iteration"
+        )
         scope = (
             "새 표준 결과 · 전체 과도 CHT 계산"
             if "single" in transient_residual_path.parts
@@ -273,6 +293,10 @@ def _convergence_payload(case: Path) -> dict[str, object]:
             "the transient iteration structure of the ANSYS reference. Residual "
             "values remain raw OpenFOAM residuals, not Fluent scaled residuals."
             if axis_mode == "cumulative_pimple_outer_iteration"
+            else "The x-axis is the one-second transient energy-solve index. The "
+            "validated velocity/pressure solution was completed separately and held "
+            "fixed because this constant-property, zero-gravity model is one-way CHT."
+            if axis_mode == "transient_time_step_iteration"
             else "The completed current result uses the OpenFOAM steady outer-"
             "iteration number. A new full-transient result will use the cumulative "
             "PIMPLE outer-correction axis."
@@ -286,11 +310,11 @@ def _convergence_payload(case: Path) -> dict[str, object]:
 
 
 def _direct_precision_xy_velocity_cut(
-    config: ResolvedConfig, case: Path
+    config: ResolvedConfig, case: Path, *, production_profile: str = "L3"
 ) -> dict[str, object] | None:
-    """Return the precision-mesh cell-centred XY cut without interpolation."""
+    """Return a selected mesh's cell-centred XY cut without interpolation."""
 
-    foam_file = case / "production/L3/runs/steady_cht/steady_cht.foam"
+    foam_file = case / f"production/{production_profile}/runs/steady_cht/steady_cht.foam"
     run_dir = foam_file.parent
     if not foam_file.is_file():
         return None
@@ -365,7 +389,7 @@ def _direct_precision_xy_velocity_cut(
     )
     speeds = np.linalg.norm(vtk_to_numpy(velocity), axis=1)
     return {
-        "source": "precision steady_cht cell-centred U on the Z-centre vtkCutter plane",
+        "source": f"{production_profile} steady_cht cell-centred U on the Z-centre vtkCutter plane",
         "time": latest_time,
         "interpolation": "none; one containing OpenFOAM cell value per cut triangle",
         "points_xy_mm": np.round(points, 4).tolist(),
@@ -818,22 +842,31 @@ def _interactive_legacy_cfd_payload(
 
 
 def _interactive_actual_cfd_payload(
-    config: ResolvedConfig, case: Path, *, enabled: bool
+    config: ResolvedConfig,
+    case: Path,
+    *,
+    enabled: bool,
+    mesh_id: str = "precision",
 ) -> dict[str, object] | None:
-    """Build the browser payload from completed precision-result samples."""
+    """Build the browser payload from a completed, validated result package."""
 
     if not enabled:
         return None
-    runs_root = case / "production/L3/runs"
+    if mesh_id not in {"precision", "single"}:
+        raise ValueError(f"unsupported viewer mesh id: {mesh_id}")
+    production_profile = "L3" if mesh_id == "precision" else "single"
+    mesh_label = "precision" if mesh_id == "precision" else "standard"
+    runs_root = case / f"production/{production_profile}/runs"
     upgraded_run = runs_root / "frozen_flow_actual_1s_xy5"
-    run = (
-        upgraded_run
-        if (upgraded_run / "reports/viewer/actual_1s_manifest.json").is_file()
-        else runs_root / "frozen_flow_actual_1s"
-    )
+    run = runs_root / "frozen_flow_actual_1s"
+    if (
+        mesh_id == "precision"
+        and (upgraded_run / "reports/viewer/actual_1s_manifest.json").is_file()
+    ):
+        run = upgraded_run
     manifest_path = run / "reports/viewer/actual_1s_manifest.json"
     validation_path = run / "reports/viewer/actual_1s_validation.json"
-    foam_file = case / "production/L3/runs/steady_cht/steady_cht.foam"
+    foam_file = runs_root / "steady_cht/steady_cht.foam"
     if (
         not manifest_path.is_file()
         or not validation_path.is_file()
@@ -966,7 +999,7 @@ def _interactive_actual_cfd_payload(
         "inlet_area_average_pressure_pa": inlet_pressure,
         "outlet_area_average_pressure_pa": outlet_pressure,
         "pressure_drop_pa": inlet_pressure - outlet_pressure,
-        "spatial_field_semantics": "validated precision-mesh fixed field U(x), p(x)",
+        "spatial_field_semantics": f"validated {mesh_label}-mesh fixed field U(x), p(x)",
     }
 
     backend = OpenFoamResultReader(foam_file)
@@ -1078,7 +1111,7 @@ def _interactive_actual_cfd_payload(
             "velocity_m_s": velocity_magnitudes,
             "velocity_vectors_m_s": velocity_vectors,
             "velocity_range_m_s": [0.0, max(valid_velocity)],
-            "spatial_sampling": "direct containing precision-mesh cell; no interpolation or padding",
+            "spatial_sampling": f"direct containing {mesh_label}-mesh cell; no interpolation or padding",
         }
 
     datasets = json.loads(json.dumps(manifest["datasets"]))
@@ -1089,9 +1122,9 @@ def _interactive_actual_cfd_payload(
     return {
         "enabled": True,
         "semantics": (
-            "precision-result OpenFOAM containing-cell T samples at every integer second; "
+            f"{mesh_label}-result OpenFOAM containing-cell T samples at every integer second; "
             "no temporal interpolation, spatial interpolation, display correction, or padding. "
-            "Moving heads follow the validated fixed precision-result U(x)."
+            f"Moving heads follow the validated fixed {mesh_label}-result U(x)."
         ),
         "temperature_display_offset_c": 0.0,
         "temperature_display_semantics": "raw solver kelvin converted only by subtracting 273.15",
@@ -1155,7 +1188,9 @@ def _interactive_actual_cfd_payload(
         "minimum_displayed_length_mm": min(float(path[4]) for path in selected),
         "maximum_displayed_length_mm": max(float(path[4]) for path in selected),
         "sections": sections,
-        "direct_xy_velocity": _direct_precision_xy_velocity_cut(config, case),
+        "direct_xy_velocity": _direct_precision_xy_velocity_cut(
+            config, case, production_profile=production_profile
+        ),
         "horizontal_section_keys": ["xy15", "xy33", "xy", "xy68", "xy85"],
         "vertical_section_keys": ["xz15", "xz33", "xz50", "xz68", "xz85"],
     }
@@ -1623,10 +1658,12 @@ const sceneStage = document.querySelector(".scene-stage");
 const overlayCanvas = document.getElementById("scene-overlay");
 const overlayCtx = overlayCanvas.getContext("2d");
 const viewerControls = document.querySelector(".viewer-controls");
-const flow = model.interactive_cfd || {enabled:false};
+const meshRuns=model.mesh_runs||[];
+const requestedMeshRun=initialParams.get("mesh");
+let activeMeshRunId=meshRuns.some(run=>run.id===requestedMeshRun)?requestedMeshRun:(meshRuns.find(run=>run.data_ready)?.id||meshRuns[0]?.id||"precision");
+const flow=(model.interactive_cfd_by_mesh||{})[activeMeshRunId]||model.interactive_cfd||{enabled:false};
 const temperatureGraphs=flow.temperature_graphs||null;
 const convergence=model.convergence||{available:false};
-const meshRuns=model.mesh_runs||[];
 const meshRunSelect=document.getElementById("mesh-run-select");
 const meshRunDetail=document.getElementById("mesh-run-detail");
 const meshRunNote=document.getElementById("mesh-run-note");
@@ -1672,8 +1709,6 @@ const optionInputs={
 };
 let yaw = 2.18, pitch = 0.52, zoom = 1, dragging = false, lastX = 0, lastY = 0;
 let highlightedCellId=null,cellHighlightTimer=null,cellExtremaCache={frame:-1,value:null};
-const requestedMeshRun=initialParams.get("mesh");
-let activeMeshRunId=meshRuns.some(run=>run.id===requestedMeshRun)?requestedMeshRun:(meshRuns.find(run=>run.data_ready)?.id||meshRuns[0]?.id||"precision");
 const requestedMode=initialParams.get("mode");
 if(requestedMode){const requestedInput=modeInputs.find(input=>input.value===requestedMode);if(requestedInput){for(const input of modeInputs)input.checked=input===requestedInput;}}
 const requestedTime=Number(initialParams.get("t"));
@@ -2333,14 +2368,14 @@ function drawScene(){
   ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,canvas.width,canvas.height);ctx.restore();
   const w=canvas.clientWidth,h=canvas.clientHeight;
   const meshRun=activeMeshRun();
-  if(meshRun?.id==="single"&&!meshRun.data_ready){
+  if(meshRun&&!meshRun.data_ready){
     ctx.fillStyle="#0c1721";ctx.fillRect(0,0,w,h);
     ctx.textAlign="center";ctx.fillStyle="rgba(99,215,229,.98)";ctx.font="800 18px system-ui";
-    ctx.fillText("표준 207,390셀 계산 프로파일",w/2,h/2-34);
+    ctx.fillText(meshRun.label,w/2,h/2-34);
     ctx.fillStyle="rgba(232,242,250,.92)";ctx.font="650 13px system-ui";
     ctx.fillText(meshRun.mesh_ready?"메시는 생성됐지만 CFD 결과 필드는 아직 없습니다.":"메시 및 CFD 계산 전입니다.",w/2,h/2-5);
     ctx.fillStyle="rgba(145,168,188,.95)";ctx.font="600 11px system-ui";
-    ctx.fillText("정밀 1,316,854셀 결과를 이 옵션에 대신 표시하지 않습니다.",w/2,h/2+21);
+    ctx.fillText("다른 메시의 결과를 이 옵션에 대신 표시하지 않습니다.",w/2,h/2+21);
     ctx.textAlign="left";return;
   }
   const basis=cameraBasis(), scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
@@ -2656,11 +2691,11 @@ function renderActiveMeshRun(){
   });
   meshRunNote.textContent=run.note;
   const waiting=run.data_ready===false;
-  document.getElementById("status").textContent=waiting?`${run.label} · ${run.state_label}`:(actualOneSecond?"계산 완료 · 정밀 결과 · 1초 단위":model.status_label);
+  document.getElementById("status").textContent=waiting?`${run.label} · ${run.state_label}`:(actualOneSecond?`계산 완료 · ${run.label} · 1초 단위`:model.status_label);
   document.getElementById("result-badge").textContent=waiting?run.state_label:(model.actual_solver_data?"계산 완료":"준비 중");
   document.getElementById("calculation-summary").innerHTML=waiting
     ?`<strong>${run.label}</strong> · 자체 CFD 결과 없음`
-    :(model.actual_solver_data?`<strong>정밀 CFD 결과</strong> · ${(actualOneSecond?.mesh_cell_count||counts.total_cells).toLocaleString()} cells · 0–1800 s`:model.calculation_summary);
+    :`<strong>${run.label}</strong> · ${(actualOneSecond?.mesh_cell_count||counts.total_cells).toLocaleString()} cells · 0–1800 s`;
   document.getElementById("calculation-note").textContent=waiting?run.note:model.calculation_note;
   document.getElementById("calculation-card").classList.toggle("validated",model.actual_solver_data&&!waiting);
   flowPlay.disabled=waiting||!flow.enabled;flowSeek.disabled=waiting||!flow.enabled;
@@ -2671,9 +2706,8 @@ if(meshRuns.length){
   meshRunSelect.value=activeMeshRunId;
   meshRunSelect.addEventListener("change",()=>{
     activeMeshRunId=meshRunSelect.value;
-    if(activeMeshRun()?.data_ready===false){flowPlaying=false;flowPlay.textContent="▶ 재생";}
-    const url=new URL(window.location.href);url.searchParams.set("mesh",activeMeshRunId);history.replaceState(null,"",url);
-    renderActiveMeshRun();
+    const url=new URL(window.location.href);url.searchParams.set("mesh",activeMeshRunId);url.searchParams.set("autoplay","0");
+    window.location.assign(url.toString());
   });
 }else{document.querySelector(".mesh-run-card").hidden=true;}
 rows(document.getElementById("geometry"),{"해석 영역":`${box.x} × ${box.y} × ${box.z} mm`,"배터리":`${model.cells.length}개 · Ø${model.cell_diameter_mm} × ${model.cell_length_mm} mm`,"입·출구":`각 Ø${model.port_diameter_mm} mm`,"셀 배열":"5–4–5–4–5 교차 배열"});
@@ -2885,8 +2919,8 @@ function paintConvergenceChart(context,width,height){
     });
     context.stroke();context.globalAlpha=1;
   }
-  const transientAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration";
-  const axisLabel=transientAxis?"누적 PIMPLE 전역 반복 횟수":"OpenFOAM 외부 반복 횟수";
+  const pimpleAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration",timeStepAxis=convergence.axis_mode==="transient_time_step_iteration";
+  const axisLabel=pimpleAxis?"누적 PIMPLE 전역 반복 횟수":timeStepAxis?"1초 과도 에너지 반복 횟수":"OpenFOAM 외부 반복 횟수";
   context.fillStyle="#dcecf7";context.font="700 12px system-ui";context.textAlign="center";context.fillText(axisLabel,left+plotWidth/2,height-16);
   context.save();context.translate(18,top+plotHeight/2);context.rotate(-Math.PI/2);context.fillText("Initial residual / |global continuity|",0,0);context.restore();
 }
@@ -2897,11 +2931,11 @@ function drawConvergenceChart(){
   convergenceChartCanvas.width=Math.round(rect.width*ratio);convergenceChartCanvas.height=Math.round(rect.height*ratio);
   const context=convergenceChartCanvas.getContext("2d");context.setTransform(ratio,0,0,ratio,0,0);
   paintConvergenceChart(context,rect.width,rect.height);
-  const transientAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration";
-  const iterationLabel=transientAxis?"누적 PIMPLE 전역 반복":"정상상태 외부 반복";
+  const pimpleAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration",timeStepAxis=convergence.axis_mode==="transient_time_step_iteration",transientAxis=pimpleAxis||timeStepAxis;
+  const iterationLabel=pimpleAxis?"누적 PIMPLE 전역 반복":timeStepAxis?"1초 과도 에너지 반복":"정상상태 외부 반복";
   const linearTotal=convergence.linear_iteration_total?` · 방정식 내부 선형 반복 합계 ${convergence.linear_iteration_total.toLocaleString()}회`:"";
   const timeRange=transientAxis&&Number.isFinite(convergence.last_time_s)?` · 물리시간 ${Number(convergence.first_time_s||0).toLocaleString()}–${Number(convergence.last_time_s).toLocaleString()} s`:"";
-  const comparison=transientAxis?" · ANSYS와 누적 반복 구조 대응 · 잔차값은 OpenFOAM 원본":" · 새 과도 계산부터 ANSYS형 누적 PIMPLE 축 적용";
+  const comparison=pimpleAxis?" · ANSYS와 누적 반복 구조 대응 · 잔차값은 OpenFOAM 원본":timeStepAxis?" · 속도·압력은 선행 수렴 후 고정 · OpenFOAM 원본 잔차":"";
   convergenceChartStatus.textContent=`${convergence.scope} · ${iterationLabel} ${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회${timeRange}${linearTotal}${comparison}`;
 }
 convergenceChartOpen.addEventListener("click",()=>{
@@ -2920,15 +2954,15 @@ convergenceChartPng.addEventListener("click",()=>{
 });
 convergenceChartCsv.addEventListener("click",()=>{
   const series=convergence.series||[],iterations=[...new Set(series.flatMap(line=>line.points.map(point=>point[0])))].sort((a,b)=>a-b);
-  const axisHeader=convergence.axis_mode==="cumulative_pimple_outer_iteration"?"cumulative_pimple_global_iteration":"openfoam_outer_iteration";
+  const axisHeader=convergence.axis_mode==="cumulative_pimple_outer_iteration"?"cumulative_pimple_global_iteration":convergence.axis_mode==="transient_time_step_iteration"?"transient_energy_iteration":"openfoam_outer_iteration";
   const maps=series.map(line=>new Map(line.points)),lines=[[axisHeader,...series.map(line=>line.key)].map(csvValue).join(",")];
   for(const iteration of iterations)lines.push([iteration,...maps.map(values=>values.get(iteration)??"")].map(csvValue).join(","));
   downloadBlob(new Blob(["\ufeff",lines.join("\n")],{type:"text/csv;charset=utf-8"}),"cfd-residual-convergence.csv");
 });
 if(convergence.available){
-  const transientAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration";
+  const pimpleAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration",timeStepAxis=convergence.axis_mode==="transient_time_step_iteration";
   const summaryRows={"상태":convergence.configured_residual_checks_passed?"수렴 기준 통과":"원본 로그 저장","계산 단계":convergence.scope};
-  summaryRows[transientAxis?"누적 PIMPLE 반복":"정상상태 외부 반복"]=`${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회`;
+  summaryRows[pimpleAxis?"누적 PIMPLE 반복":timeStepAxis?"1초 에너지 반복":"정상상태 외부 반복"]=`${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회`;
   if(convergence.linear_iteration_total)summaryRows["방정식 내부 반복 합계"]=`${convergence.linear_iteration_total.toLocaleString()}회`;
   rows(convergenceSummary,summaryRows);
 }else{convergenceChartOpen.disabled=true;convergenceSummary.innerHTML="<dt>상태</dt><dd>로그 없음</dd>";}
@@ -3174,51 +3208,44 @@ def write_viewer_bundle(
             "입구 열 배정은 A-04 기본 가정입니다."
         )
         calculation_note = "이 화면의 색은 셀 구분용이며 온도장이 아닙니다."
-    interactive_cfd = _interactive_cfd_payload(
+    payload_case = case if case is not None else Path(".")
+    precision_cfd = _interactive_actual_cfd_payload(
         config,
-        case if case is not None else Path("."),
+        payload_case,
         enabled=actual_solver_data and case is not None,
+        mesh_id="precision",
+    )
+    if precision_cfd is None:
+        precision_cfd = _interactive_legacy_cfd_payload(
+            config,
+            payload_case,
+            enabled=actual_solver_data and case is not None,
+        )
+    standard_cfd = _interactive_actual_cfd_payload(
+        config,
+        payload_case,
+        enabled=case is not None,
+        mesh_id="single",
+    )
+    interactive_cfd_by_mesh = {
+        mesh_id: payload
+        for mesh_id, payload in (
+            ("precision", precision_cfd),
+            ("single", standard_cfd),
+        )
+        if payload is not None and payload.get("enabled")
+    }
+    interactive_cfd = interactive_cfd_by_mesh.get(
+        "precision", interactive_cfd_by_mesh.get("single", {"enabled": False})
     )
     actual_one_second = None
     if interactive_cfd.get("enabled"):
         actual_one_second = interactive_cfd.get("actual_one_second")
-        if actual_one_second and case is not None:
-            runs_root = case / "production/L3/runs"
-            upgraded_source = (
-                runs_root / "frozen_flow_actual_1s_xy5/reports/viewer"
-            )
-            source_dir = (
-                upgraded_source
-                if (upgraded_source / "actual_1s_manifest.json").is_file()
-                else runs_root / "frozen_flow_actual_1s/reports/viewer"
-            )
-            data_dir = output / "data"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            for name, specification in actual_one_second["datasets"].items():
-                source = source_dir / Path(specification["file"]).name
-                destination = data_dir / source.name
-                shutil.copy2(source, destination)
-                raw = source.read_bytes()
-                digest = hashlib.sha256(raw).hexdigest()
-                specification["file"] = f"data/{source.name}?v={digest[:12]}"
-                # Keep the file:// sidecar query-free: some desktop browsers treat
-                # a query string as part of a local filename. HTTP uses the hashed
-                # binary URL above and therefore retains cache busting.
-                specification["portable_file"] = f"data/{source.name}.js"
-                specification["sha256"] = digest
-                specification["byte_length"] = len(raw)
-                _atomic_write(
-                    data_dir / f"{source.name}.js",
-                    _portable_dataset_javascript(name, raw),
-                )
-            source_manifest = source_dir / "actual_1s_manifest.json"
-            shutil.copy2(source_manifest, data_dir / source_manifest.name)
-            source_validation = source_dir / "actual_1s_validation.json"
-            shutil.copy2(source_validation, data_dir / source_validation.name)
+        if actual_one_second:
             status = "PRECISION_ONE_SECOND_RESULTS_READY"
-            status_label = "정밀 결과 · 1 s 실제 셀값 · 20.000 °C 원본 · 보간/패딩 없음"
+            status_label = "CFD 결과 · 1 s 실제 셀값 · 20.000 °C 원본 · 보간/패딩 없음"
             calculation_summary = (
-                "<strong>정밀 CFD 계산 완료</strong> — 1,316,854셀, "
+                "<strong>CFD 계산 완료</strong> — 정밀/표준 메시 결과를 "
                 "t=0–1800 s를 1 s 간격으로 직접 저장했습니다."
             )
             quantization_error = float(
@@ -3249,9 +3276,54 @@ def write_viewer_bundle(
                 "time_mode": "transient_temperature_fixed_velocity",
             }
         )
+    if case is not None:
+        for mesh_id, payload in interactive_cfd_by_mesh.items():
+            packaged = payload.get("actual_one_second")
+            if not packaged:
+                continue
+            runs_root = case / (
+                "production/L3/runs"
+                if mesh_id == "precision"
+                else "production/single/runs"
+            )
+            upgraded_source = (
+                runs_root / "frozen_flow_actual_1s_xy5/reports/viewer"
+            )
+            source_dir = (
+                upgraded_source
+                if mesh_id == "precision"
+                and (upgraded_source / "actual_1s_manifest.json").is_file()
+                else runs_root / "frozen_flow_actual_1s/reports/viewer"
+            )
+            data_dir = output / "data" / mesh_id
+            data_dir.mkdir(parents=True, exist_ok=True)
+            for name, specification in packaged["datasets"].items():
+                source = source_dir / Path(specification["file"]).name
+                destination = data_dir / source.name
+                shutil.copy2(source, destination)
+                raw = source.read_bytes()
+                digest = hashlib.sha256(raw).hexdigest()
+                relative = destination.relative_to(output).as_posix()
+                specification["file"] = f"{relative}?v={digest[:12]}"
+                specification["portable_file"] = f"{relative}.js"
+                specification["sha256"] = digest
+                specification["byte_length"] = len(raw)
+                _atomic_write(
+                    data_dir / f"{source.name}.js",
+                    _portable_dataset_javascript(name, raw),
+                )
+            shutil.copy2(
+                source_dir / "actual_1s_manifest.json",
+                data_dir / "actual_1s_manifest.json",
+            )
+            shutil.copy2(
+                source_dir / "actual_1s_validation.json",
+                data_dir / "actual_1s_validation.json",
+            )
     mesh_runs = _mesh_runs_payload(
         case if case is not None else output / "__no_case__",
-        precision_data_ready=actual_solver_data,
+        precision_data_ready="precision" in interactive_cfd_by_mesh,
+        standard_data_ready="single" in interactive_cfd_by_mesh,
     )
     convergence = (
         _convergence_payload(case) if case is not None else {"available": False}
@@ -3262,6 +3334,7 @@ def write_viewer_bundle(
         "status_label": status_label,
         "actual_solver_data": actual_solver_data,
         "interactive_cfd": interactive_cfd,
+        "interactive_cfd_by_mesh": interactive_cfd_by_mesh,
         "mesh_runs": mesh_runs,
         "convergence": convergence,
         "calculation_summary": calculation_summary,

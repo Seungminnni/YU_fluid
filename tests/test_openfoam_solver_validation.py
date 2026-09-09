@@ -190,11 +190,12 @@ class ColdFlowValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             run = root / "run"
-            for time in range(0, 21, 5):
-                for region in ("coolant", "batterySolid"):
-                    field = run / str(time) / region / "T"
-                    field.parent.mkdir(parents=True, exist_ok=True)
-                    field.write_text("fixture", encoding="utf-8")
+            for processor in ("processor0", "processor1"):
+                for time in range(0, 21, 5):
+                    for region in ("coolant", "batterySolid"):
+                        field = run / processor / str(time) / region / "T"
+                        field.parent.mkdir(parents=True, exist_ok=True)
+                        field.write_text("fixture", encoding="utf-8")
 
             report = validate_frozen_flow(
                 log,
@@ -215,6 +216,10 @@ class ColdFlowValidationTests(unittest.TestCase):
             )
             self.assertEqual(
                 report["time_contract"]["missing_field_frame_times_s"], []
+            )
+            self.assertEqual(report["time_contract"]["processor_count"], 2)
+            self.assertEqual(
+                report["time_contract"]["decomposed_field_frame_count"], 5
             )
 
 

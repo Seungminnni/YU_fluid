@@ -117,6 +117,30 @@ def _probe_specs(run_dir: Path) -> dict[str, dict[str, object]]:
     return specs
 
 
+def _mesh_identity(run_dir: Path) -> tuple[str, int]:
+    """Read the executed mesh identity instead of stamping a legacy L3 count."""
+
+    case_dir = run_dir.parent.parent
+    manifest_path = case_dir / "production_mesh_manifest.json"
+    composition_path = (
+        case_dir / "reports/production_mesh/mesh_target_composition.json"
+    )
+    mesh_level = "unknown"
+    mesh_cell_count = 0
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        mesh_level = str(manifest.get("mesh_level", mesh_level))
+    if composition_path.is_file():
+        composition = json.loads(composition_path.read_text(encoding="utf-8"))
+        mesh_cell_count = int(composition.get("actual", {}).get("total_cells", 0))
+    if mesh_cell_count <= 0:
+        raise ValueError(
+            "executed mesh cell count is unavailable: "
+            f"{composition_path}"
+        )
+    return mesh_level, mesh_cell_count
+
+
 def build_actual_one_second_bundle(
     run_dir: str | Path,
     output_dir: str | Path,
@@ -127,6 +151,7 @@ def build_actual_one_second_bundle(
     run = Path(run_dir).resolve()
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    mesh_level, mesh_cell_count = _mesh_identity(run)
     specs = _probe_specs(run)
     probes: dict[str, ProbeFile] = {}
     dataset_ranges: dict[str, tuple[float, float]] = {}
@@ -204,8 +229,8 @@ def build_actual_one_second_bundle(
     manifest = {
         "schema_version": 1,
         "status": "ACTUAL_ONE_SECOND_SAMPLES_READY",
-        "mesh_level": "L3",
-        "mesh_cell_count": 1_316_854,
+        "mesh_level": mesh_level,
+        "mesh_cell_count": mesh_cell_count,
         "initial_temperature_k": initial_temperature_k,
         "initial_temperature_c": initial_temperature_k - 273.15,
         "times_s": {"start": 0, "end": end_time_s, "step": 1},

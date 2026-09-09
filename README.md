@@ -12,7 +12,7 @@ Two mesh records are intentionally kept separate:
 | Viewer option | State | Total cells | Fluid | Battery solid | Points | Mesh composition |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Precision result | Calculation and 0–1800 s replay complete | 1,316,854 | 1,061,438 | 255,416 | 1,403,119 | 1,245,779 hexahedra (94.603%), 14,981 prisms, 790 wedges, 1,005 tet-wedges, 54,299 polyhedra |
-| Standard calculation | Source prepared; calculation pending | target 207,390 | target 136,550 | target 70,840 | target 221,878 | hexa-dominant, at least 80% hexahedra |
+| Standard calculation | Calculation and 0–1800 s replay complete | 216,577 | 159,107 | 57,470 | 252,907 | 185,013 hexahedra (85.426%), 4,452 prisms, 301 wedges, 518 tet-wedges, 26,293 polyhedra |
 
 The precision result is preserved under the historical directory
 `build/case_validated/production/L3`; that directory name is provenance only
@@ -35,8 +35,10 @@ Exact provenance for the preserved result:
   `build/case_validated/production/L3/runs/frozen_flow_actual_1s_xy5/reports/viewer/actual_1s_validation.json`
 - New standard profile:
   `build/case_validated/production/single/production_mesh_manifest.json`
-- New measured count report, available after meshing:
+- New measured count report:
   `build/case_validated/production/single/reports/production_mesh/mesh_target_composition.json`
+- New 1-second thermal validation:
+  `build/case_validated/production/single/runs/frozen_flow_actual_1s/reports/solver/frozen_flow_validation.json`
 
 ## Geometry, mesh and physics
 
@@ -47,12 +49,19 @@ ports are Ø19 mm with 32 mm external lengths.
 The precision mesh used 2.4 mm background cells, battery surface refinement
 0/1, battery-interior refinement level 1, enclosure refinement 1/2, ten
 coolant-side prism layers, a 14 µm first layer, expansion ratio 1.2 and ten MPI
-ranks. The standard profile starts from a 5.0 mm background calibration with
-the same refinement layout, ten prism layers and a 15 µm first layer. Its mesh
+ranks. The standard profile uses a 5.0 mm background, battery-interior level
+1, ten prism layers and a 14 µm first layer. After body fitting, only the
+4 mm-radius battery cores (with 6 mm axial end clearance) are refined once;
+this raises solid resolution without modifying the paired CHT interface. The
+standard coarse-mesh layer gate records the measured C11 limitation explicitly
+and requires at least 75% surface coverage and 45% wanted thickness, followed
+by the mandatory solver-result y+ gate. Its mesh
 gate requires:
 
 - total cell count within 10% of 207,390;
 - fluid, solid and point counts within 20% of their targets;
+- each discrete battery interface area within 6% of the analytic cylinder area
+  (the paired coolant/solid areas must still match to numerical precision);
 - exact, exclusive coverage by the coolant and 23 cell zones;
 - at least 80% hexahedra;
 - passed topology, port-area, interface, prism-layer and volume checks.
@@ -81,20 +90,42 @@ Baseline calculation inputs:
 | Solver | OpenCFD OpenFOAM v2512 |
 
 The archived precision replay uses a converged fixed `U(x), p(x)` field and a
-time-varying conjugate temperature field. The new standard calculation uses
-full transient PIMPLE, adaptive `deltaT <= 0.1 s`, `maxCo = 5` and three outer
-correctors. Direct telemetry and compressed full fields are written at every
-integer second from 0 through 1,800 s, producing 1,801 display states without
-temporal interpolation. At an unchanged 0.1 s numerical step this corresponds
-to 18,000 time steps and 54,000 cumulative PIMPLE outer iterations; the actual
-log-derived count can be higher when the Courant limit reduces the time step.
+time-varying conjugate temperature field. The standard calculation does the
+same because this case uses constant density, viscosity and thermal properties
+with zero gravity: temperature cannot feed back into momentum, so repeatedly
+solving velocity would reproduce the same converged field. The coupled fluid
+and solid energy equations advance at 1 s physical steps. Direct telemetry and
+both regional temperature fields are written at every integer second from 0
+through 1,800 s; the validated static flow field is reused at each display
+state without temporal interpolation. A fully recomputed PIMPLE profile remains
+available for time-step sensitivity work, but its 14 µm prisms reduce the
+Courant-limited step to about 0.0034 s and make it unsuitable as the production
+path.
 
-The convergence graph uses raw OpenFOAM initial linear-solver residuals against
-the cumulative PIMPLE outer-correction number. This follows the iteration
-structure of a transient coupled solve, but the residual normalization is not
-renamed or rescaled to another solver's definition. Residual decrease, mass
-balance, energy balance, outlet stability, field bounds, prism coverage and y+
-remain separate acceptance checks.
+The convergence graph uses raw OpenFOAM initial linear-solver residuals. The
+standard result plots its 1,800 one-second energy iterations; the optional
+fully repeated profile uses cumulative PIMPLE outer corrections. Residuals are
+not renamed or rescaled to another solver's definition. Residual decrease,
+mass balance, energy balance, outlet stability, field bounds, prism coverage
+and y+ remain separate acceptance checks.
+
+Measured standard-result checks and final values:
+
+| Quantity | Result |
+| --- | ---: |
+| Cold-flow battery-wall y+ below 1 / p95 / mean | 95.320% / 0.9527 / 0.3736 |
+| Cold-flow mean pressure drop / maximum mass imbalance | 260.413 Pa / 2.804×10⁻⁸ |
+| 1,800 s outlet mass-weighted temperature | 20.015261 °C |
+| 1,800 s battery internal volume average | 20.106350 °C |
+| 1,800 s battery mesh maximum | 20.193303 °C (C05) |
+| 1,800 s battery surface area average | 20.098967 °C |
+| Final-window mean energy imbalance | 0.018936% |
+| Transient vs steady Tavg / Tmax difference | −0.000579 K / +0.001887 K |
+
+The mesh, cold-flow, steady CHT, 1-second transient storage and browser bundle
+all pass their configured gates. These values are OpenFOAM results for the
+declared model, not relabelled Fluent output and not proof of agreement with a
+separate paper by themselves.
 
 ## Installation and checks
 
@@ -138,8 +169,10 @@ Generate the only active production mesh/solver bundle:
 ```
 
 The generated launchers use the same containerized OpenFOAM v2512 environment
-on macOS, Windows and Linux. `OPENFOAM_MPI_RANKS` overrides the default ten MPI
-ranks. Execute the generated scripts in this order:
+on macOS, Windows and Linux. Meshing is serial by default for reproducible prism
+layers (`OPENFOAM_MESH_MPI_RANKS` can override it); the solvers use ten ranks by
+default (`OPENFOAM_MPI_RANKS` can override them). Execute the scripts in this
+order:
 
 ```bash
 ./run-production-mesh.sh
@@ -147,16 +180,18 @@ ranks. Execute the generated scripts in this order:
 ./run-cold-flow-continue.sh       # only if the residual/stability gate requests it
 ./run-steady-pilot.sh
 ./run-steady-continue.sh          # only if the steady gate requests it
-./run-full-transient-actual-1s.sh # canonical 0–1800 s result
+./run-frozen-flow-actual-1s.sh    # canonical exact one-way CHT, 0–1800 s
+./run-full-transient-actual-1s.sh # optional fully repeated momentum/energy run
 ./run-full-transient-dt-pilot.sh
 ./run-full-transient-dt-half-pilot.sh
 ```
 
 The two shorter transient pilots check time-step sensitivity. The canonical
-run writes the cumulative residual history to
-`runs/full_transient_actual_1s/reports/solver/transient_residuals.csv` together
-with a JSON summary. No solver launcher starts unless the production mesh gate
-has passed.
+constant-property, zero-gravity calculation writes one energy solve and both
+regional temperature fields per physical second under
+`runs/frozen_flow_actual_1s`; its velocity/pressure field comes from the passed
+cold-flow solve. No solver launcher starts unless the production mesh gate has
+passed.
 
 ## Build and use the viewer
 

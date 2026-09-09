@@ -332,7 +332,7 @@ def validate_cold_flow(
         "yplus_report": yplus_report,
         "residual_floor_basis": (
             "OpenFOAM-normalised equation-specific floors selected from the "
-            "15-micrometre L0 pilot plateau with a small repeatability margin; "
+            "calibrated pilot plateau with a small repeatability margin; "
             "acceptance also requires independent 200-iteration mass-flow and "
             "pressure-drop stability plus field-bound and y+ gates."
         ),

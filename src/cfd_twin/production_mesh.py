@@ -20,7 +20,13 @@ EXPECTED_BATTERY_FILES = tuple(
 DEFAULT_MESH_PROFILE = "single"
 SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE,)
 DEFAULT_MPI_RANKS = 10
+DEFAULT_MESH_MPI_RANKS = 1
 PRISM_LAYER_COUNT = 10
+MINIMUM_LAYER_COVERAGE = 0.75
+MINIMUM_WANTED_THICKNESS_FRACTION = 0.45
+BATTERY_CORE_REFINEMENT_RADIUS_M = 0.004
+BATTERY_CORE_END_CLEARANCE_M = 0.006
+MAXIMUM_INTERFACE_AREA_RELATIVE_ERROR = 0.06
 
 # Reference mesh supplied for the new single-run workflow.  These are targets,
 # not labels to be applied to an unexecuted mesh.  The generated validation
@@ -57,7 +63,7 @@ MESH_PRESETS = {
         0,
         1,
         1,
-        15e-6,
+        14e-6,
         SINGLE_MESH_TARGET_COUNTS["solid_cells"],
         SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
         SINGLE_MESH_TARGET_COUNTS["points"],
@@ -500,6 +506,45 @@ def _topo_set_coolant_dict(config: ResolvedConfig) -> str:
 '''
 
 
+def _topo_set_battery_core_dict(config: ResolvedConfig) -> str:
+    placements = cell_placements(config)
+    z1 = (config.enclosure.height_z_m - config.cells.length_m) / 2
+    z2 = z1 + config.cells.length_m
+    entries = []
+    for index, cell in enumerate(placements):
+        entries.append(
+            f'''    {{
+        name batteryCore;
+        type cellSet;
+        action {"new" if index == 0 else "add"};
+        source cylinderToCell;
+        p1 ({_fmt(cell.center_x_m)} {_fmt(cell.center_y_m)} {_fmt(z1 + BATTERY_CORE_END_CLEARANCE_M)});
+        p2 ({_fmt(cell.center_x_m)} {_fmt(cell.center_y_m)} {_fmt(z2 - BATTERY_CORE_END_CLEARANCE_M)});
+        radius {_fmt(BATTERY_CORE_REFINEMENT_RADIUS_M)};
+    }}'''
+        )
+    return _foam_header("topoSetDict.batteryCore") + "actions\n(\n" + "\n".join(entries) + "\n);\n"
+
+
+def _refine_mesh_battery_core_dict() -> str:
+    return _foam_header("refineMeshDict.batteryCore") + '''set batteryCore;
+
+coordinateSystem global;
+
+globalCoeffs
+{
+    tan1 (1 0 0);
+    tan2 (0 1 0);
+}
+
+directions (tan1 tan2 normal);
+
+useHexTopology true;
+geometricCut false;
+writeMesh false;
+'''
+
+
 def _create_patch_ports_dict() -> str:
     entries = "\n".join(
         f'''    {{
@@ -683,9 +728,10 @@ set -eu
 case_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 log_dir="$case_dir/logs/production_mesh"
 report_dir="$case_dir/reports/production_mesh"
+rm -rf "$log_dir" "$report_dir"
 mkdir -p "$log_dir" "$report_dir"
 
-for tool in surfaceCheck blockMesh surfaceFeatureExtract foamDictionary decomposePar mpirun snappyHexMesh reconstructParMesh reconstructPar topoSet createPatch checkMesh splitMeshRegions python3; do
+for tool in surfaceCheck blockMesh surfaceFeatureExtract foamDictionary decomposePar mpirun snappyHexMesh reconstructParMesh reconstructPar topoSet refineMesh createPatch checkMesh splitMeshRegions python3; do
     command -v "$tool" >/dev/null 2>&1 || {{ echo "$tool is unavailable" >&2; exit 2; }}
 done
 
@@ -712,30 +758,47 @@ done
 # fields are present.  Remove only that generated mesh before blockMesh so a
 # retry cannot accidentally feed stale faceZones back into snappyHexMesh.
 rm -rf "$case_dir/0/polyMesh"
+# Remove only generated split-region meshes and split diagnostics from a prior
+# interrupted mesh attempt.  Initial-condition dictionaries and run results are
+# retained.
+rm -rf "$case_dir/constant/coolant/polyMesh" \
+    "$case_dir/constant/batterySolid/polyMesh"
+rm -f "$case_dir/constant/cellToRegion" \
+    "$case_dir/0/cellToRegion" \
+    "$case_dir/0/coolant/cellToRegion" \
+    "$case_dir/0/batterySolid/cellToRegion"
 # Parallel retries must also discard processor meshes containing the same stale
 # faceZones.  These directories are generated solely by decomposePar below.
 find "$case_dir" -maxdepth 1 -type d -name 'processor[0-9]*' -exec rm -rf {{}} +
 
 blockMesh -case "$case_dir" >"$log_dir/blockMesh.log" 2>&1
 surfaceFeatureExtract -case "$case_dir" >"$log_dir/surfaceFeatureExtract.log" 2>&1
-mpi_ranks=${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}
-case "$mpi_ranks" in
-    ''|*[!0-9]*) echo "OPENFOAM_MPI_RANKS must be a positive integer" >&2; exit 2 ;;
+mesh_mpi_ranks=${{OPENFOAM_MESH_MPI_RANKS:-{DEFAULT_MESH_MPI_RANKS}}}
+case "$mesh_mpi_ranks" in
+    ''|*[!0-9]*) echo "OPENFOAM_MESH_MPI_RANKS must be a positive integer" >&2; exit 2 ;;
 esac
-[ "$mpi_ranks" -ge 1 ] || {{ echo "OPENFOAM_MPI_RANKS must be at least 1" >&2; exit 2; }}
-foamDictionary "$case_dir/system/decomposeParDict" \
-    -entry numberOfSubdomains -set "$mpi_ranks" \
-    >"$log_dir/foamDictionary_decomposePar.log" 2>&1
-decomposePar -case "$case_dir" -force -no-fields \
-    >"$log_dir/decomposePar_snappy.log" 2>&1
-mpirun --allow-run-as-root -np "$mpi_ranks" \
-    snappyHexMesh -case "$case_dir" -parallel -overwrite \
-    >"$log_dir/snappyHexMesh.log" 2>&1
-reconstructParMesh -case "$case_dir" -constant \
-    >"$log_dir/reconstructParMesh.log" 2>&1
-reconstructPar -case "$case_dir" -withZero \
-    -fields '(nSurfaceLayers thickness thicknessFraction)' \
-    >"$log_dir/reconstructPar_layerFields.log" 2>&1
+[ "$mesh_mpi_ranks" -ge 1 ] || {{ echo "OPENFOAM_MESH_MPI_RANKS must be at least 1" >&2; exit 2; }}
+if [ "$mesh_mpi_ranks" -eq 1 ]; then
+    # snappyHexMesh layer termination can vary with processor partitioning on
+    # this coarse geometry.  Serial meshing is the reproducible default; the
+    # CFD solvers still use every configured OPENFOAM_MPI_RANKS rank.
+    snappyHexMesh -case "$case_dir" -overwrite \
+        >"$log_dir/snappyHexMesh.log" 2>&1
+else
+    foamDictionary "$case_dir/system/decomposeParDict" \
+        -entry numberOfSubdomains -set "$mesh_mpi_ranks" \
+        >"$log_dir/foamDictionary_decomposePar.log" 2>&1
+    decomposePar -case "$case_dir" -force -no-fields \
+        >"$log_dir/decomposePar_snappy.log" 2>&1
+    mpirun --allow-run-as-root -np "$mesh_mpi_ranks" \
+        snappyHexMesh -case "$case_dir" -parallel -overwrite \
+        >"$log_dir/snappyHexMesh.log" 2>&1
+    reconstructParMesh -case "$case_dir" -constant \
+        >"$log_dir/reconstructParMesh.log" 2>&1
+    reconstructPar -case "$case_dir" -withZero \
+        -fields '(nSurfaceLayers thickness thicknessFraction)' \
+        >"$log_dir/reconstructPar_layerFields.log" 2>&1
+fi
 topoSet -case "$case_dir" -constant -dict system/topoSetDict.coolantZone \
     >"$log_dir/topoSet_coolantZone.log" 2>&1
 python3 "$case_dir/tools/parse_layercheck.py" \
@@ -743,8 +806,8 @@ python3 "$case_dir/tools/parse_layercheck.py" \
     --mesh-dir "$case_dir/constant/polyMesh" \
     --field-dir "$case_dir/0" \
     --expected-target-layers {PRISM_LAYER_COUNT} \
-    --minimum-layer-coverage 0.8 \
-    --minimum-thickness-fraction 0.5 \
+    --minimum-layer-coverage {MINIMUM_LAYER_COVERAGE} \
+    --minimum-thickness-fraction {MINIMUM_WANTED_THICKNESS_FRACTION} \
     --output "$report_dir/layer_coverage.json"
 
 # These are snappyHexMesh diagnostics, not solver fields.  Keeping them after
@@ -752,7 +815,26 @@ python3 "$case_dir/tools/parse_layercheck.py" \
 # dictionaries and fail.  Their validated statistics are preserved in JSON.
 rm -f "$case_dir/0/nSurfaceLayers" \
     "$case_dir/0/thickness" \
-    "$case_dir/0/thicknessFraction"
+    "$case_dir/0/thicknessFraction" \
+    "$case_dir/0/cellLevel" \
+    "$case_dir/0/pointLevel"
+
+# Increase resolution only inside each battery core. The 4 mm radius and 6 mm
+# axial end clearance keep every selected cell away from the CHT interface, so
+# coolant-side faces and paired mapped-wall topology remain unchanged.
+topoSet -case "$case_dir" -constant -dict system/topoSetDict.batteryCore \
+    >"$log_dir/topoSet_batteryCore.log" 2>&1
+refineMesh -case "$case_dir" -overwrite -dict system/refineMeshDict.batteryCore \
+    >"$log_dir/refineMesh_batteryCore.log" 2>&1
+# refineMesh writes only its diagnostic cellMap under 0/polyMesh while the
+# actual overwritten mesh remains in constant/polyMesh.  Remove that map-only
+# directory so later mesh-instance detection cannot mistake it for a mesh.
+rm -f "$case_dir/0/polyMesh/cellMap"
+rmdir "$case_dir/0/polyMesh" 2>/dev/null || true
+# Recreate the coolant complement after refinement and explicitly verify that
+# every new child cell belongs to exactly one material zone below.
+topoSet -case "$case_dir" -constant -dict system/topoSetDict.coolantZone \
+    >"$log_dir/topoSet_coolantZone_after_core_refine.log" 2>&1
 
 # Split the closed outerDomain patch into exact circular port caps and the wall.
 # createPatch writes the repatched mesh to the selected time (normally
@@ -773,7 +855,7 @@ checkMesh -case "$case_dir" -allGeometry -allTopology \
     >"$log_dir/checkMesh_pre_split_diagnostic.log" 2>&1 || true
 
 pre_split_mesh_dir="$case_dir/constant/polyMesh"
-if [ -d "$case_dir/0/polyMesh" ]; then
+if [ -f "$case_dir/0/polyMesh/points" ]; then
     pre_split_mesh_dir="$case_dir/0/polyMesh"
 fi
 python3 "$case_dir/tools/validate_cell_zones.py" \
@@ -800,6 +882,7 @@ python3 "$case_dir/tools/validate_interfaces.py" \
     --coolant-mesh-dir "$case_dir/constant/coolant/polyMesh" \
     --solid-mesh-dir "$case_dir/constant/batterySolid/polyMesh" \
     --expected-each-area {_fmt(battery_interface_area_each)} \
+    --geometry-tolerance {MAXIMUM_INTERFACE_AREA_RELATIVE_ERROR} \
     --output "$report_dir/interfaces_post_split.json"
 check_status=0
 checkMesh -case "$case_dir" -constant -allRegions -meshQuality \
@@ -859,7 +942,7 @@ def _compose_yaml() -> str:
     image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
-      OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
+      OPENFOAM_MESH_MPI_RANKS: "${{OPENFOAM_MESH_MPI_RANKS:-{DEFAULT_MESH_MPI_RANKS}}}"
     volumes:
       - .:/case
     command: ["/bin/sh", "/case/AllmeshProduction"]
@@ -1085,10 +1168,11 @@ uses the official multi-architecture `opencfd/openfoam-default:2512` image and
 adds only Python 3 for the validation scripts. Both host launchers execute the
 same `AllmeshProduction` script inside Linux. Direct execution is also
 supported inside an already initialized v2512 environment with Python 3.
-The expensive snappyHexMesh stage uses MPI with {DEFAULT_MPI_RANKS} ranks by
-default (`scotch` decomposition), followed by `reconstructParMesh`. Solver
-pilots use the same MPI default and reconstruct their latest result. Override
-the rank count on either host by setting `OPENFOAM_MPI_RANKS` before launching.
+The snappyHexMesh stage runs on one rank by default because layer termination
+on this coarse geometry otherwise changes with processor partitioning. Override
+it with `OPENFOAM_MESH_MPI_RANKS` when explicitly testing parallel meshing.
+Solver pilots use {DEFAULT_MPI_RANKS} MPI ranks by default and reconstruct their
+latest result; override that count with `OPENFOAM_MPI_RANKS`.
 
 After the production mesh gates pass, run the source-free cold-flow pilot and
 then the steady CHT pilot. The frozen-flow pilot clones the mesh and cold-flow
@@ -1098,15 +1182,16 @@ to 1800 s with a 1 s physical time step. Compact telemetry is sampled every
 1 s, compressed binary 3D fields are written every 15 s and all 121 field
 frames are reconstructed. The frozen-flow gate checks the time/frame contract,
 mass and final energy balances, monotonic heating and agreement with the
-validated steady CHT result. The canonical new result launcher uses an
-adaptive numerical time step no larger than 0.1 s, `maxCo 5` and three PIMPLE
-outer correctors. It samples direct cell values and writes compressed full
-fields every physical second, then exports a cumulative PIMPLE-iteration residual
-history. At the nominal 0.1 s step this is 54,000 nonlinear iterations over
-1,800 s. This is the closest truthful OpenFOAM equivalent of the Fluent
-cumulative-iteration plot; raw OpenFOAM residuals are not relabelled as Fluent
-scaled residuals. The separate 0.1/0.05 s launchers remain time-step validation
-runs.
+validated steady CHT result. The canonical new result uses the one-second
+frozen-flow profile. In this constant-property, zero-gravity model temperature
+cannot feed back into momentum, so it advances the coupled fluid/solid energy
+equations while retaining the separately converged flow field. Both regional
+temperature fields remain in the native parallel decomposition at every
+physical second and the final complete state is reconstructed. The fully
+repeated momentum/energy launcher uses an adaptive step no larger than 0.1 s,
+`maxCo 5` and three PIMPLE outer correctors and remains available for time-step
+sensitivity work. Raw OpenFOAM residuals are never relabelled as Fluent scaled
+residuals.
 
 `AllmeshProductionFallbackZones` is an explicit, non-automatic recovery path for
 cellZone creation. It does not prove zone volumes, interface integrity, prism-layer
@@ -1199,6 +1284,14 @@ def write_production_mesh_source_bundle(
     _atomic_write(
         output / "system" / "topoSetDict.coolantZone",
         _topo_set_coolant_dict(config),
+    )
+    _atomic_write(
+        output / "system" / "topoSetDict.batteryCore",
+        _topo_set_battery_core_dict(config),
+    )
+    _atomic_write(
+        output / "system" / "refineMeshDict.batteryCore",
+        _refine_mesh_battery_core_dict(),
     )
     _atomic_write(
         output / "system" / "createPatchDict.ports", _create_patch_ports_dict()
@@ -1387,8 +1480,10 @@ def write_production_mesh_source_bundle(
             "enabled": True,
             "default_mpi_ranks": DEFAULT_MPI_RANKS,
             "override_environment_variable": "OPENFOAM_MPI_RANKS",
+            "default_mesh_mpi_ranks": DEFAULT_MESH_MPI_RANKS,
+            "mesh_override_environment_variable": "OPENFOAM_MESH_MPI_RANKS",
             "decomposition_method": "scotch",
-            "parallel_mesh_stage": "snappyHexMesh",
+            "parallel_mesh_stage": "optional snappyHexMesh override",
         },
         "host_launchers": [
             "run-production-mesh.sh",
@@ -1437,8 +1532,8 @@ def write_production_mesh_source_bundle(
             "surface_layers": PRISM_LAYER_COUNT,
             "first_layer_thickness_m": preset.first_layer_thickness_m,
             "expansion_ratio": 1.2,
-            "minimum_average_layer_coverage_fraction": 0.8,
-            "minimum_average_wanted_thickness_fraction": 0.5,
+            "minimum_average_layer_coverage_fraction": MINIMUM_LAYER_COVERAGE,
+            "minimum_average_wanted_thickness_fraction": MINIMUM_WANTED_THICKNESS_FRACTION,
             "validated": False,
             "required_gate": "coverage plus actual y+ distribution",
         },

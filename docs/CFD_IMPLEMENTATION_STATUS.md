@@ -22,9 +22,9 @@ publication results by itself; the generated JSON gates remain authoritative.
 
 Decision: this diagnostic run is not a final result and its generated field
 directory is removed before the next run.  The production first-layer target
-is reduced from 20 micrometres to 15 micrometres.  The estimate is based on
-the approximately linear y+ scaling with wall-normal first-cell distance:
-`1.198 * 15/20 = 0.898` at p95.  The new mesh must still pass all geometry,
+is reduced from 20 micrometres to 14 micrometres.  The final value was selected
+after the 15-micrometre standard pilot measured y+ p95 = 1.022 and 94.861% of
+the battery area below one.  The new mesh must still pass all geometry,
 zone, interface, layer and `checkMesh` gates, followed by an actual y+
 measurement; this estimate is not itself a pass.
 
@@ -76,11 +76,39 @@ measurement; this estimate is not itself a pass.
 ## Transient execution policy
 
 - Frozen-flow thermal production uses 1 s physical time steps from 0 to 1800 s.
-- Compact per-cell and boundary telemetry is written every 1 s; heavy 3D fields
-  are written every 15 s.  This preserves the requested playback data without
-  the erroneous 18,000-step/1 s full-field I/O load.
+- Compact per-cell and boundary telemetry plus both regional temperature fields
+  are written every 1 s. The constant-property, zero-gravity model reuses its
+  validated static flow field; complete unchanged flow fields are written at
+  the final time instead of duplicated 1,800 times.
 - Full-transient 0.1 s and 0.05 s cases remain coarse validation-only runs and
   are not publication or GUI figure sources.
+
+## 2026-09-10 standard 216,577-cell production result
+
+- The executed mesh contains 216,577 cells and 252,907 points: 159,107 coolant
+  cells and 57,470 battery-solid cells. It is 85.426% hexahedral and passes the
+  count, topology, zone, interface, volume and coarse-mesh prism-layer gates.
+- The final 14-micrometre cold-flow run passed after 2,000 iterations. Battery
+  wall y+ is area-weighted mean 0.373565, p95 0.952719 and 95.3196% of the area
+  is below one. Mean pressure drop is 260.412879 Pa and maximum mass imbalance
+  is 2.803965e-8.
+- The 2,000-iteration steady CHT gate passed: outlet T=293.165240 K, battery
+  Tavg=293.256929 K, Tmax=293.341415 K and mean energy imbalance 0.236343%.
+- The exact one-way transient CHT run completed physical times 1 through 1,800
+  s with the passed fixed flow field. All ten native OpenFOAM processor
+  decompositions contain both regional T fields at all 1,801 states including
+  time zero; the final complete field is reconstructed for whole-mesh use.
+- The transient compound gate passed. At 1,800 s, outlet T=293.165261 K,
+  battery Tavg=293.256350 K and mesh Tmax=293.343303 K (C05). Final-window mean
+  energy imbalance is 0.018936%; maximum mass imbalance is 1.642817e-8. Tavg
+  and Tmax differ from the passed steady solution by -0.000579 K and
+  +0.001887 K.
+- Eleven browser datasets cover five XY temperature sections, five XZ sections
+  and direct battery-surface samples at every integer second. Their independent
+  pack/re-read validation passed with no temporal interpolation, spatial
+  interpolation or padding; maximum quantization error is 1.421736e-6 K.
+- `build/reference_viewer` now keeps the precision and standard datasets under
+  separate mesh selectors and never substitutes one mesh's field for the other.
 
 ## 2026-09-06 L0 frozen-flow thermal pilot
 

@@ -129,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--coolant-mesh-dir", required=True)
     parser.add_argument("--solid-mesh-dir", required=True)
     parser.add_argument("--expected-each-area", required=True, type=float)
+    parser.add_argument("--geometry-tolerance", type=float, default=0.05)
     parser.add_argument("--output")
     args = parser.parse_args(argv)
     try:
@@ -136,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             args.coolant_mesh_dir,
             args.solid_mesh_dir,
             expected_each_area_m2=args.expected_each_area,
+            geometry_tolerance=args.geometry_tolerance,
         )
     except (OSError, UnicodeError, ValueError) as exc:
         report = {

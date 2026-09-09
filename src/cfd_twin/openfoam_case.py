@@ -907,12 +907,29 @@ def _transient_control_dict(
     frozen_flow: bool,
     field_write_interval_s: float = 15.0,
     actual_one_second_sampling: bool = False,
+    temperature_field_write_interval_s: float | None = None,
 ) -> str:
     adjustable = "no" if frozen_flow else "yes"
+    extra_function_blocks: list[str] = []
+    if actual_one_second_sampling:
+        extra_function_blocks.append(_actual_one_second_sampling(config))
+    if temperature_field_write_interval_s is not None:
+        interval = temperature_field_write_interval_s
+        for region in ("coolant", "batterySolid"):
+            extra_function_blocks.append(
+                f'''dynamic_{region}_temperature
+    {{
+        type writeObjects;
+        libs (utilityFunctionObjects);
+        region {region};
+        fields (T);
+        writeOption anyWrite;
+        writeControl adjustableRunTime;
+        writeInterval {interval:.12g};
+    }}'''
+            )
     extra_functions = (
-        "\n" + _actual_one_second_sampling(config)
-        if actual_one_second_sampling
-        else ""
+        "\n" + "\n".join(extra_function_blocks) if extra_function_blocks else ""
     )
     return _header("controlDict") + f'''application chtMultiRegionFoam;
 startFrom startTime;
@@ -1438,6 +1455,7 @@ def _solver_profile_files(
     enthalpy_relaxation: float | None = None,
     field_write_interval_s: float = 15.0,
     actual_one_second_sampling: bool = False,
+    temperature_field_write_interval_s: float | None = None,
 ) -> dict[str, str]:
     transient = delta_t is not None
     if not transient:
@@ -1464,6 +1482,7 @@ def _solver_profile_files(
             frozen_flow=frozen_flow,
             field_write_interval_s=field_write_interval_s,
             actual_one_second_sampling=actual_one_second_sampling,
+            temperature_field_write_interval_s=temperature_field_write_interval_s,
         ),
         "system/fvSolution": _root_solution(transient=True),
         "system/coolant/fvSchemes": _fluid_schemes(transient=True),
@@ -1481,9 +1500,8 @@ def write_openfoam_solver_bundle(
     config: ResolvedConfig, output_dir: str | Path
 ) -> dict[str, object]:
     output = Path(output_dir).resolve()
-    # The million-cell L2 pilot showed that the faster L0/L1 relaxation can
-    # destabilise pressure coupling even when initialized from converged cold
-    # flow. Use one conservative production profile for all newly built levels.
+    # Use the conservative pressure/velocity coupling validated by the prior
+    # production pilots for the single active mesh profile.
     steady_profile = _solver_profile_files(
         config,
         conservative=True, enthalpy_relaxation=0.5
@@ -1515,6 +1533,7 @@ def write_openfoam_solver_bundle(
                 frozen_flow=True,
                 field_write_interval_s=1800.0,
                 actual_one_second_sampling=True,
+                temperature_field_write_interval_s=1.0,
             ),
             "constant/batterySolid/fvOptions": heat_source_dict,
         },
@@ -1575,7 +1594,7 @@ def write_openfoam_solver_bundle(
             profile="frozen_flow_actual_1s",
             run_name="frozen_flow_actual_1s",
             frozen_flow=True,
-            field_interval_s=1800.0,
+            field_interval_s=1.0,
         ),
         "AllrunFullTransientActual1s": _transient_pilot_script(
             config,
@@ -1658,7 +1677,9 @@ def write_openfoam_solver_bundle(
                 "endTime_s": 1800,
                 "telemetry_interval_s": 1.0,
                 "direct_cell_probe_interval_s": 1.0,
-                "field_write_interval_s": 1800.0,
+                "full_field_write_interval_s": 1800.0,
+                "temperature_field_write_interval_s": 1.0,
+                "static_flow_field_policy": "reuse validated time-zero flow at every display second",
                 "section_probe_spacing_mm": {"xy": 1.0, "xz": 1.5},
                 "cell_surface_probe_lattice": "32-angle by 16-height plus caps",
                 "interpolation_scheme": "cell",
