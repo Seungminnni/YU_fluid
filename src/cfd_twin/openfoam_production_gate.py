@@ -13,6 +13,7 @@ REQUIRED_REPORTS = {
     "mesh_integrals_pre_split.json": "MESH_INTEGRAL_VALIDATION_PASSED",
     "interfaces_post_split.json": "INTERFACE_VALIDATION_PASSED",
     "layer_coverage.json": "LAYER_VALIDATION_PASSED",
+    "mesh_target_composition.json": "MESH_TARGET_VALIDATION_PASSED",
     "surfaceCheck_outerDomain.json": "SURFACECHECK_LOG_PASSED",
     **{
         f"surfaceCheck_battery_C{index:02d}.json": "SURFACECHECK_LOG_PASSED"

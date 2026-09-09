@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/mdpi-cfd/config.schema.json",
-  "title": "MDPI CFD case configuration",
+  "$id": "https://example.invalid/cfd-twin/config.schema.json",
+  "title": "CFD digital-twin case configuration",
   "type": "object",
   "additionalProperties": false,
   "required": [

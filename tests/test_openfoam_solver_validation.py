@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.openfoam_cold_flow_validation import validate_cold_flow
-from mdpi_cfd.openfoam_frozen_flow_validation import validate_frozen_flow
-from mdpi_cfd.openfoam_steady_cht_validation import validate_steady_cht
+from cfd_twin.openfoam_cold_flow_validation import validate_cold_flow
+from cfd_twin.openfoam_frozen_flow_validation import validate_frozen_flow
+from cfd_twin.openfoam_steady_cht_validation import validate_steady_cht
 
 
 class ColdFlowValidationTests(unittest.TestCase):

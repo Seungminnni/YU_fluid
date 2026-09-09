@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.case_builder import prepare_case_inputs
-from mdpi_cfd.config import load_config
+from cfd_twin.case_builder import prepare_case_inputs
+from cfd_twin.config import load_config
 
 
 ROOT = Path(__file__).resolve().parents[1]

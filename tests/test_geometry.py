@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.config import load_config
-from mdpi_cfd.geometry import cell_placements, geometry_report, write_geometry_bundle
+from cfd_twin.config import load_config
+from cfd_twin.geometry import cell_placements, geometry_report, write_geometry_bundle
 
 
 ROOT = Path(__file__).resolve().parents[1]

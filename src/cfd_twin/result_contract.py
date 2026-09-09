@@ -11,7 +11,7 @@ from .config import ResolvedConfig
 FIGURE_CONTRACTS: tuple[dict[str, object], ...] = (
     {"id": 1, "title": "3D geometry", "required": ["cad_surface", "patch_labels"], "time_mode": "geometry"},
     {"id": 2, "title": "Mesh structure", "required": ["volume_mesh", "surface_mesh", "mesh_quality"], "time_mode": "mesh"},
-    {"id": 3, "title": "Mesh independence", "required": ["L0_temperature", "L3_temperature", "mesh_metrics"], "time_mode": "steady_snapshot"},
+    {"id": 3, "title": "Single mesh quality", "required": ["single_mesh_target", "mesh_quality", "mesh_topology"], "time_mode": "mesh"},
     {"id": 4, "title": "Cell surface temperature", "required": ["per_cell_time_series"], "time_mode": "style_adaptation"},
     {
         "id": 6,

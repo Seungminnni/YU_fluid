@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.config import load_config
-from mdpi_cfd.result_contract import update_figure_status, write_result_contract
+from cfd_twin.config import load_config
+from cfd_twin.result_contract import update_figure_status, write_result_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]

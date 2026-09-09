@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from .config import ResolvedConfig
-from .errors import DependencyUnavailable, MdpiCfdError
+from .errors import DependencyUnavailable, CfdTwinError
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -29,17 +29,17 @@ def _mesh_model(
         },
     }
     if mesh_level not in levels:
-        raise MdpiCfdError(
+        raise CfdTwinError(
             f"unsupported Gmsh mesh level {mesh_level!r}; only smoke is allowed. "
-            "Production L0-L3 meshes use blockMesh + snappyHexMesh."
+            "The production mesh uses blockMesh + snappyHexMesh."
         )
     cad = Path(cad_dir).resolve()
     for filename in ("coolant.step", "battery_cells.step", "cad_result.json"):
         if not (cad / filename).is_file():
-            raise MdpiCfdError(f"validated CAD input is missing: {cad / filename}")
+            raise CfdTwinError(f"validated CAD input is missing: {cad / filename}")
     result = json.loads((cad / "cad_result.json").read_text(encoding="utf-8"))
     if not result.get("cad_geometry_checks_passed", False):
-        raise MdpiCfdError("CAD geometry checks have not passed; refusing mesh generation")
+        raise CfdTwinError("CAD geometry checks have not passed; refusing mesh generation")
     return {
         "schema_version": 1,
         "cad_directory": str(cad),
@@ -84,7 +84,7 @@ CAD = Path(MODEL["cad_directory"])
 gmsh.initialize()
 try:
     gmsh.option.setNumber("General.Terminal", 1)
-    gmsh.model.add("mdpi_23cell_smoke")
+    gmsh.model.add("cfd_twin_23cell_smoke")
     fluid_imported = gmsh.model.occ.importShapes(str(CAD / "coolant.step"))
     battery_imported = gmsh.model.occ.importShapes(str(CAD / "battery_cells.step"))
     if len(fluid_imported) != 1 or len(battery_imported) != MODEL["expected_battery_count"]:
@@ -505,13 +505,13 @@ def render_mesh_slices(mesh_vtk: str | Path, output_dir: str | Path) -> dict[str
 
     source = Path(mesh_vtk).resolve()
     if not source.is_file():
-        raise MdpiCfdError(f"mesh VTK is missing: {source}")
+        raise CfdTwinError(f"mesh VTK is missing: {source}")
     reader = vtk.vtkUnstructuredGridReader()
     reader.SetFileName(str(source))
     reader.Update()
     grid = reader.GetOutput()
     if grid.GetNumberOfCells() == 0:
-        raise MdpiCfdError("mesh VTK contains no cells")
+        raise CfdTwinError("mesh VTK contains no cells")
     tetrahedra = vtk.vtkExtractCellsByType()
     tetrahedra.SetInputData(grid)
     tetrahedra.AddCellType(vtk.VTK_TETRA)

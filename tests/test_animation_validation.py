@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.animation_validation import validate_animations
-from mdpi_cfd.errors import MdpiCfdError
+from cfd_twin.animation_validation import validate_animations
+from cfd_twin.errors import CfdTwinError
 
 
 class AnimationValidationTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class AnimationValidationTests(unittest.TestCase):
             results = case / "results"
             results.mkdir()
             (results / "result_manifest.json").write_text("{}", encoding="utf-8")
-            with self.assertRaisesRegex(MdpiCfdError, "animation is missing"):
+            with self.assertRaisesRegex(CfdTwinError, "animation is missing"):
                 validate_animations(case, viewer_dir=case / "viewer")
 
 

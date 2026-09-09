@@ -158,8 +158,8 @@ def prepare_case_inputs(
         write_production_mesh_source_bundle(
             config,
             output / "cad_source",
-            output / "production" / "L0",
-            mesh_level="L0",
+            output / "production" / "single",
+            mesh_level="single",
         )
         if should_execute_cad
         and cad_result
@@ -239,8 +239,9 @@ def prepare_case_inputs(
         {
             "id": "PRODUCTION_CHECKMESH",
             "reason": (
-                "blockMesh/snappyHexMesh L0-L3, 23 non-empty battery cellZones, "
-                "prism layers and production checkMesh have not passed"
+                "single 207,390-cell-target blockMesh/snappyHexMesh profile, "
+                "23 non-empty battery cellZones, prism layers, count/composition "
+                "and production checkMesh gates have not passed"
             ),
         }
     )

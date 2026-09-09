@@ -313,7 +313,7 @@ def _vtk_cylinders(
     polygon_size = sum(len(poly) + 1 for poly in polygons)
     lines = [
         "# vtk DataFile Version 3.0",
-        "MDPI 23-cell battery surfaces",
+        "23-cell battery surfaces",
         "ASCII",
         "DATASET POLYDATA",
         f"POINTS {len(points)} float",

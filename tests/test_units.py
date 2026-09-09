@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from mdpi_cfd.errors import ConfigError
-from mdpi_cfd.units import quantity
+from cfd_twin.errors import ConfigError
+from cfd_twin.units import quantity
 
 
 class UnitTests(unittest.TestCase):

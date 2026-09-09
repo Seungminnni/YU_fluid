@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.config import load_config
-from mdpi_cfd.errors import ProfileError
-from mdpi_cfd.heat_source import (
+from cfd_twin.config import load_config
+from cfd_twin.errors import ProfileError
+from cfd_twin.heat_source import (
     ConstantVolumetricSource,
     ElectricalJouleSource,
     LinearSeries,

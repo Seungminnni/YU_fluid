@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ResolvedConfig
-from .errors import MdpiCfdError
+from .errors import CfdTwinError
 from .geometry import cell_placements
 from .openfoam_case import write_openfoam_solver_bundle
 
@@ -17,9 +17,20 @@ from .openfoam_case import write_openfoam_solver_bundle
 EXPECTED_BATTERY_FILES = tuple(
     f"battery_C{index:02d}.stl" for index in range(1, 24)
 )
-SUPPORTED_LEVELS = ("L0", "L1", "L2", "L3")
+DEFAULT_MESH_PROFILE = "single"
+SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE,)
 DEFAULT_MPI_RANKS = 10
 PRISM_LAYER_COUNT = 10
+
+# Reference mesh supplied for the new single-run workflow.  These are targets,
+# not labels to be applied to an unexecuted mesh.  The generated validation
+# report compares the actual polyMesh counts against this contract.
+SINGLE_MESH_TARGET_COUNTS = {
+    "total_cells": 207_390,
+    "solid_cells": 70_840,
+    "fluid_cells": 136_550,
+    "points": 221_878,
+}
 
 
 @dataclass(frozen=True)
@@ -30,23 +41,27 @@ class MeshPreset:
     surface_max_level: int
     battery_inside_level: int
     first_layer_thickness_m: float
+    target_solid_cells: int | None = None
+    target_fluid_cells: int | None = None
+    target_points: int | None = None
 
 
 MESH_PRESETS = {
-    # Ten wall layers dominate the final count. L1-L3 use the same surface and
-    # battery-interior refinement policy while monotonically reducing the
-    # background size. L2/L3 also share the same local port-cap refinement,
-    # introduced after the unrefined L2 boundary faceting missed the port-area
-    # gate. This preserves the 19 mm port geometry and an ordered fine pair.
-    "L0": MeshPreset(361_035, 0.0040, 0, 1, 0, 15e-6),
-    "L1": MeshPreset(600_000, 0.0030, 0, 1, 1, 15e-6),
-    "L2": MeshPreset(1_050_000, 0.0027, 0, 1, 1, 15e-6),
-    # The first measured L3 cold-flow result placed only 94.919% of the
-    # battery area below y+=1.  Preserve the mesh topology/refinement policy
-    # and reduce only the wall-normal first-layer target to restore margin.
-    # A 13-micrometre retry crossed maxNonOrtho=75 by 0.0014 degrees, so the
-    # accepted compromise is 14 micrometres (predicted p95 y+ about 0.94).
-    "L3": MeshPreset(1_350_000, 0.0024, 0, 1, 1, 14e-6),
+    # One default calculation replaces the former multi-level workflow.  A
+    # coarser background controls coolant count while level-1 battery interiors
+    # retain the solid resolution in the supplied 207,390-cell reference.  The
+    # mesh must still pass the generated count/composition gate after execution.
+    "single": MeshPreset(
+        SINGLE_MESH_TARGET_COUNTS["total_cells"],
+        0.0050,
+        0,
+        1,
+        1,
+        15e-6,
+        SINGLE_MESH_TARGET_COUNTS["solid_cells"],
+        SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
+        SINGLE_MESH_TARGET_COUNTS["points"],
+    ),
 }
 
 
@@ -185,10 +200,8 @@ def _surface_feature_extract_dict() -> str:
 
 
 def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
-    # Even the paper-coarse grid must resolve the 19 mm circular port caps.
-    # Applying the coarse battery level to outerDomain lost 80% of the inlet
-    # area in the mesh integral gate. Keep enclosure/ports at levels 1/2 while
-    # independently coarsening the 23 battery surfaces for L0/L1.
+    # Keep enclosure and port surfaces one level finer than the battery skin so
+    # the 19 mm circular caps remain resolved on the standard mesh.
     outer_surface_min_level = max(1, preset.surface_min_level)
     outer_surface_max_level = max(2, preset.surface_max_level)
     geometry_entries = [
@@ -208,7 +221,7 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
     )
 
     port_refinement_regions: list[str] = []
-    if preset.background_cell_m <= MESH_PRESETS["L2"].background_cell_m:
+    if preset.background_cell_m <= 0.0027:
         port_half_width = config.ports.inlet_diameter_m / 2 + 0.001
         refinement_depth = 0.004
         for name, center, end_z, inward_sign in (
@@ -629,7 +642,7 @@ snGradSchemes
 '''
 
 
-def _allmesh_production(config: ResolvedConfig) -> str:
+def _allmesh_production(config: ResolvedConfig, preset: MeshPreset) -> str:
     battery_volume = config.derived.cell_volume_m3 * config.cells.count
     battery_interface_area_each = (
         math.pi * config.cells.diameter_m * config.cells.length_m
@@ -653,6 +666,16 @@ def _allmesh_production(config: ResolvedConfig) -> str:
         * (config.ports.outlet_diameter_m / 2) ** 2
         * config.ports.external_length_m
         - battery_volume
+    )
+    target_options = []
+    if preset.target_solid_cells is not None:
+        target_options.append(f"--target-solid-cells {preset.target_solid_cells}")
+    if preset.target_fluid_cells is not None:
+        target_options.append(f"--target-fluid-cells {preset.target_fluid_cells}")
+    if preset.target_points is not None:
+        target_options.append(f"--target-points {preset.target_points}")
+    component_targets = "".join(
+        f" \\{chr(10)}    {option}" for option in target_options
     )
     return f'''#!/bin/sh
 set -eu
@@ -789,6 +812,11 @@ if [ "$check_status" -ne 0 ]; then
     echo "all-region checkMesh gate failed" >&2
     exit "$check_status"
 fi
+python3 "$case_dir/tools/validate_mesh_target.py" \
+    --zone-report "$report_dir/cellZones_pre_split.json" \
+    --checkmesh-log "$log_dir/checkMesh_pre_split_diagnostic.log" \
+    --target-total-cells {preset.target_cells}{component_targets} \
+    --output "$report_dir/mesh_target_composition.json"
 # Record OpenFOAM's optional exhaustive diagnostics as an engineering audit.
 # Thin wall-resolved prisms and the intentionally disconnected 23 bodies make
 # several generic allGeometry thresholds inapplicable; this audit never
@@ -828,7 +856,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -839,7 +867,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -850,7 +878,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -862,7 +890,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -873,7 +901,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -885,7 +913,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -896,7 +924,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -904,11 +932,22 @@ def _compose_yaml() -> str:
     volumes:
       - .:/case
     command: ["/bin/sh", "/case/AllrunFrozenFlowThermalActual1s"]
+  full-transient-actual-1s:
+    build:
+      context: .
+      dockerfile: Dockerfile.openfoam
+    image: cfd-twin-openfoam-v2512-python3:local
+    working_dir: /case
+    environment:
+      OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
+    volumes:
+      - .:/case
+    command: ["/bin/sh", "/case/AllrunFullTransientActual1s"]
   full-transient-dt-pilot:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -919,7 +958,7 @@ def _compose_yaml() -> str:
     build:
       context: .
       dockerfile: Dockerfile.openfoam
-    image: mdpi-openfoam-v2512-python3:local
+    image: cfd-twin-openfoam-v2512-python3:local
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
@@ -1011,10 +1050,22 @@ if ($LASTEXITCODE -ne 0) {{
 
 
 def _readme(level: str) -> str:
+    profile_note = (
+        "This is the default single-run profile targeting 207,390 total cells "
+        "(70,840 solid + 136,550 fluid) and 221,878 points."
+        if level == DEFAULT_MESH_PROFILE
+        else "This is a retained legacy validation profile."
+    )
     return f'''# Production mesh source ({level})
 
 This is an OpenCFD OpenFOAM v2512 `blockMesh + snappyHexMesh` input bundle.
 It has been generated, not executed on this macOS host.
+{profile_note}
+
+The background is hexahedral and the finished body-fitted mesh is
+**hexa-dominant**. Curved cylinders, snapped boundaries and wall layers create
+some cut polyhedra/prisms, so this workflow does not claim a mathematically
+all-hexa mesh. `mesh_target_composition.json` records the actual mix and counts.
 
 Primary path:
 
@@ -1047,41 +1098,44 @@ to 1800 s with a 1 s physical time step. Compact telemetry is sampled every
 1 s, compressed binary 3D fields are written every 15 s and all 121 field
 frames are reconstructed. The frozen-flow gate checks the time/frame contract,
 mass and final energy balances, monotonic heating and agreement with the
-validated steady CHT result. The two full-transient launchers use maximum time
-steps 0.1 and 0.05 s with `maxCo 5` and `nOuterCorrectors 3`; they are
-validation-only and must not supply publication figures.
+validated steady CHT result. The canonical new result launcher uses an
+adaptive numerical time step no larger than 0.1 s, `maxCo 5` and three PIMPLE
+outer correctors. It samples direct cell values and writes compressed full
+fields every physical second, then exports a cumulative PIMPLE-iteration residual
+history. At the nominal 0.1 s step this is 54,000 nonlinear iterations over
+1,800 s. This is the closest truthful OpenFOAM equivalent of the Fluent
+cumulative-iteration plot; raw OpenFOAM residuals are not relabelled as Fluent
+scaled residuals. The separate 0.1/0.05 s launchers remain time-step validation
+runs.
 
 `AllmeshProductionFallbackZones` is an explicit, non-automatic recovery path for
 cellZone creation. It does not prove zone volumes, interface integrity, prism-layer
 coverage, y+ or mesh independence.
 
-The ten-layer setting follows the master plan and starts at
-{MESH_PRESETS[level].first_layer_thickness_m * 1e6:.0f} micrometres for this level. L0--L2
-use the measured 15-micrometre L0 cold-flow correction; L3 uses 14 micrometres
-after its first measured 15-micrometre run narrowly missed the wall-y+ area
-gate and a 13-micrometre retry narrowly missed the 75-degree non-orthogonality
-gate. Every level remains subject to the actual wall-y+ gate; no production
-result is authorized by this bundle alone.
+The ten-layer setting starts at
+{MESH_PRESETS[level].first_layer_thickness_m * 1e6:.0f} micrometres. Every mesh
+remains subject to the actual wall-y+ and count/composition gates; no production
+result is authorized by this source bundle alone.
 '''
 
 
 def _verify_cad(cad_dir: Path, config: ResolvedConfig) -> dict[str, object]:
     result_path = cad_dir / "cad_result.json"
     if not result_path.is_file():
-        raise MdpiCfdError(
+        raise CfdTwinError(
             f"production mesh requires executed CAD result: {result_path}"
         )
     result = json.loads(result_path.read_text(encoding="utf-8"))
     if not result.get("cad_geometry_checks_passed"):
-        raise MdpiCfdError("production mesh requires passed CAD geometry checks")
+        raise CfdTwinError("production mesh requires passed CAD geometry checks")
     if result.get("geometry_sha256") != config.geometry_sha256:
-        raise MdpiCfdError("CAD geometry hash does not match the resolved configuration")
+        raise CfdTwinError("CAD geometry hash does not match the resolved configuration")
     surfaces = result.get("production_surfaces", {})
     if surfaces.get("length_unit") != "m":
-        raise MdpiCfdError("production STL manifest must declare length_unit=m")
+        raise CfdTwinError("production STL manifest must declare length_unit=m")
     battery_files = tuple(Path(item).name for item in surfaces.get("battery_files", []))
     if battery_files != EXPECTED_BATTERY_FILES:
-        raise MdpiCfdError("CAD result must contain battery_C01.stl through battery_C23.stl")
+        raise CfdTwinError("CAD result must contain battery_C01.stl through battery_C23.stl")
     required = (
         "outerDomain.stl",
         "inlet.stl",
@@ -1092,13 +1146,13 @@ def _verify_cad(cad_dir: Path, config: ResolvedConfig) -> dict[str, object]:
     source_dir = cad_dir / "production_surfaces"
     missing = [name for name in required if not (source_dir / name).is_file()]
     if missing:
-        raise MdpiCfdError(f"production CAD surfaces missing: {', '.join(missing)}")
+        raise CfdTwinError(f"production CAD surfaces missing: {', '.join(missing)}")
     expected_hashes = result.get("file_sha256", {})
     for name in required:
         relative = f"production_surfaces/{name}"
         actual_hash = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
         if expected_hashes.get(relative) != actual_hash:
-            raise MdpiCfdError(f"CAD surface hash mismatch: {relative}")
+            raise CfdTwinError(f"CAD surface hash mismatch: {relative}")
     return result
 
 
@@ -1107,10 +1161,10 @@ def write_production_mesh_source_bundle(
     cad_dir: str | Path,
     output_dir: str | Path,
     *,
-    mesh_level: str = "L0",
+    mesh_level: str = DEFAULT_MESH_PROFILE,
 ) -> dict[str, object]:
     if mesh_level not in SUPPORTED_LEVELS:
-        raise MdpiCfdError(
+        raise CfdTwinError(
             f"production mesh level must be one of {', '.join(SUPPORTED_LEVELS)}"
         )
     cad = Path(cad_dir).resolve()
@@ -1218,11 +1272,19 @@ def write_production_mesh_source_bundle(
         output / "tools" / "validate_frozen_flow.py",
     )
     shutil.copy2(
+        Path(__file__).with_name("openfoam_transient_residuals.py"),
+        output / "tools" / "extract_transient_residuals.py",
+    )
+    shutil.copy2(
         Path(__file__).with_name("openfoam_production_gate.py"),
         output / "tools" / "aggregate_production_gate.py",
     )
+    shutil.copy2(
+        Path(__file__).with_name("openfoam_mesh_target_validation.py"),
+        output / "tools" / "validate_mesh_target.py",
+    )
 
-    _atomic_write(output / "AllmeshProduction", _allmesh_production(config))
+    _atomic_write(output / "AllmeshProduction", _allmesh_production(config, preset))
     (output / "AllmeshProduction").chmod(0o755)
     _atomic_write(output / "AllmeshProductionFallbackZones", _fallback_script())
     (output / "AllmeshProductionFallbackZones").chmod(0o755)
@@ -1250,6 +1312,9 @@ def write_production_mesh_source_bundle(
         "run-frozen-flow-actual-1s.sh": _docker_solver_shell_script(
             "frozen-flow-actual-1s"
         ),
+        "run-full-transient-actual-1s.sh": _docker_solver_shell_script(
+            "full-transient-actual-1s"
+        ),
         "run-full-transient-dt-pilot.sh": _docker_solver_shell_script(
             "full-transient-dt-pilot"
         ),
@@ -1273,6 +1338,9 @@ def write_production_mesh_source_bundle(
         ),
         "run-frozen-flow-actual-1s.ps1": _docker_solver_powershell_script(
             "frozen-flow-actual-1s"
+        ),
+        "run-full-transient-actual-1s.ps1": _docker_solver_powershell_script(
+            "full-transient-actual-1s"
         ),
         "run-full-transient-dt-pilot.ps1": _docker_solver_powershell_script(
             "full-transient-dt-pilot"
@@ -1312,7 +1380,7 @@ def write_production_mesh_source_bundle(
         "backend": "blockMesh+snappyHexMesh",
         "distribution": config.solver.distribution,
         "openfoam_version": config.solver.version,
-        "container_image": "mdpi-openfoam-v2512-python3:local",
+        "container_image": "cfd-twin-openfoam-v2512-python3:local",
         "base_container_image": "opencfd/openfoam-default:2512",
         "container_execution_tested": False,
         "parallel_execution": {
@@ -1328,8 +1396,23 @@ def write_production_mesh_source_bundle(
             *sorted(solver_launchers),
         ],
         "mesh_level": mesh_level,
+        "mesh_profile": mesh_level,
+        "default_single_run_profile": mesh_level == DEFAULT_MESH_PROFILE,
         "target_cell_count": preset.target_cells,
         "target_is_calibration_goal_not_exact_gate": True,
+        "target_composition": {
+            "total_cells": preset.target_cells,
+            "solid_cells": preset.target_solid_cells,
+            "fluid_cells": preset.target_fluid_cells,
+            "points": preset.target_points,
+        },
+        "element_family": {
+            "requested": "hexahedral-based",
+            "implemented": "hexa-dominant body-fitted",
+            "all_hexa_claimed": False,
+            "minimum_hexahedron_fraction": 0.80,
+            "reason": "curved snapped boundaries and prism wall layers create non-hexa cells",
+        },
         "background_bounds_m": {"min": list(lower), "max": list(upper)},
         "background_divisions": list(block_counts),
         "background_nominal_cell_m": preset.background_cell_m,

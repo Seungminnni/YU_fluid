@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .errors import MdpiCfdError
+from .errors import CfdTwinError
 
 
 EXPECTED = {
@@ -139,17 +139,17 @@ def validate_animations(
 ) -> dict[str, object]:
     case = Path(case_dir).resolve()
     if shutil.which("ffprobe") is None or shutil.which("ffmpeg") is None:
-        raise MdpiCfdError("ffprobe and ffmpeg are required for animation validation")
+        raise CfdTwinError("ffprobe and ffmpeg are required for animation validation")
     manifest_path = case / "results/result_manifest.json"
     if not manifest_path.is_file():
-        raise MdpiCfdError(f"result manifest is missing: {manifest_path}")
+        raise CfdTwinError(f"result manifest is missing: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     semantics = manifest.get("animation_semantics", {})
     videos: dict[str, object] = {}
     for name, expected in EXPECTED.items():
         path = case / "results/artifacts" / expected["filename"]
         if not path.is_file():
-            raise MdpiCfdError(f"animation is missing: {path}")
+            raise CfdTwinError(f"animation is missing: {path}")
         result = _inspect_video(
             path,
             expected_frames=int(expected["frames"]),
@@ -242,6 +242,21 @@ def validate_animations(
                 and 'id="flow-seek"' in html
                 and 'id="flow-play"' in html
             ),
+            "velocity_integrated_moving_heads": (
+                "function prepareFlowPathPhysics" in script
+                and "function physicalFlowPoint" in script
+                and "lengthM*Math.log(speed1/speed0)/delta" in script
+                and "Math.expm1" in script
+                and "const phase=simulationTime/30" not in script
+            ),
+            "legible_velocity_scaled_heads": (
+                'id="head-rate"' in html
+                and '<option value="0.5" selected>0.5× 보기</option>' in html
+                and "simulationTime*headDisplayScale()" in script
+                and "function sectionMarkerPhase" in script
+                and "simulationTime/210" not in script
+                and "simulationTime/8" not in script
+            ),
             "interactive_mouse_orbit_during_playback": (
                 'canvas.addEventListener("pointermove"' in script
                 and "requestAnimationFrame(animate)" in script
@@ -249,13 +264,18 @@ def validate_animations(
             "figure1_radio_modes": (
                 html.count('name="viz-mode"') == 7
                 and "selectVisualMode" in script
-                and "Fig 4/7/8" in html
-                and "Fig 12" in html
+                and "종합 화면" in html
+                and "셀 온도" in html
+                and "유체 유선" in html
+                and "가로 단면 온도" in html
+                and "가로 단면 유속" in html
+                and "세로 단면 온도" in html
+                and "세로 단면 유속" in html
                 and '6:"xy-temperature"' in script
                 and '11:"xy-velocity"' in script
             ),
             "interactive_xy_xz_sections": (
-                "drawSection(horizontalSection()" in script
+                "const section=horizontalSection()" in script
                 and "verticalSelection" in script
                 and "for(const section of selectedVertical)drawSection" in script
                 and "drawSectionVelocity" in script
@@ -280,11 +300,43 @@ def validate_animations(
                 and "verticalRange" in script
             ),
             "refined_direct_section_grid": (
-                "function drawActualSection" in script
+                "function drawDirectSampleTiles" in script
                 and "actualDatasetValue" in script
                 and '"columns":114' in model_text
                 and '"spatial_interpolation":false' in model_text
                 and '"padding":false' in model_text
+            ),
+            "switchable_smooth_section_rendering": (
+                'id="smooth-section"' in html
+                and "DISPLAY SMOOTH" in script
+                and "NO INVALID PADDING" in script
+                and "imageSmoothingQuality" in script
+            ),
+            "interactive_xy_3d_plane": (
+                'id="section-3d"' in html
+                and "function drawXYPlaneTexture" in script
+                and "function drawDirectXYVelocity3D" in script
+                and 'selectView(section3DInput.checked?"iso":"pz")' in script
+            ),
+            "cell_surface_gradient_and_extrema": (
+                "function surfaceCornerTemperatures" in script
+                and "function thermalFaceGradient" in script
+                and "function cellSurfaceExtrema" in script
+                and "CELL SURFACE MAX" in script
+                and "CELL SURFACE MIN" in script
+            ),
+            "cell_id_temporary_notification": (
+                'id="cell-toast"' in html
+                and "data-cell-id" in script
+                and "function showCellNotification" in script
+                and "highlightedCellId" in script
+            ),
+            "bounded_long_run_canvas_work": (
+                'id="scene-overlay"' in html
+                and "const sectionRasterCache=new WeakMap()" in script
+                and "Math.sqrt(3200000/cssPixels)" in script
+                and "overlayRenderAccumulator>=1/30" in script
+                and "sceneBaseCache" not in script
             ),
             "independent_layer_checkboxes": (
                 all(
@@ -310,7 +362,7 @@ def validate_animations(
             "raw_temperature_datum_is_disclosed": (
                 "temperature_display_offset_c" in script
                 and "RAW T (293.15 K)" in script
-                and "무보정 · K−273.15만 적용" in script
+                and "T 원본 · 시간보간/패딩 없음" in script
                 and '"temperature_display_offset_c":0.0' in model_text
             ),
             "file_protocol_portable_actual_data": (

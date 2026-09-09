@@ -12,11 +12,283 @@ from pathlib import Path
 
 from .config import ResolvedConfig
 from .geometry import cell_placements, geometry_report
+from .openfoam_cold_flow_validation import parse_cold_flow_log
+from .openfoam_results import (
+    LEGACY_DISPLAY_TEMPERATURE_OFFSET_C,
+    REFERENCE_FIGURE_RANGES,
+    OpenFoamResultReader,
+    read_openfoam_dat,
+)
+from .production_mesh import SINGLE_MESH_TARGET_COUNTS
 from .result_contract import figure_catalog
 
 
-def _direct_l3_xy_velocity_cut(config: ResolvedConfig, case: Path) -> dict[str, object] | None:
-    """Return the actual L3 cell-centred XY cut without probe interpolation."""
+CURRENT_PRECISION_MESH = {
+    "total_cells": 1_316_854,
+    "fluid_cells": 1_061_438,
+    "solid_cells": 255_416,
+    "points": 1_403_119,
+    "hexahedra": 1_245_779,
+    "hexahedron_fraction": 1_245_779 / 1_316_854,
+}
+
+
+def _mesh_runs_payload(case: Path, *, precision_data_ready: bool) -> list[dict[str, object]]:
+    """Describe selectable datasets without assigning one mesh's fields to another."""
+
+    precision = dict(CURRENT_PRECISION_MESH)
+    precision_zone_report = (
+        case / "production/L3/reports/production_mesh/cellZones_pre_split.json"
+    )
+    if precision_zone_report.is_file():
+        zone_report = json.loads(precision_zone_report.read_text(encoding="utf-8"))
+        zone_counts = zone_report.get("zone_cell_counts", {})
+        precision["total_cells"] = int(zone_report["mesh_cell_count"])
+        precision["fluid_cells"] = int(zone_counts.get("coolant", 0))
+        precision["solid_cells"] = sum(
+            int(value)
+            for name, value in zone_counts.items()
+            if str(name).startswith("battery_C")
+        )
+
+    target_report_path = (
+        case / "production/single/reports/production_mesh/mesh_target_composition.json"
+    )
+    target_report: dict[str, object] = {}
+    if target_report_path.is_file():
+        target_report = json.loads(target_report_path.read_text(encoding="utf-8"))
+    target_actual = target_report.get("actual", {})
+    mesh_ready = target_report.get("status") == "MESH_TARGET_VALIDATION_PASSED"
+
+    return [
+        {
+            "id": "precision",
+            "label": "정밀 결과 · 1,316,854셀",
+            "state_label": "계산 완료",
+            "mesh_ready": True,
+            "data_ready": precision_data_ready,
+            "counts": precision,
+            "element_family": "hexa-dominant body-fitted",
+            "note": "0–1800 s 직접 결과가 연결된 현재 정밀 메시입니다.",
+        },
+        {
+            "id": "single",
+            "label": "표준 계산 · 목표 207,390셀",
+            "state_label": "메시 검증 완료" if mesh_ready else "계산 전",
+            "mesh_ready": mesh_ready,
+            # No single-profile field loader exists until that calculation has
+            # produced its own validated result package. Never reuse precision.
+            "data_ready": False,
+            "counts": target_actual or {
+                "total_cells": SINGLE_MESH_TARGET_COUNTS["total_cells"],
+                "fluid_cells": SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
+                "solid_cells": SINGLE_MESH_TARGET_COUNTS["solid_cells"],
+                "points": SINGLE_MESH_TARGET_COUNTS["points"],
+            },
+            "counts_are_targets": not mesh_ready,
+            "element_family": "hexa-dominant target (≥80% hexahedra)",
+            "note": (
+                "새 단일 계산 프로파일입니다. 자체 CFD 필드가 생성되기 전에는 "
+                "정밀 결과를 대신 표시하지 않습니다."
+            ),
+        },
+    ]
+
+
+def _convergence_payload(case: Path) -> dict[str, object]:
+    """Extract a compact, truthful residual history for the browser."""
+
+    transient_candidates = (
+        case
+        / "production/single/runs/full_transient_actual_1s/reports/solver/transient_residuals.csv",
+        case
+        / "production/L3/runs/full_transient_actual_1s/reports/solver/transient_residuals.csv",
+    )
+    transient_residual_path = next(
+        (candidate for candidate in transient_candidates if candidate.is_file()), None
+    )
+    run_candidates = (
+        case / "production/single/runs/steady_cht",
+        case / "production/L3/runs/steady_cht",
+        case / "production/L0/runs/steady_cht",
+    )
+    run_dir = next(
+        (
+            candidate
+            for candidate in run_candidates
+            if (candidate / "logs/solver").is_dir()
+        ),
+        None,
+    )
+    grouped: dict[str, dict[int, float]] = {}
+    continuity: dict[int, float] = {}
+    linear_iteration_total = 0
+    source_logs: list[str] = []
+    validation: dict[str, object] = {}
+    axis_mode = "openfoam_outer_iteration"
+    scope = "현재 정밀 결과 · 정상상태 CHT 초기화"
+    transient_summary: dict[str, object] = {}
+    if transient_residual_path is not None:
+        with transient_residual_path.open(encoding="utf-8", newline="") as stream:
+            for row in csv.DictReader(stream):
+                iteration = int(row["global_iteration"])
+                qualified = f'{row["region"]}.{row["field"]}'
+                value = float(row["initial_residual"])
+                grouped.setdefault(qualified, {})[iteration] = max(
+                    value, grouped.get(qualified, {}).get(iteration, 0.0)
+                )
+                linear_iteration_total += int(row.get("linear_iterations") or 0)
+        source_logs.append(str(transient_residual_path.relative_to(case)))
+        summary_path = transient_residual_path.with_name(
+            "transient_residuals_summary.json"
+        )
+        if summary_path.is_file():
+            transient_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            source_logs.append(str(summary_path.relative_to(case)))
+        axis_mode = "cumulative_pimple_outer_iteration"
+        scope = (
+            "새 표준 결과 · 전체 과도 CHT 계산"
+            if "single" in transient_residual_path.parts
+            else "정밀 결과 · 전체 과도 CHT 계산"
+        )
+    elif run_dir is not None:
+        if "single" in run_dir.parts:
+            scope = "새 표준 결과 · 정상상태 CHT 초기화"
+        for log_path in sorted((run_dir / "logs/solver").glob("steady_cht*.log")):
+            parsed = parse_cold_flow_log(log_path)
+            if not parsed["records"]:
+                continue
+            source_logs.append(str(log_path.relative_to(case)))
+            for iteration_text, record in parsed["records"].items():
+                iteration = int(round(float(iteration_text)))
+                for qualified, values in record["residuals"].items():
+                    if values:
+                        linear_iteration_total += sum(
+                            int(value.get("linear_iterations", 0)) for value in values
+                        )
+                        grouped.setdefault(qualified, {})[iteration] = max(
+                            float(value["initial"]) for value in values
+                        )
+                continuity_values = record.get("continuity")
+                if continuity_values is not None:
+                    value = abs(float(continuity_values["global"]))
+                    if value > 0:
+                        continuity[iteration] = value
+        validation_path = run_dir / "reports/solver/steady_cht_validation.json"
+        if validation_path.is_file():
+            validation = json.loads(validation_path.read_text(encoding="utf-8"))
+
+    # A postprocessed case can retain residuals.csv after solver logs have been
+    # archived. This fallback never invents points or interpolates iterations.
+    if not grouped:
+        residual_path = case / "results/residuals.csv"
+        if residual_path.is_file():
+            with residual_path.open(encoding="utf-8", newline="") as stream:
+                for row in csv.DictReader(stream):
+                    qualified = f'{row["region"]}.{row["field"]}'
+                    iteration = int(round(float(row["iteration"])))
+                    value = float(row["initial_residual"])
+                    grouped.setdefault(qualified, {})[iteration] = max(
+                        value, grouped.get(qualified, {}).get(iteration, 0.0)
+                    )
+            source_logs.append(str(residual_path.relative_to(case)))
+    if not grouped:
+        return {"available": False}
+
+    labels = {
+        "continuity.global": "질량보존 |global|",
+        "coolant.p_rgh": "압력 p_rgh",
+        "coolant.Ux": "x-velocity",
+        "coolant.Uy": "y-velocity",
+        "coolant.Uz": "z-velocity",
+        "coolant.h": "유체 energy(h)",
+        "batterySolid.h": "고체 energy(h)",
+        "coolant.k": "k",
+        "coolant.omega": "omega",
+    }
+    colours = {
+        "continuity.global": "#55d6c2",
+        "coolant.p_rgh": "#63b3ff",
+        "coolant.Ux": "#a9a0ff",
+        "coolant.Uy": "#ff655a",
+        "coolant.Uz": "#43a7e8",
+        "coolant.h": "#ff9d2e",
+        "batterySolid.h": "#ffd166",
+        "coolant.k": "#8fd12a",
+        "coolant.omega": "#ef9acb",
+    }
+    if continuity:
+        grouped["continuity.global"] = continuity
+    floors = validation.get("residual_floors", {})
+    series = []
+    all_iterations: set[int] = set()
+    for key in labels:
+        points = sorted(grouped.get(key, {}).items())
+        if not points:
+            continue
+        stride = max(1, math.ceil(len(points) / 1200))
+        sampled = [
+            [iteration, value]
+            for index, (iteration, value) in enumerate(points)
+            if index % stride == 0 or index == len(points) - 1
+        ]
+        all_iterations.update(iteration for iteration, _ in points)
+        series.append(
+            {
+                "key": key,
+                "label": labels[key],
+                "colour": colours[key],
+                "points": sampled,
+                "raw_point_count": len(points),
+                "final": points[-1][1],
+                "configured_gate": floors.get(key),
+            }
+        )
+    final_checks = validation.get("residual_checks", {})
+    return {
+        "available": bool(series),
+        "source": "actual OpenFOAM solver log",
+        "scope": scope,
+        "source_files": source_logs,
+        "series": series,
+        "axis_mode": axis_mode,
+        "iteration_count": len(all_iterations),
+        "first_iteration": min(all_iterations),
+        "last_iteration": max(all_iterations),
+        "linear_iteration_total": linear_iteration_total or None,
+        "time_step_count": transient_summary.get("time_step_count"),
+        "first_time_s": transient_summary.get("first_time_s"),
+        "last_time_s": transient_summary.get("last_time_s"),
+        "validation_status": validation.get("status", "SAVED_HISTORY"),
+        "configured_residual_checks_passed": (
+            bool(final_checks) and all(bool(value) for value in final_checks.values())
+        ),
+        "available_during_calculation": True,
+        "live_note": (
+            "During a new run these values are emitted on every solver iteration; "
+            "the current static viewer contains the saved completed history."
+        ),
+        "iteration_axis_note": (
+            "The x-axis is the cumulative PIMPLE outer-correction number, matching "
+            "the transient iteration structure of the ANSYS reference. Residual "
+            "values remain raw OpenFOAM residuals, not Fluent scaled residuals."
+            if axis_mode == "cumulative_pimple_outer_iteration"
+            else "The completed current result uses the OpenFOAM steady outer-"
+            "iteration number. A new full-transient result will use the cumulative "
+            "PIMPLE outer-correction axis."
+        ),
+        "semantics": (
+            "Curves use maximum initial linear-solver residual per recorded iteration. "
+            "OpenFOAM global continuity error is plotted separately and is not "
+            "relabeled as a normalized Fluent continuity residual."
+        ),
+    }
+
+
+def _direct_precision_xy_velocity_cut(
+    config: ResolvedConfig, case: Path
+) -> dict[str, object] | None:
+    """Return the precision-mesh cell-centred XY cut without interpolation."""
 
     foam_file = case / "production/L3/runs/steady_cht/steady_cht.foam"
     run_dir = foam_file.parent
@@ -93,7 +365,7 @@ def _direct_l3_xy_velocity_cut(config: ResolvedConfig, case: Path) -> dict[str, 
     )
     speeds = np.linalg.norm(vtk_to_numpy(velocity), axis=1)
     return {
-        "source": "L3 steady_cht cell-centred U on the Z-centre vtkCutter plane",
+        "source": "precision steady_cht cell-centred U on the Z-centre vtkCutter plane",
         "time": latest_time,
         "interpolation": "none; one containing OpenFOAM cell value per cut triangle",
         "points_xy_mm": np.round(points, 4).tolist(),
@@ -116,18 +388,9 @@ def _interactive_legacy_cfd_payload(
     if not foam_file.is_file() or not history_file.is_file() or not telemetry_file.is_file():
         return {"enabled": False}
 
-    # Import lazily so the geometry-only viewer remains dependency-free at build
-    # time. The extracted browser payload itself uses only plain JSON/Canvas.
-    from .postprocess import (
-        DISPLAY_TEMPERATURE_OFFSET_C,
-        PAPER_FIGURE_RANGES,
-        _ScientificBackend,
-        read_openfoam_dat,
-    )
-
-    backend = _ScientificBackend(foam_file)
+    backend = OpenFoamResultReader(foam_file)
     fluid, _ = backend.regions(1800.0)
-    all_paths = backend._streamline_paths(fluid, config)
+    all_paths = backend.streamline_paths(fluid, config)
     long_paths = [path for path in all_paths if path[4] >= 60.0]
     if not long_paths:
         return {"enabled": False}
@@ -156,7 +419,7 @@ def _interactive_legacy_cfd_payload(
         f"C{index:02d}": {
             0: config.boundary.initial_solid_temperature_k
             - 273.15
-            + DISPLAY_TEMPERATURE_OFFSET_C
+            + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
         }
         for index in range(1, 24)
     }
@@ -168,7 +431,7 @@ def _interactive_legacy_cfd_payload(
             raw_history[row["cell_id"]][time_s] = (
                 float(row["surface_tavg_K"])
                 - 273.15
-                + DISPLAY_TEMPERATURE_OFFSET_C
+                + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
             )
     times = list(range(0, 1801, 15))
     if any(set(values) != set(times) for values in raw_history.values()):
@@ -184,12 +447,12 @@ def _interactive_legacy_cfd_payload(
         "IN": {
             0: config.boundary.inlet_temperature_k
             - 273.15
-            + DISPLAY_TEMPERATURE_OFFSET_C
+            + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
         },
         "OUT": {
             0: config.boundary.initial_fluid_temperature_k
             - 273.15
-            + DISPLAY_TEMPERATURE_OFFSET_C
+            + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
         },
     }
     with telemetry_file.open(encoding="utf-8", newline="") as stream:
@@ -200,12 +463,12 @@ def _interactive_legacy_cfd_payload(
             port_temperature["IN"][time_s] = (
                 float(row["coolant_tin_K"])
                 - 273.15
-                + DISPLAY_TEMPERATURE_OFFSET_C
+                + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
             )
             port_temperature["OUT"][time_s] = (
                 float(row["coolant_tout_K"])
                 - 273.15
-                + DISPLAY_TEMPERATURE_OFFSET_C
+                + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
             )
     if any(set(values) != set(times) for values in port_temperature.values()):
         return {"enabled": False}
@@ -417,7 +680,7 @@ def _interactive_legacy_cfd_payload(
         transient_fluid, transient_solid = backend.regions(float(time_s))
         if time_s == times[-1]:
             final_fluid = transient_fluid
-        surface_points, _, surface_temperature = backend._surface(transient_solid)
+        surface_points, _, surface_temperature = backend.surface(transient_solid)
         if not surface_point_indices:
             for placement in cell_placements(config):
                 delta_xy = np.linalg.norm(
@@ -462,7 +725,7 @@ def _interactive_legacy_cfd_payload(
             values = (
                 surface_temperature[indices]
                 - 273.15
-                + DISPLAY_TEMPERATURE_OFFSET_C
+                + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
             )
             surface_temperature_frames[cell_id].append(
                 [round(float(value), 5) for value in values]
@@ -474,7 +737,7 @@ def _interactive_legacy_cfd_payload(
             combined_valid = fluid_valid | solid_valid
             combined_temperature = np.where(
                 solid_valid, solid_temperature, fluid_temperature
-            ) - 273.15 + DISPLAY_TEMPERATURE_OFFSET_C
+            ) - 273.15 + LEGACY_DISPLAY_TEMPERATURE_OFFSET_C
             section["temperature_frames_c"].append(
                 json_values(combined_temperature, combined_valid)
             )
@@ -501,7 +764,7 @@ def _interactive_legacy_cfd_payload(
         section["velocity_range_m_s"] = [0.0, max(valid_speed)]
 
     lengths = [float(path[4]) for path in selected]
-    direct_xy_velocity = _direct_l3_xy_velocity_cut(config, case)
+    direct_xy_velocity = _direct_precision_xy_velocity_cut(config, case)
     return {
         "enabled": True,
         "semantics": (
@@ -509,7 +772,7 @@ def _interactive_legacy_cfd_payload(
             "datum correction; moving heads follow the validated fixed "
             "velocity field U(x), not transient U(x,t)."
         ),
-        "temperature_display_offset_c": DISPLAY_TEMPERATURE_OFFSET_C,
+        "temperature_display_offset_c": LEGACY_DISPLAY_TEMPERATURE_OFFSET_C,
         "temperature_display_semantics": (
             "raw solver temperatures are preserved; viewer values equal raw degC + 0.150 K"
         ),
@@ -521,9 +784,9 @@ def _interactive_legacy_cfd_payload(
         },
         "port_flow": port_flow,
         "paper_temperature_ranges_c": {
-            "cell": PAPER_FIGURE_RANGES["figure_09_temperature_degC"],
-            "xy": PAPER_FIGURE_RANGES["figure_14_temperature_degC"],
-            "xz": PAPER_FIGURE_RANGES["figure_13b_temperature_degC"],
+            "cell": REFERENCE_FIGURE_RANGES["figure_09_temperature_degC"],
+            "xy": REFERENCE_FIGURE_RANGES["figure_14_temperature_degC"],
+            "xz": REFERENCE_FIGURE_RANGES["figure_13b_temperature_degC"],
         },
         "temperature_range_c": [min(all_temperatures), max(all_temperatures)],
         "cell_surface": {
@@ -557,7 +820,7 @@ def _interactive_legacy_cfd_payload(
 def _interactive_actual_cfd_payload(
     config: ResolvedConfig, case: Path, *, enabled: bool
 ) -> dict[str, object] | None:
-    """Build the browser payload from the completed L3 1 s direct samples."""
+    """Build the browser payload from completed precision-result samples."""
 
     if not enabled:
         return None
@@ -577,8 +840,6 @@ def _interactive_actual_cfd_payload(
         or not foam_file.is_file()
     ):
         return None
-
-    from .postprocess import PAPER_FIGURE_RANGES, _ScientificBackend, read_openfoam_dat
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validation = json.loads(validation_path.read_text(encoding="utf-8"))
@@ -705,10 +966,10 @@ def _interactive_actual_cfd_payload(
         "inlet_area_average_pressure_pa": inlet_pressure,
         "outlet_area_average_pressure_pa": outlet_pressure,
         "pressure_drop_pa": inlet_pressure - outlet_pressure,
-        "spatial_field_semantics": "validated L3 fixed cell field U(x), p(x)",
+        "spatial_field_semantics": "validated precision-mesh fixed field U(x), p(x)",
     }
 
-    backend = _ScientificBackend(foam_file)
+    backend = OpenFoamResultReader(foam_file)
     numeric_times = []
     for path in foam_file.parent.iterdir():
         if path.is_dir():
@@ -717,7 +978,7 @@ def _interactive_actual_cfd_payload(
             except ValueError:
                 pass
     fluid, _ = backend.regions(max(numeric_times))
-    all_paths = backend._streamline_paths(fluid, config)
+    all_paths = backend.streamline_paths(fluid, config)
     long_paths = [path for path in all_paths if path[4] >= 60.0]
     selected_count = min(220, len(long_paths))
     selected = [
@@ -817,7 +1078,7 @@ def _interactive_actual_cfd_payload(
             "velocity_m_s": velocity_magnitudes,
             "velocity_vectors_m_s": velocity_vectors,
             "velocity_range_m_s": [0.0, max(valid_velocity)],
-            "spatial_sampling": "direct containing L3 cell; no interpolation or padding",
+            "spatial_sampling": "direct containing precision-mesh cell; no interpolation or padding",
         }
 
     datasets = json.loads(json.dumps(manifest["datasets"]))
@@ -828,9 +1089,9 @@ def _interactive_actual_cfd_payload(
     return {
         "enabled": True,
         "semantics": (
-            "L3 OpenFOAM direct containing-cell T samples at every integer second; "
+            "precision-result OpenFOAM containing-cell T samples at every integer second; "
             "no temporal interpolation, spatial interpolation, display correction, or padding. "
-            "Moving heads follow the validated fixed L3 U(x)."
+            "Moving heads follow the validated fixed precision-result U(x)."
         ),
         "temperature_display_offset_c": 0.0,
         "temperature_display_semantics": "raw solver kelvin converted only by subtracting 273.15",
@@ -864,9 +1125,9 @@ def _interactive_actual_cfd_payload(
         },
         "port_flow": port_flow,
         "paper_temperature_ranges_c": {
-            "cell": PAPER_FIGURE_RANGES["figure_09_temperature_degC"],
-            "xy": PAPER_FIGURE_RANGES["figure_14_temperature_degC"],
-            "xz": PAPER_FIGURE_RANGES["figure_13b_temperature_degC"],
+            "cell": REFERENCE_FIGURE_RANGES["figure_09_temperature_degC"],
+            "xy": REFERENCE_FIGURE_RANGES["figure_14_temperature_degC"],
+            "xz": REFERENCE_FIGURE_RANGES["figure_13b_temperature_degC"],
         },
         "temperature_range_c": [min(temperatures), max(temperatures)],
         "cell_surface": {
@@ -878,6 +1139,7 @@ def _interactive_actual_cfd_payload(
         },
         "actual_one_second": {
             "validation_status": validation["status"],
+            "mesh_cell_count": manifest["mesh_cell_count"],
             "initial_temperature_k": manifest["initial_temperature_k"],
             "times_s": manifest["times_s"],
             "temperature_encoding": manifest["temperature_encoding"],
@@ -893,7 +1155,7 @@ def _interactive_actual_cfd_payload(
         "minimum_displayed_length_mm": min(float(path[4]) for path in selected),
         "maximum_displayed_length_mm": max(float(path[4]) for path in selected),
         "sections": sections,
-        "direct_xy_velocity": _direct_l3_xy_velocity_cut(config, case),
+        "direct_xy_velocity": _direct_precision_xy_velocity_cut(config, case),
         "horizontal_section_keys": ["xy15", "xy33", "xy", "xy68", "xy85"],
         "vertical_section_keys": ["xz15", "xz33", "xz50", "xz68", "xz85"],
     }
@@ -913,51 +1175,53 @@ HTML = '''<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MDPI 23-cell CFD viewer</title>
-  <link rel="stylesheet" href="style.css">
+  <title>CFD 결과 뷰어</title>
+  <link rel="stylesheet" href="__STYLE_ASSET__">
 </head>
 <body>
   <header>
-    <div>
-      <p class="eyebrow">MDPI 23-CELL IMMERSION COOLING</p>
-      <h1>형상·CFD 결과 뷰어</h1>
+    <div class="brand">
+      <h1>CFD 결과 뷰어</h1>
+      <span>DIGITAL TWIN · SIMULATION REPLAY</span>
     </div>
     <div id="status" class="status">GEOMETRY PREVIEW · CFD 미실행</div>
   </header>
   <main>
     <section class="viewer-panel">
       <div class="viewer-controls">
+        <fieldset id="viz-modes" class="viz-modes" aria-label="결과 화면 선택">
+          <legend>결과 화면</legend>
+          <label><input type="radio" name="viz-mode" value="combined" checked><span>종합 화면</span></label>
+          <label><input type="radio" name="viz-mode" value="cell-temperature"><span>셀 온도</span></label>
+          <label><input type="radio" name="viz-mode" value="velocity-streamlines"><span>유체 유선</span></label>
+          <label><input type="radio" name="viz-mode" value="xy-temperature"><span>가로 단면 온도</span></label>
+          <label><input type="radio" name="viz-mode" value="xy-velocity"><span>가로 단면 유속</span></label>
+          <label><input type="radio" name="viz-mode" value="xz-temperature"><span>세로 단면 온도</span></label>
+          <label><input type="radio" name="viz-mode" value="xz-velocity"><span>세로 단면 유속</span></label>
+        </fieldset>
         <div class="control-head">
           <div class="toolbar" aria-label="camera views">
             <span class="control-title">시점</span>
             <button data-view="px">+X</button><button data-view="nx">−X</button>
             <button data-view="py">+Y</button><button data-view="ny">−Y</button>
             <button data-view="pz">+Z</button><button data-view="nz">−Z</button>
-            <button data-view="iso" class="active">ISO</button>
+            <button data-view="iso" class="active">등각</button>
             <button id="reset">맞춤</button>
           </div>
-          <fieldset id="display-options" class="display-options" aria-label="Figure 1 visible layers">
+          <fieldset id="display-options" class="display-options" aria-label="화면 레이어">
             <legend>레이어</legend>
             <label><input id="show-cells" type="checkbox" checked> 셀</label>
             <label><input id="show-flow" type="checkbox" checked> 유선·벡터</label>
             <label><input id="show-particles" type="checkbox" checked> 이동 헤드</label>
             <label><input id="show-section" type="checkbox" checked> 단면</label>
             <label><input id="show-grid" type="checkbox"> 샘플선</label>
+            <label title="실제 유효 샘플 또는 셀 표면 샘플의 경계만 부드럽게 연결하며 무효영역은 채우지 않습니다"><input id="smooth-section" type="checkbox" checked> 부드러운 색상</label>
+            <label id="section-3d-option" title="가로 단면을 회전·확대 가능한 3D 평면으로 표시합니다" hidden><input id="section-3d" type="checkbox" checked> 3D 단면</label>
             <label><input id="show-enclosure" type="checkbox" checked> 외곽선</label>
             <button id="flow-only" type="button">유동만</button>
             <button id="show-all" type="button">전체</button>
           </fieldset>
         </div>
-        <fieldset id="viz-modes" class="viz-modes" aria-label="Figure 1 visualization mode">
-          <legend>표시 모드</legend>
-          <label><input type="radio" name="viz-mode" value="combined" checked> 종합 T(t)+U(x) · Fig 8/9</label>
-          <label><input type="radio" name="viz-mode" value="cell-temperature"> 셀 T(t) · Fig 4/7/8</label>
-          <label><input type="radio" name="viz-mode" value="velocity-streamlines"> U(x) 유선 · Fig 10</label>
-          <label><input type="radio" name="viz-mode" value="xy-temperature"> XY 온도 T(t)+U(x) · Fig 6/14</label>
-          <label><input type="radio" name="viz-mode" value="xy-velocity"> XY 속도 U(x) 고정 · Fig 11</label>
-          <label><input type="radio" name="viz-mode" value="xz-temperature"> XZ 온도 · Fig 13</label>
-          <label><input type="radio" name="viz-mode" value="xz-velocity"> XZ 속도 · Fig 12</label>
-        </fieldset>
         <fieldset id="vertical-sections" class="section-positions vertical-sections" aria-label="vertical XZ section positions" hidden>
           <legend>세로 XZ 위치</legend>
           <label><input type="checkbox" name="vertical-section" value="xz15"> Y 15%</label>
@@ -981,8 +1245,11 @@ HTML = '''<!doctype html>
         </fieldset>
       </div>
       <div class="viewport">
-        <canvas id="scene" aria-label="interactive 3D battery geometry"></canvas>
-        <div id="data-load-status" class="data-load-status" role="status" aria-live="polite" hidden></div>
+        <div class="scene-stage">
+          <canvas id="scene" aria-label="interactive 3D battery geometry"></canvas>
+          <canvas id="scene-overlay" aria-hidden="true"></canvas>
+          <div id="data-load-status" class="data-load-status" role="status" aria-live="polite" hidden></div>
+        </div>
         <div id="flow-controls" class="flow-controls" aria-label="interactive CFD playback">
         <button id="flow-play" type="button">❚❚ 정지</button>
         <input id="flow-seek" type="range" min="0" max="1800" step="1" value="0" aria-label="simulation time in one-second display increments">
@@ -995,10 +1262,16 @@ HTML = '''<!doctype html>
           <option value="60">60×</option>
           <option value="180">180×</option>
         </select>
+        <label for="head-rate">헤드 속도</label>
+        <select id="head-rate" aria-label="moving head display speed" title="유속 수치는 그대로 유지하고 이동 헤드의 표시속도만 조절합니다">
+          <option value="0.25">0.25×</option>
+          <option value="0.5" selected>0.5× 보기</option>
+          <option value="1">1× 실제</option>
+        </select>
         <output id="flow-duration">1× 완주 30:00</output>
         <output id="flow-time">t = 0 s</output>
         <span id="flow-sampling">화면 1 s</span>
-        <span id="current-mode" aria-live="polite">종합: 실제 T(t) + 고정 U(x)</span>
+        <span id="current-mode" aria-live="polite">종합 화면</span>
         <span id="port-state" aria-live="polite">IN/OUT 면적평균</span>
         </div>
         <div id="figure-preview" class="figure-preview" hidden>
@@ -1050,201 +1323,320 @@ HTML = '''<!doctype html>
           </div>
           <output id="temperature-chart-status" aria-live="polite"></output>
         </div>
+        <div id="convergence-chart-panel" class="convergence-chart-panel" hidden>
+          <div class="convergence-chart-toolbar">
+            <button id="convergence-chart-close" type="button">← 3D 화면</button>
+            <strong>CFD 수렴 이력</strong>
+            <span>실제 솔버 반복 기준 · 로그 축</span>
+            <button id="convergence-chart-png" type="button">PNG 추출</button>
+            <button id="convergence-chart-csv" type="button">CSV 추출</button>
+          </div>
+          <div class="convergence-chart-canvas-wrap">
+            <canvas id="convergence-chart-canvas" aria-label="actual CFD residual convergence chart"></canvas>
+          </div>
+          <output id="convergence-chart-status" aria-live="polite"></output>
+        </div>
         <div id="canvas-note" class="canvas-note">드래그: 재생 중 3D 회전 · 휠: 확대/축소 · Ū·p̄ 실제 면적평균 · 포트는 A-04</div>
       </div>
     </section>
     <aside>
-      <section id="calculation-card" class="card warning">
-        <h2>계산 상태</h2>
-        <p id="calculation-summary"><strong>CFD 미실행</strong> — PPT 외곽/노치는 반영됐고 포트 y 좌표와 입구 열 배정은 A-04 기본 가정입니다.</p>
-        <p id="calculation-note">이 화면의 색은 셀 구분용이며 온도장이 아닙니다.</p>
+      <section id="calculation-card" class="card result-card warning">
+        <div class="card-title-row">
+          <h2>현재 결과</h2>
+          <span id="result-badge" class="result-badge">대기</span>
+        </div>
+        <div class="kpi-grid" aria-label="주요 CFD 결과">
+          <article><span>출구 평균 온도</span><strong id="kpi-outlet-temperature">—</strong><small id="kpi-outlet-time">현재 시점</small></article>
+          <article><span>최고 셀 온도</span><strong id="kpi-cell-maximum">—</strong><small id="kpi-cell-time">23개 셀 · 현재 시점</small></article>
+          <article><span>입구 유속</span><strong id="kpi-inlet-velocity">—</strong><small>면적 평균</small></article>
+          <article><span>압력 강하</span><strong id="kpi-pressure-drop">—</strong><small>입구 − 출구</small></article>
+        </div>
+        <p id="calculation-summary" class="result-meta"><strong>CFD 미실행</strong></p>
+        <p id="calculation-note" hidden></p>
       </section>
-      <section class="card">
-        <h2>확정 형상</h2>
-        <dl id="geometry"></dl>
-      </section>
-      <section class="card">
-        <h2>기준 계산값</h2>
-        <dl id="derived"></dl>
-      </section>
-      <section class="card">
-        <h2>Table 2·4 계산 입력</h2>
+      <section class="card condition-card">
+        <h2>운전 조건</h2>
         <dl id="inputs"></dl>
       </section>
+      <section class="card mesh-run-card">
+        <h2>계산 메시 선택</h2>
+        <label for="mesh-run-select">결과 데이터</label>
+        <select id="mesh-run-select" aria-label="calculation mesh result"></select>
+        <dl id="mesh-run-detail"></dl>
+        <p id="mesh-run-note"></p>
+      </section>
+      <section class="card convergence-card">
+        <h2>CFD 수렴 모니터</h2>
+        <dl id="convergence-summary"></dl>
+        <button id="convergence-chart-open" type="button">수렴 그래프 열기</button>
+        <p>잔차만이 아니라 질량·온도·압력 안정성도 함께 판정합니다.</p>
+      </section>
       <section class="card temperature-export-card">
-        <h2>온도 그래프 추출</h2>
+        <h2>온도 그래프</h2>
         <dl id="temperature-graph-summary"></dl>
-        <button id="temperature-chart-open" type="button">5개 실제 온도 그래프 보기·추출</button>
-        <p>0–1800 s, 1 s 간격 실제 function-object 값입니다.</p>
+        <button id="temperature-chart-open" type="button">온도 그래프 열기</button>
+        <p>0–1800 s · 1초 간격 · PNG/CSV 저장</p>
       </section>
-      <section class="card">
-        <h2>Figure 출력 계약</h2>
-        <div id="figures" class="figure-grid"></div>
-        <p id="figure-detail">Fig. 5 제외 · 주황색 항목은 실제 solver field 대기 중</p>
-      </section>
-      <section class="card">
-        <h2>셀 ID</h2>
-        <div id="cells" class="cell-grid"></div>
-      </section>
+      <details class="card detail-card">
+        <summary>모델 정보</summary>
+        <div class="detail-body"><dl id="geometry"></dl></div>
+      </details>
+      <details class="card detail-card">
+        <summary>해석 세부정보</summary>
+        <div class="detail-body"><dl id="derived"></dl></div>
+      </details>
+      <details class="card detail-card">
+        <summary>논문 Figure 결과</summary>
+        <div class="detail-body">
+          <div id="figures" class="figure-grid"></div>
+          <p id="figure-detail">Fig. 1 · 3D 인터랙티브 화면</p>
+        </div>
+      </details>
+      <details class="card detail-card">
+        <summary>셀 ID 보기</summary>
+        <div class="detail-body"><div id="cells" class="cell-grid"></div></div>
+      </details>
     </aside>
   </main>
+  <div id="cell-toast" class="cell-toast" role="status" aria-live="polite" hidden></div>
   <footer id="provenance"></footer>
   <script src="model.js"></script>
-  <script src="app.js"></script>
+  <script src="__APP_ASSET__"></script>
 </body>
 </html>
 '''
 
 
 CSS = '''
-:root { color-scheme: dark; --bg:#08111e; --panel:#0e1a2a; --line:#294158;
-  --text:#e9f2fa; --muted:#91a8bc; --cyan:#63d7e5; --amber:#ffbd5b; }
+:root { color-scheme:light; --bg:#eef3f6; --panel:#ffffff; --panel-raised:#f7fafb;
+  --line:#ccd8df; --text:#17232d; --muted:#61727e; --accent:#168ac1;
+  --accent-soft:#e7f4fa; --cyan:#168ca5; --amber:#9b6a16; --success:#168468; }
 * { box-sizing:border-box; }
-body { margin:0; min-height:100vh; background:radial-gradient(circle at 30% 0,#17324c 0,#08111e 42%);
-  color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; }
-header { height:86px; display:flex; justify-content:space-between; align-items:center; padding:0 28px;
-  border-bottom:1px solid var(--line); background:#08111ecc; }
-h1 { margin:1px 0 0; font-size:25px; letter-spacing:-.03em; }
-.eyebrow { margin:0; color:var(--cyan); font-size:11px; letter-spacing:.18em; font-weight:700; }
-.status { padding:9px 13px; border:1px solid #946321; color:#ffd795; background:#442e123d;
-  border-radius:999px; font-size:12px; font-weight:750; }
-main { display:grid; grid-template-columns:minmax(640px,1fr) 340px; gap:16px; padding:16px; height:calc(100vh - 118px); }
-.viewer-panel { min-height:600px; display:flex; flex-direction:column; border:1px solid var(--line); border-radius:14px;
-  overflow:hidden; background:linear-gradient(180deg,#101f31,#09131f); }
-.viewer-controls { position:relative; z-index:4; flex:0 0 auto; display:grid; gap:9px; padding:11px 12px;
-  border-bottom:1px solid #29465f; background:linear-gradient(180deg,#101f31 0%,#0b1725 100%);
-  box-shadow:0 8px 20px #02070d52; }
+html { min-width:320px; background:var(--bg); }
+body { margin:0; min-width:320px; min-height:100vh; min-height:100dvh; overflow-x:hidden; color:var(--text);
+  background-color:var(--bg); background-image:linear-gradient(#168ac10a 1px,transparent 1px),linear-gradient(90deg,#168ac10a 1px,transparent 1px);
+  background-size:32px 32px;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+header { position:sticky; top:0; z-index:20; height:68px; display:flex; justify-content:space-between; align-items:center; padding:0 20px;
+  border-bottom:1px solid var(--line); background:#f9fbfcf2; backdrop-filter:blur(12px); }
+.brand { display:flex; align-items:baseline; gap:12px; min-width:0; }
+h1 { margin:0; font-size:20px; font-weight:660; letter-spacing:-.02em; }
+.brand span { color:#6e8491; font:600 9px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.14em; white-space:nowrap; }
+.status { max-width:60%; display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid #b9cbd4;
+  color:#425762; background:#fff; border-radius:4px; font:600 10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; text-align:right; }
+.status::before { content:""; flex:0 0 auto; width:6px; height:6px; border-radius:50%; background:var(--success); box-shadow:0 0 8px #16846866; }
+main { display:grid; grid-template-columns:minmax(0,1fr) 330px; align-items:start; gap:12px; padding:12px; min-height:calc(100dvh - 68px); }
+.viewer-panel { position:sticky; top:80px; height:calc(100dvh - 92px); min-height:620px; display:flex; flex-direction:column;
+  border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#0c1721; box-shadow:0 8px 28px #39516114; }
+.viewer-controls { position:relative; z-index:4; flex:0 0 auto; display:grid; gap:8px; padding:0 10px 9px;
+  border-bottom:1px solid var(--line); background:#f8fafb; color:var(--text); }
 .viewer-controls[hidden] { display:none; }
-.control-head { display:flex; align-items:center; justify-content:space-between; gap:16px; min-width:0; }
-.control-title { color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.04em; }
-.viewport { position:relative; flex:1 1 auto; min-height:0; overflow:hidden; }
-#scene { position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; }
+.control-head { display:flex; align-items:center; justify-content:space-between; gap:14px; min-width:0; padding-top:1px; }
+.control-title { color:var(--muted); font-size:11px; font-weight:650; }
+.viewport { position:relative; flex:1 1 auto; min-height:0; overflow:hidden; display:flex;
+  flex-direction:column; background:#0c1721; }
+.scene-stage { position:relative; flex:1 1 0; width:100%; min-width:0; min-height:0; overflow:hidden;
+  overflow:clip; contain:strict; isolation:isolate; clip-path:inset(0); background:#0c1721; }
+#scene,#scene-overlay { position:absolute; inset:0; width:100%; height:100%; max-width:100%; max-height:100%;
+  min-width:0; min-height:0; display:block; }
+#scene { cursor:grab; background:#0c1721; }
+#scene-overlay { z-index:1; pointer-events:none; }
 #scene:active { cursor:grabbing; }
 .data-load-status { position:absolute; z-index:5; top:14px; left:50%; transform:translateX(-50%); max-width:min(760px,calc(100% - 28px));
-  padding:9px 12px; border:1px solid #3b8190; border-radius:7px; background:#071724f2; color:#bfeef3;
-  font-size:11px; font-weight:700; text-align:center; box-shadow:0 8px 22px #02070d80; }
-.data-load-status.error { border-color:#d08a32; background:#2c1c0bf2; color:#ffe0a7; }
+  padding:8px 11px; border:1px solid #496f9a; border-radius:5px; background:#101a25f2; color:#d7e6f7;
+  font-size:11px; font-weight:650; text-align:center; }
+.data-load-status.error { border-color:#9e7535; background:#241c11f2; color:#f3d89e; }
 .data-load-status[hidden] { display:none; }
 .toolbar { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
-.toolbar button { min-width:38px; padding:6px 8px; }
-.viz-modes { display:grid; grid-template-columns:repeat(7,minmax(112px,1fr)); gap:6px; margin:0; padding:0;
-  border:0; color:#cfe2ef; font-size:11px; min-width:0; }
+.toolbar button { min-width:36px; padding:5px 8px; }
+.viz-modes { display:flex; gap:0; margin:0; padding:0; overflow-x:auto; overflow-y:hidden;
+  border:0; border-bottom:1px solid var(--line); color:#43545f; font-size:12px; min-width:0;
+  scrollbar-width:thin; scrollbar-color:#a9bdc8 transparent; }
 .viz-modes[hidden] { display:none; }
 .viz-modes legend { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
-.viz-modes label { min-height:34px; display:flex; align-items:center; justify-content:center; gap:5px; padding:6px 8px;
-  border:1px solid #31506a; border-radius:7px; background:#0d2032; white-space:nowrap; cursor:pointer; text-align:center; }
-.viz-modes label:hover { border-color:#5793a8; background:#123047; }
-.viz-modes label:has(input:checked) { border-color:var(--cyan); color:#e9fdff; background:#123b4a; box-shadow:inset 0 0 0 1px #63d7e533; }
-.viz-modes input { margin:0; accent-color:var(--cyan); }
+.viz-modes label { position:relative; flex:1 0 112px; min-height:43px; display:flex; align-items:center; justify-content:center; padding:7px 8px;
+  border:0; border-bottom:2px solid transparent; background:transparent; white-space:nowrap; cursor:pointer; text-align:center; }
+.viz-modes label:hover { color:#17232d; background:#eef4f7; }
+.viz-modes label:has(input:checked) { border-bottom-color:var(--accent); color:#0a638d; background:var(--accent-soft); }
+.viz-modes label:focus-within { outline:2px solid #168ac155; outline-offset:-2px; }
+.viz-modes input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
 .display-options { display:flex; align-items:center; justify-content:flex-end; gap:6px 10px; flex-wrap:wrap;
-  margin:0; padding:0; border:0; color:#b9cedc; font-size:11px; }
+  margin:0; padding:0; border:0; color:#4d5d67; font-size:11px; }
 .display-options[hidden] { display:none; }
-.display-options legend { color:var(--muted); padding:0; margin-right:2px; font-size:11px; font-weight:800; }
+.display-options legend { color:var(--muted); padding:0; margin-right:2px; font-size:11px; font-weight:650; }
 .display-options label { display:flex; align-items:center; gap:4px; padding:4px 2px; white-space:nowrap; cursor:pointer; }
-.display-options input { margin:0; accent-color:var(--amber); }
+.display-options label[hidden] { display:none; }
+.display-options input { margin:0; accent-color:var(--accent); }
 .display-options button { padding:5px 8px; font-size:10px; }
 .vertical-sections,.horizontal-sections { display:flex; align-items:center; justify-content:center; gap:7px; flex-wrap:wrap;
-  margin:0; padding:7px 9px; border:1px solid #31506a; border-radius:8px; background:#081522; color:#c7dae6;
+  margin:0; padding:7px 9px; border:1px solid var(--line); border-radius:5px; background:#fff; color:#40515d;
   font-size:11px; }
 .vertical-sections[hidden],.horizontal-sections[hidden] { display:none; }
-.vertical-sections legend,.horizontal-sections legend { color:var(--cyan); padding:0 5px; font-weight:800; }
+.vertical-sections legend,.horizontal-sections legend { color:var(--cyan); padding:0 5px; font-weight:650; }
 .vertical-sections label,.horizontal-sections label { display:flex; align-items:center; gap:5px; min-height:28px; padding:4px 9px;
-  border:1px solid #2a455b; border-radius:6px; background:#0c1d2c; white-space:nowrap; cursor:pointer; }
-.vertical-sections label:hover,.horizontal-sections label:hover { border-color:#5793a8; }
-.vertical-sections label:has(input:checked),.horizontal-sections label:has(input:checked) { border-color:var(--cyan); color:#e8fdff; background:#123b4a; }
+  border:1px solid #c9d5dc; border-radius:4px; background:#f7fafb; white-space:nowrap; cursor:pointer; }
+.vertical-sections label:hover,.horizontal-sections label:hover { border-color:#68a7c4; }
+.vertical-sections label:has(input:checked),.horizontal-sections label:has(input:checked) { border-color:var(--accent); color:#0a638d; background:var(--accent-soft); }
 .vertical-sections input,.horizontal-sections input { margin:0; accent-color:var(--cyan); }
 .vertical-sections button,.horizontal-sections button { padding:5px 9px; font-size:10px; }
 #vertical-section-state,#horizontal-section-state { color:var(--amber); font-variant-numeric:tabular-nums; font-weight:700; }
-.flow-controls { position:absolute; z-index:3; left:14px; right:14px; bottom:42px; min-height:46px;
+.flow-controls { position:relative; z-index:3; flex:0 0 auto; min-height:46px; margin:0 12px 4px;
   display:flex; align-items:center; justify-content:center; gap:9px; padding:7px 10px;
-  border:1px solid #31506a; border-radius:8px; background:#07101be8; color:var(--muted);
+  border:1px solid #304651; border-radius:5px; background:#09121aed; color:#a9bfd0;
   font-size:11px; flex-wrap:wrap; }
 .flow-controls[hidden] { display:none; }
-.flow-controls button { padding:5px 8px; min-width:72px; }
+.flow-controls button { min-width:72px; padding:5px 8px; border-color:#45606d; color:#e1edf2; background:#132532; }
+.flow-controls button:hover { color:#fff; background:#1b3343; border-color:#6b94a8; }
+.flow-controls button.active { color:#fff; background:#176e91; border-color:#4fb8d8; }
 .flow-controls input[type="range"] { width:min(330px,36vw); accent-color:var(--cyan); }
-.flow-controls select { border:1px solid #36536d; border-radius:6px; color:#dcecf7; background:#102338;
+.flow-controls select { border:1px solid #344653; border-radius:4px; color:#dcecf2; background:#121e28;
   padding:5px 7px; font-weight:700; }
 #flow-time { color:var(--cyan); min-width:92px; font-variant-numeric:tabular-nums; font-weight:750; }
 #flow-sampling { color:#a9bfd0; white-space:nowrap; }
 #flow-duration,#video-duration { color:var(--amber); min-width:92px; font-variant-numeric:tabular-nums; font-weight:750; }
-button { border:1px solid #36536d; border-radius:7px; color:#cfe2ef; background:#102338e8;
-  padding:7px 10px; font-weight:700; cursor:pointer; }
-button:hover,button.active { color:#06131c; background:var(--cyan); border-color:var(--cyan); }
-.canvas-note { position:absolute; z-index:2; left:14px; right:14px; bottom:10px; padding:6px 9px; background:#07101bc9;
-  border-radius:6px; color:var(--muted); font-size:11px; }
-.figure-preview { position:absolute; inset:0; padding:18px; background:#08111e; z-index:1; }
+button { border:1px solid #bccbd3; border-radius:4px; color:#31434f; background:#fff;
+  padding:7px 10px; font-weight:650; cursor:pointer; transition:border-color .15s,background .15s,color .15s; }
+button:hover { color:#075f85; background:#eef7fb; border-color:#68a7c4; }
+button.active { color:#fff; background:#167dac; border-color:#167dac; }
+.canvas-note { position:relative; z-index:2; flex:0 0 auto; margin:0 12px 10px; padding:6px 9px; background:#09121ad1;
+  border:1px solid #253844; border-radius:4px; color:#9fb2c0; font-size:11px; }
+.figure-preview { position:absolute; inset:0; padding:18px; background:#0a1118; z-index:1; }
 .figure-preview img,.figure-preview video { width:100%; height:calc(100% - 76px); object-fit:contain; display:block; }
 .video-controls { min-height:34px; display:flex; align-items:center; justify-content:center; gap:8px;
-  color:var(--muted); font-size:11px; padding-top:6px; white-space:nowrap; flex-wrap:wrap; }
+  color:#a9bfd0; font-size:11px; padding-top:6px; white-space:nowrap; flex-wrap:wrap; }
 .video-controls[hidden] { display:none; }
 .video-controls button { padding:4px 7px; font-size:10px; }
 .video-controls input[type="range"] { width:min(220px,28vw); accent-color:var(--cyan); }
-.video-controls select { border:1px solid #36536d; border-radius:6px; color:#dcecf7; background:#102338;
+.video-controls select { border:1px solid #344653; border-radius:4px; color:#dcecf2; background:#121e28;
   padding:5px 7px; font-weight:700; }
 #video-time { color:var(--cyan); min-width:180px; font-variant-numeric:tabular-nums; font-weight:750; }
 #video-semantics { overflow:hidden; text-overflow:ellipsis; }
 .artifact-tabs { display:flex; justify-content:center; gap:7px; padding-top:8px; }
-.temperature-chart-panel { position:absolute; inset:0; z-index:7; display:flex; flex-direction:column; gap:8px;
-  padding:12px; background:#08111ef7; }
-.temperature-chart-panel[hidden] { display:none; }
-.temperature-chart-toolbar { display:flex; align-items:center; gap:7px; flex-wrap:wrap; color:var(--muted); font-size:11px; }
-.temperature-chart-toolbar button { padding:6px 9px; font-size:10px; }
-.temperature-chart-toolbar select { border:1px solid #36536d; border-radius:6px; color:#dcecf7; background:#102338;
+.temperature-chart-panel,.convergence-chart-panel { position:absolute; inset:0; z-index:7; display:flex; flex-direction:column; gap:8px;
+  padding:12px; background:#f7fafcfa; }
+.temperature-chart-panel[hidden],.convergence-chart-panel[hidden] { display:none; }
+.temperature-chart-toolbar,.convergence-chart-toolbar { display:flex; align-items:center; gap:7px; flex-wrap:wrap; color:var(--muted); font-size:11px; }
+.temperature-chart-toolbar button,.convergence-chart-toolbar button { padding:6px 9px; font-size:10px; }
+.temperature-chart-toolbar select { border:1px solid #bccbd3; border-radius:4px; color:#31434f; background:#fff;
   padding:6px 8px; font-weight:700; }
-.temperature-chart-canvas-wrap { flex:1 1 auto; min-height:280px; overflow:hidden; }
-#temperature-chart-canvas { width:100%; height:100%; display:block; }
-#temperature-chart-status { min-height:20px; color:#b9cedc; font-size:11px; font-variant-numeric:tabular-nums; }
+.temperature-chart-canvas-wrap,.convergence-chart-canvas-wrap { flex:1 1 auto; min-height:280px; overflow:hidden; }
+#temperature-chart-canvas,#convergence-chart-canvas { width:100%; height:100%; display:block; }
+#temperature-chart-status,#convergence-chart-status { min-height:20px; color:#536874; font-size:11px; font-variant-numeric:tabular-nums; }
 .temperature-export-card dl { margin-bottom:11px; }
-#temperature-chart-open { width:100%; border-color:#297480; color:#bdeef3; background:#102b3b; }
-aside { overflow:auto; padding-right:3px; }
-.card { padding:15px 16px; margin-bottom:12px; background:#0e1a2ade; border:1px solid var(--line); border-radius:12px; }
-.card h2 { margin:0 0 11px; font-size:14px; color:#dcecf7; }
+#temperature-chart-open,#convergence-chart-open { width:100%; border-color:#1685b3; color:#fff; background:#1685b3; }
+.mesh-run-card label { display:block; margin-bottom:5px; color:var(--muted); font-size:10px; font-weight:700; }
+.mesh-run-card select { width:100%; margin-bottom:11px; padding:8px; border:1px solid #b9cbd4; border-radius:4px; color:#243946; background:#f8fbfc; font-weight:700; }
+.mesh-run-card dl,.convergence-card dl { margin-bottom:11px; }
+aside { min-width:0; overflow:visible; padding-right:3px; }
+.card { padding:14px 15px; margin-bottom:10px; background:#fff; border:1px solid var(--line); border-radius:6px; box-shadow:0 2px 8px #3951610a; }
+.card h2 { margin:0 0 11px; padding-bottom:8px; border-bottom:1px solid #e1e8ec; font-size:13px; font-weight:650; color:var(--text); }
 .card p { color:var(--muted); font-size:12px; line-height:1.55; margin:5px 0; }
-.warning { border-color:#775321; background:#2d2114bf; }
+.card-title-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:11px; padding-bottom:9px; border-bottom:1px solid #e1e8ec; }
+.card-title-row h2 { margin:0; padding:0; border:0; }
+.result-badge { display:inline-flex; align-items:center; gap:5px; padding:4px 7px; border-radius:999px;
+  color:#526873; background:#edf2f4; font-size:9px; font-weight:750; letter-spacing:.04em; }
+.result-badge::before { content:""; width:6px; height:6px; border-radius:50%; background:#8ba0aa; }
+.validated .result-badge { color:#126a57; background:#e7f6f0; }
+.validated .result-badge::before { background:var(--success); box-shadow:0 0 7px #16846855; }
+.kpi-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+.kpi-grid article { min-width:0; padding:10px; border:1px solid #dce6eb; border-radius:5px; background:#f7fafb; }
+.kpi-grid span,.kpi-grid small { display:block; overflow:hidden; color:#71838d; font-size:9px; white-space:nowrap; text-overflow:ellipsis; }
+.kpi-grid strong { display:block; margin:3px 0 2px; color:#142a36; font-size:17px; line-height:1.15; font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+.kpi-grid article:first-child strong { color:#087c9a; }
+.kpi-grid article:nth-child(2) strong { color:#b04d1e; }
+.result-meta { margin-top:10px !important; padding:8px 9px; border-radius:4px; color:#536874 !important; background:#eef4f6; }
+.result-meta strong { color:#176b5a; }
+.detail-card { padding:0; }
+.detail-card summary { position:relative; padding:13px 38px 13px 15px; list-style:none; color:#334852; font-size:12px; font-weight:680; cursor:pointer; user-select:none; }
+.detail-card summary::-webkit-details-marker { display:none; }
+.detail-card summary::after { content:"+"; position:absolute; top:50%; right:15px; transform:translateY(-50%); color:#71838d; font-size:17px; font-weight:400; }
+.detail-card[open] summary::after { content:"−"; }
+.detail-card[open] summary { border-bottom:1px solid #e1e8ec; }
+.detail-body { padding:13px 15px 15px; }
+.warning { border-left:3px solid #8d6d36; }
 .warning strong { color:var(--amber); }
-.warning.validated { border-color:#246e65; background:#102f2dbf; }
-.warning.validated strong { color:#80eadc; }
+.warning.validated { border-color:var(--line); border-left-color:var(--success); background:#f5fbf8; }
+.warning.validated strong { color:#15745f; }
 dl { margin:0; display:grid; grid-template-columns:1fr auto; gap:7px 12px; font-size:12px; }
 dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; font-weight:700; }
 .cell-grid { display:grid; grid-template-columns:repeat(8,1fr); gap:5px; }
-.cell-grid span { padding:5px 0; text-align:center; border:1px solid #31506a; border-radius:5px;
-  color:#aee8ef; background:#102b3b; font-size:10px; }
+.cell-grid button { min-width:0; padding:6px 2px; text-align:center; border:1px solid #c9d8df; border-radius:3px;
+  color:#346477; background:#f4f9fb; font-size:10px; }
+.cell-grid button:hover,.cell-grid button.active { border-color:#168ac1; color:#075f85; background:#e5f5fb; }
+.cell-toast { position:fixed; z-index:50; top:82px; right:18px; max-width:min(320px,calc(100vw - 36px));
+  padding:10px 13px; border:1px solid #38a5ca; border-radius:5px; color:#eaf9ff; background:#0b2230ee;
+  box-shadow:0 10px 28px #07131c42; font-size:12px; font-weight:700; }
+.cell-toast[hidden] { display:none; }
 .figure-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:5px; }
-.figure-grid button { padding:6px 2px; text-align:center; border:1px solid #805b29; border-radius:5px;
-  color:#ffd08a; background:#302313; font-size:10px; }
-.figure-grid button.ready { border-color:#297480; color:#aee8ef; background:#102b3b; }
-footer { height:32px; padding:2px 19px; color:#617d91; font-size:10px; overflow:hidden; white-space:nowrap; }
-@media (max-width:1280px) {
-  main { grid-template-columns:minmax(560px,1fr) 310px; }
+.figure-grid button { padding:6px 2px; text-align:center; border:1px solid #d8cfbc; border-radius:3px;
+  color:#846b38; background:#fffaf0; font-size:10px; }
+.figure-grid button.ready { border-color:#97bccb; color:#1a627c; background:#eef8fb; }
+footer { min-height:32px; padding:6px 19px 8px; color:#617d91; font-size:10px; overflow:hidden; white-space:nowrap; }
+@media (max-width:1180px) {
+  main { grid-template-columns:minmax(0,1fr) 300px; }
   .control-head { align-items:flex-start; flex-direction:column; gap:7px; }
   .display-options { justify-content:flex-start; }
-  .viz-modes { grid-template-columns:repeat(4,minmax(126px,1fr)); }
 }
-@media (max-width:900px) {
+@media (max-width:1050px) {
   header { height:auto; min-height:76px; gap:12px; padding:14px 18px; }
   .status { max-width:48%; text-align:right; }
-  main { grid-template-columns:1fr; height:auto; padding:10px; }
-  .viewer-panel { height:78vh; min-height:680px; }
-  .viz-modes { grid-template-columns:repeat(2,minmax(138px,1fr)); }
-  aside { overflow:visible; }
+  main { grid-template-columns:1fr; padding:10px; }
+  .viewer-panel { position:relative; top:auto; width:100%; height:min(78dvh,760px); min-height:620px; }
+  aside { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; padding-right:0; }
+  .result-card { grid-column:1/-1; }
+  .card { margin-bottom:0; }
+}
+@media (max-width:680px) {
+  header { align-items:flex-start; flex-direction:column; min-height:0; gap:7px; padding:10px 12px; }
+  .brand { width:100%; justify-content:space-between; gap:7px; }
+  .brand span { font-size:8px; letter-spacing:.09em; }
+  .status { width:100%; max-width:100%; text-align:left; }
+  main { gap:8px; padding:6px; }
+  .viewer-panel { height:82dvh; min-height:620px; }
+  .viewer-controls { padding:0 6px 7px; }
+  .viz-modes label { flex-basis:128px; }
+  .control-head { width:100%; overflow-x:auto; }
+  .toolbar,.display-options { min-width:max-content; }
+  .flow-controls { margin:0 6px 4px; display:grid; grid-template-columns:auto minmax(110px,1fr) auto; gap:6px; }
+  .flow-controls input[type="range"] { width:100%; }
+  .flow-controls > label { display:none; }
+  #flow-play { grid-column:1; }
+  #flow-seek { grid-column:2; }
+  #flow-rate { grid-column:3; }
+  #head-rate { grid-column:1; grid-row:2; }
+  #flow-duration,#flow-sampling,#current-mode { display:none; }
+  #flow-time { grid-column:2/-1; grid-row:2; text-align:center; }
+  #port-state { grid-column:1/-1; text-align:center; }
+  .canvas-note { margin:0 6px 6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  aside { grid-template-columns:1fr; }
 }
 '''
 
 
 JAVASCRIPT = r'''
 "use strict";
-const model = window.MDPI_MODEL;
+const model = window.CFD_TWIN_MODEL;
 const initialParams=new URLSearchParams(window.location.search);
 const canvas = document.getElementById("scene");
 const ctx = canvas.getContext("2d");
+const sceneStage = document.querySelector(".scene-stage");
+const overlayCanvas = document.getElementById("scene-overlay");
+const overlayCtx = overlayCanvas.getContext("2d");
 const viewerControls = document.querySelector(".viewer-controls");
 const flow = model.interactive_cfd || {enabled:false};
+const temperatureGraphs=flow.temperature_graphs||null;
+const convergence=model.convergence||{available:false};
+const meshRuns=model.mesh_runs||[];
+const meshRunSelect=document.getElementById("mesh-run-select");
+const meshRunDetail=document.getElementById("mesh-run-detail");
+const meshRunNote=document.getElementById("mesh-run-note");
 const sections = flow.sections || {};
 const directXYVelocity = flow.direct_xy_velocity || null;
 const flowControls = document.getElementById("flow-controls");
 const flowPlay = document.getElementById("flow-play");
 const flowSeek = document.getElementById("flow-seek");
 const flowRate = document.getElementById("flow-rate");
+const headRate = document.getElementById("head-rate");
 const flowDuration = document.getElementById("flow-duration");
 const flowTime = document.getElementById("flow-time");
 const flowSampling = document.getElementById("flow-sampling");
@@ -1253,6 +1645,9 @@ const dataLoadStatus = document.getElementById("data-load-status");
 const modeFieldset = document.getElementById("viz-modes");
 const modeInputs = Array.from(document.querySelectorAll('input[name="viz-mode"]'));
 const displayOptions = document.getElementById("display-options");
+const smoothSectionInput = document.getElementById("smooth-section");
+const section3DInput = document.getElementById("section-3d");
+const section3DOption = document.getElementById("section-3d-option");
 const horizontalSections = document.getElementById("horizontal-sections");
 const horizontalSectionInputs = Array.from(document.querySelectorAll('input[name="horizontal-section"]'));
 const horizontalSectionState = document.getElementById("horizontal-section-state");
@@ -1263,6 +1658,12 @@ const verticalSectionInputs = Array.from(document.querySelectorAll('input[name="
 const verticalSectionState = document.getElementById("vertical-section-state");
 const currentMode = document.getElementById("current-mode");
 const canvasNote = document.getElementById("canvas-note");
+const cellToast = document.getElementById("cell-toast");
+const dashboard={
+  outlet:document.getElementById("kpi-outlet-temperature"),cellMaximum:document.getElementById("kpi-cell-maximum"),
+  inletVelocity:document.getElementById("kpi-inlet-velocity"),pressureDrop:document.getElementById("kpi-pressure-drop"),
+  outletTime:document.getElementById("kpi-outlet-time"),cellTime:document.getElementById("kpi-cell-time")
+};
 const visibility={cells:true,flow:true,particles:true,section:true,grid:false,enclosure:true};
 const optionInputs={
   cells:document.getElementById("show-cells"),flow:document.getElementById("show-flow"),
@@ -1270,10 +1671,13 @@ const optionInputs={
   grid:document.getElementById("show-grid"),enclosure:document.getElementById("show-enclosure")
 };
 let yaw = 2.18, pitch = 0.52, zoom = 1, dragging = false, lastX = 0, lastY = 0;
+let highlightedCellId=null,cellHighlightTimer=null,cellExtremaCache={frame:-1,value:null};
+const requestedMeshRun=initialParams.get("mesh");
+let activeMeshRunId=meshRuns.some(run=>run.id===requestedMeshRun)?requestedMeshRun:(meshRuns.find(run=>run.data_ready)?.id||meshRuns[0]?.id||"precision");
 const requestedMode=initialParams.get("mode");
 if(requestedMode){const requestedInput=modeInputs.find(input=>input.value===requestedMode);if(requestedInput){for(const input of modeInputs)input.checked=input===requestedInput;}}
 const requestedTime=Number(initialParams.get("t"));
-let simulationTime = Number.isFinite(requestedTime)?Math.max(0,Math.min(1800,requestedTime)):0, flowPlaying = Boolean(flow.enabled)&&initialParams.get("autoplay")!=="0", previousFrameTime = 0, sceneRenderAccumulator = 0, lastSceneFrame = -1;
+let simulationTime = Number.isFinite(requestedTime)?Math.max(0,Math.min(1800,requestedTime)):0, flowPlaying = Boolean(flow.enabled)&&initialParams.get("autoplay")!=="0", previousFrameTime = 0, sceneRenderAccumulator = 0, overlayRenderAccumulator = 0, lastSceneFrame = -1;
 let visualMode = modeInputs.find(input=>input.checked)?.value || "combined";
 const box = model.enclosure_mm;
 const centre = [box.x/2, box.y/2, box.z/2];
@@ -1293,21 +1697,21 @@ function base64Bytes(payload){
   return bytes;
 }
 async function portableDatasetBuffer(name,specification){
-  window.MDPI_PACKED_DATA=window.MDPI_PACKED_DATA||{};
-  if(!window.MDPI_PACKED_DATA[name])await new Promise((resolve,reject)=>{
+  window.CFD_TWIN_PACKED_DATA=window.CFD_TWIN_PACKED_DATA||{};
+  if(!window.CFD_TWIN_PACKED_DATA[name])await new Promise((resolve,reject)=>{
     const script=document.createElement("script");
     script.src=specification.portable_file;
     script.onload=resolve;
     script.onerror=()=>reject(new Error(`${specification.portable_file}: local data script missing`));
     document.head.appendChild(script);
   });
-  const packed=window.MDPI_PACKED_DATA[name];
+  const packed=window.CFD_TWIN_PACKED_DATA[name];
   if(!packed)throw new Error(`${name}: local packed payload missing`);
   if(typeof DecompressionStream!=="function")throw new Error("이 브라우저는 로컬 CFD 압축 해제를 지원하지 않습니다. 최신 Chrome, Edge 또는 Safari를 사용하십시오.");
   const compressed=base64Bytes(packed.payload);
   const stream=new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
   const buffer=await new Response(stream).arrayBuffer();
-  delete window.MDPI_PACKED_DATA[name];
+  delete window.CFD_TWIN_PACKED_DATA[name];
   return buffer;
 }
 async function actualDatasetBuffer(name,specification){
@@ -1385,6 +1789,8 @@ const cellFaces=model.cells.flatMap(cell=>cylinderFaces(cell,cellSurface?.angula
 const portFaces=model.ports.flatMap(port=>cylinderFaces(port,24,1));
 const faces=cellFaces.concat(portFaces);
 const cellById=new Map(model.cells.map(cell=>[cell.id,cell]));
+const entityById=new Map([...model.cells,...model.ports].map(entity=>[entity.id,entity]));
+let projectedFaceCache={key:null,faces:null};
 const vertices=model.outline_mm.map(p=>[p[0],p[1],0]).concat(model.outline_mm.map(p=>[p[0],p[1],box.z]));
 const n=model.outline_mm.length,edges=[];
 for(let i=0;i<n;i++){const j=(i+1)%n;edges.push([i,j],[i+n,j+n],[i,i+n]);}
@@ -1394,7 +1800,48 @@ function jet(value){
   const t=clamp(value),r=clamp(1.5-Math.abs(4*t-3)),g=clamp(1.5-Math.abs(4*t-2)),b=clamp(1.5-Math.abs(4*t-1));
   return [Math.round(255*r),Math.round(255*g),Math.round(255*b)];
 }
+function activeMeshRun(){return meshRuns.find(run=>run.id===activeMeshRunId)||meshRuns[0]||null;}
+function faceVisible(face,basis){
+  const entity=entityById.get(face.id);if(!entity)return true;
+  let normal;
+  if(face.kind.endsWith("-cap")){
+    normal=[0,0,face.points[0][2]>=entity.z?1:-1];
+  }else{
+    const centreX=face.points.reduce((sum,point)=>sum+point[0],0)/face.points.length;
+    const centreY=face.points.reduce((sum,point)=>sum+point[1],0)/face.points.length;
+    const length=Math.hypot(centreX-entity.x,centreY-entity.y)||1;
+    normal=[(centreX-entity.x)/length,(centreY-entity.y)/length,0];
+  }
+  return dot(normal,basis.direction)>-0.02;
+}
+function projectedFaces(basis,scale,cx,cy,w,h){
+  const key=[yaw,pitch,zoom,w,h,scale,cx,cy].map(value=>Number(value).toFixed(5)).join("|");
+  if(projectedFaceCache.key===key&&projectedFaceCache.faces)return projectedFaceCache.faces;
+  const visible=faces.filter(face=>faceVisible(face,basis)).map(face=>{
+    const points=face.points.map(point=>projected(point,basis,scale,cx,cy));
+    return {face,points,depth:points.reduce((sum,point)=>sum+point.d,0)/points.length};
+  }).sort((a,b)=>a.depth-b.depth);
+  projectedFaceCache={key,faces:visible};return visible;
+}
 let directXYVelocityCache=null;
+const sectionRasterCache=new WeakMap();
+function sectionRaster(section,field,range){
+  let fields=sectionRasterCache.get(section);if(!fields){fields={};sectionRasterCache.set(section,fields);}
+  let raster=fields[field];
+  if(!raster){
+    const canvas=document.createElement("canvas");canvas.width=section.columns;canvas.height=section.rows;
+    const context=canvas.getContext("2d");raster={canvas,context,pixels:context.createImageData(section.columns,section.rows),fixedReady:false};fields[field]=raster;
+  }
+  if(field==="velocity"&&raster.fixedReady)return raster.canvas;
+  raster.pixels.data.fill(0);
+  for(let row=0;row<section.rows;row++)for(let column=0;column<section.columns;column++){
+    const index=row*section.columns+column,value=field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];
+    if(!Number.isFinite(value))continue;
+    const colour=jet((value-range[0])/Math.max(1e-12,range[1]-range[0])),pixel=4*(row*section.columns+(section.columns-1-column));
+    raster.pixels.data[pixel]=colour[0];raster.pixels.data[pixel+1]=colour[1];raster.pixels.data[pixel+2]=colour[2];raster.pixels.data[pixel+3]=255;
+  }
+  raster.context.putImageData(raster.pixels,0,0);if(field==="velocity")raster.fixedReady=true;return raster.canvas;
+}
 function buildDirectXYVelocityCache(){
   if(directXYVelocityCache||!directXYVelocity)return directXYVelocityCache;
   const factor=8,width=Math.round(box.x*factor),height=Math.round(box.y*factor);
@@ -1413,6 +1860,27 @@ function buildDirectXYVelocityCache(){
     targetContext.closePath();targetContext.fillStyle=`rgb(${colour[0]},${colour[1]},${colour[2]})`;targetContext.fill();
   }
   directXYVelocityCache=target;return target;
+}
+function drawXYPlaneTexture(image,section,basis,scale,cx,cy,alpha=.86){
+  if(!image||!section)return false;
+  const z=section.origin_mm[2];
+  const topLeft=projected([box.x,0,z],basis,scale,cx,cy);
+  const topRight=projected([0,0,z],basis,scale,cx,cy);
+  const bottomLeft=projected([box.x,box.y,z],basis,scale,cx,cy);
+  ctx.save();ctx.globalAlpha=alpha;ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
+  ctx.transform(
+    (topRight.x-topLeft.x)/image.width,(topRight.y-topLeft.y)/image.width,
+    (bottomLeft.x-topLeft.x)/image.height,(bottomLeft.y-topLeft.y)/image.height,
+    topLeft.x,topLeft.y
+  );
+  ctx.drawImage(image,0,0);ctx.restore();return true;
+}
+function drawDirectXYVelocity3D(section,basis,scale,cx,cy){
+  const image=buildDirectXYVelocityCache();
+  if(!drawXYPlaneTexture(image,section,basis,scale,cx,cy,.9))return false;
+  ctx.fillStyle="rgba(232,242,250,.96)";ctx.font="700 10px ui-monospace,monospace";
+  ctx.fillText(`PRECISION MESH ACTUAL VALUES · ${directXYVelocity.triangle_count.toLocaleString()} CUT TRIANGLES · 3D · NO PADDING`,96,46);
+  return true;
 }
 function directXYLayout(w,h){
   const plotLeft=96,plotRight=Math.max(plotLeft+160,w-28),plotTop=58,plotBottom=Math.max(plotTop+160,h-104);
@@ -1447,7 +1915,7 @@ function drawDirectXYVelocity(w,h,showScalar=true){
   drawDirectXYGeometry(layout);
   ctx.restore();
   ctx.fillStyle="rgba(232,242,250,.96)";ctx.font="700 10px ui-monospace,monospace";
-  ctx.fillText(`L3 ACTUAL CELL VALUES · ${directXYVelocity.triangle_count.toLocaleString()} CUT TRIANGLES · NO PADDING`,layout.plotLeft,layout.plotTop-12);
+  ctx.fillText(`PRECISION MESH ACTUAL VALUES · ${directXYVelocity.triangle_count.toLocaleString()} CUT TRIANGLES · NO PADDING`,layout.plotLeft,layout.plotTop-12);
   ctx.fillStyle="rgba(145,168,188,.98)";ctx.font="650 10px system-ui";
   ctx.fillText("FROZEN-FLOW U(x): 색상장은 고정 · 이동 마커는 실제 벡터 방향 표시",layout.plotLeft,layout.plotBottom+22);
   return true;
@@ -1459,23 +1927,36 @@ function drawDirectXYGrid(section,field,w,h,showScalar=true){
   ctx.fillStyle="rgba(7,16,27,.98)";ctx.fillRect(layout.left,layout.top,layout.width,layout.height);
   if(showScalar&&range){
     const stepX=Math.abs(section.column_step_mm[0])*layout.scale,stepY=Math.abs(section.row_step_mm[1])*layout.scale;
-    for(let index=0;index<section.columns*section.rows;index++){
+    if(smoothSectionInput.checked){
+      const fieldCanvas=sectionRaster(section,field,range);ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
+      ctx.drawImage(fieldCanvas,layout.left,layout.top,layout.width,layout.height);
+    }else for(let index=0;index<section.columns*section.rows;index++){
       const value=field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];if(!Number.isFinite(value))continue;
       const point=planePoint(section,index),x=layout.left+(box.x-point[0])*layout.scale,y=layout.top+point[1]*layout.scale;
       const colour=jet((value-range[0])/Math.max(1e-12,range[1]-range[0]));
       ctx.fillStyle=`rgb(${colour[0]},${colour[1]},${colour[2]})`;ctx.fillRect(x-stepX/2,y-stepY/2,stepX+.35,stepY+.35);
-      if(visibility.grid){ctx.strokeStyle="rgba(225,238,246,.13)";ctx.lineWidth=.3;ctx.strokeRect(x-stepX/2,y-stepY/2,stepX,stepY);}
+    }
+    if(visibility.grid){
+      ctx.strokeStyle="rgba(225,238,246,.11)";ctx.lineWidth=.3;
+      for(let column=0;column<=section.columns;column++){const x=layout.left+column*layout.width/section.columns;ctx.beginPath();ctx.moveTo(x,layout.top);ctx.lineTo(x,layout.top+layout.height);ctx.stroke();}
+      for(let row=0;row<=section.rows;row++){const y=layout.top+row*layout.height/section.rows;ctx.beginPath();ctx.moveTo(layout.left,y);ctx.lineTo(layout.left+layout.width,y);ctx.stroke();}
     }
   }
   drawDirectXYGeometry(layout);ctx.restore();
   ctx.fillStyle="rgba(232,242,250,.96)";ctx.font="700 10px ui-monospace,monospace";
-  ctx.fillText(`L3 DIRECT CELL SAMPLES · ${section.columns} × ${section.rows} · ${section.label} · NO INTERPOLATION / PADDING`,layout.plotLeft,layout.plotTop-12);
+  const renderLabel=smoothSectionInput.checked?"DISPLAY SMOOTH · VALID NEIGHBOURS ONLY":"EXACT SAMPLE TILES";
+  ctx.fillText(`PRECISION MESH DIRECT SAMPLES · ${section.columns} × ${section.rows} · ${section.label} · ${renderLabel} · NO INVALID PADDING`,layout.plotLeft,layout.plotTop-12);
   return true;
 }
-function drawDirectXYVelocityVectors(layout,movingOnly=false){
+function headDisplayScale(){return Number(headRate?.value||.5);}
+function sectionMarkerPhase(speed,index){
+  const displayTravelM=Math.max(.12,Math.hypot(box.x,box.y,box.z)/1000);
+  return ((simulationTime*headDisplayScale()*Math.max(0,speed)/displayTravelM+index*.381966)%1+1)%1;
+}
+function drawDirectXYVelocityVectors(layout,movingOnly=false,targetContext=ctx){
   const section=horizontalSection();if(!section?.velocity_vectors_m_s)return;
   const limit=Math.max(1e-9,section.velocity_range_m_s[1]);
-  ctx.save();ctx.beginPath();ctx.rect(layout.plotLeft,layout.plotTop,layout.plotRight-layout.plotLeft,layout.plotBottom-layout.plotTop);ctx.clip();
+  targetContext.save();targetContext.beginPath();targetContext.rect(layout.plotLeft,layout.plotTop,layout.plotRight-layout.plotLeft,layout.plotBottom-layout.plotTop);targetContext.clip();
   for(let row=2;row<section.rows-2;row+=5)for(let column=2;column<section.columns-2;column+=5){
     const index=row*section.columns+column,vector=section.velocity_vectors_m_s[index];if(!vector)continue;
     const magnitude=Math.hypot(...vector),planarMagnitude=Math.hypot(vector[0],vector[1]);
@@ -1484,20 +1965,20 @@ function drawDirectXYVelocityVectors(layout,movingOnly=false){
     const directionX=-vector[0]/planarMagnitude,directionY=vector[1]/planarMagnitude;
     const length=6+12*Math.sqrt(clamp(magnitude/limit)),endX=x+directionX*length,endY=y+directionY*length;
     if(!movingOnly){
-      ctx.strokeStyle="rgba(242,249,253,.72)";ctx.lineWidth=.85;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(endX,endY);ctx.stroke();
+      targetContext.strokeStyle="rgba(242,249,253,.72)";targetContext.lineWidth=.85;targetContext.beginPath();targetContext.moveTo(x,y);targetContext.lineTo(endX,endY);targetContext.stroke();
       const angle=Math.atan2(directionY,directionX),head=3.2;
-      ctx.beginPath();ctx.moveTo(endX,endY);ctx.lineTo(endX-head*Math.cos(angle-.55),endY-head*Math.sin(angle-.55));
-      ctx.moveTo(endX,endY);ctx.lineTo(endX-head*Math.cos(angle+.55),endY-head*Math.sin(angle+.55));ctx.stroke();
+      targetContext.beginPath();targetContext.moveTo(endX,endY);targetContext.lineTo(endX-head*Math.cos(angle-.55),endY-head*Math.sin(angle-.55));
+      targetContext.moveTo(endX,endY);targetContext.lineTo(endX-head*Math.cos(angle+.55),endY-head*Math.sin(angle+.55));targetContext.stroke();
     }else if(visibility.particles){
-      const phase=((simulationTime/8+index*.381966)%1+1)%1;
+      const phase=sectionMarkerPhase(magnitude,index);
       for(let tail=2;tail>=0;tail--){
         const fraction=((phase-tail*.075)%1+1)%1,mx=x+directionX*length*fraction,my=y+directionY*length*fraction;
-        ctx.beginPath();ctx.arc(mx,my,tail===0?2.05:1.25,0,2*Math.PI);
-        ctx.fillStyle=tail===0?"rgba(255,255,255,.98)":`rgba(106,221,239,${.18+(2-tail)*.2})`;ctx.fill();
+        targetContext.beginPath();targetContext.arc(mx,my,tail===0?2.05:1.25,0,2*Math.PI);
+        targetContext.fillStyle=tail===0?"rgba(255,255,255,.98)":`rgba(106,221,239,${.18+(2-tail)*.2})`;targetContext.fill();
       }
     }
   }
-  ctx.restore();
+  targetContext.restore();
 }
 function timeSeriesValue(values){
   if(!values||values.length===0)return null;
@@ -1524,14 +2005,54 @@ function surfaceThermalValue(id,index){
   if(Number.isFinite(a)&&Number.isFinite(b))return a+weight*(b-a);
   return Number.isFinite(a)?a:Number.isFinite(b)?b:thermalValue(id);
 }
-function surfaceBoundaryTemperatures(face){
-  if(actualOneSecond)return null;
-  if(!cellSurface||!face.kind.endsWith("-side")||!Number.isInteger(face.axialIndex))return null;
-  const segments=cellSurface.angular_segments,rows=cellSurface.axial_segments,current=surfaceThermalValue(face.id,face.surfaceIndex);
-  if(!Number.isFinite(current))return null;
-  const below=face.axialIndex>0?surfaceThermalValue(face.id,(face.axialIndex-1)*segments+face.angularIndex):current;
-  const above=face.axialIndex<rows-1?surfaceThermalValue(face.id,(face.axialIndex+1)*segments+face.angularIndex):current;
-  return {lower:.5*(current+below),upper:.5*(current+above)};
+function meanFinite(values){
+  const valid=values.filter(Number.isFinite);return valid.length?valid.reduce((sum,value)=>sum+value,0)/valid.length:null;
+}
+function surfaceCornerTemperatures(face){
+  if(!cellSurface||!Number.isInteger(face.surfaceIndex))return null;
+  const segments=cellSurface.angular_segments,rows=cellSurface.axial_segments,sideCount=segments*rows;
+  if(face.kind.endsWith("-side")&&Number.isInteger(face.axialIndex)){
+    const axial=face.axialIndex,angular=face.angularIndex;
+    const sample=(row,column)=>surfaceThermalValue(face.id,clamp(row,0,rows-1)*segments+((column%segments)+segments)%segments);
+    return [
+      meanFinite([sample(axial,angular),sample(axial-1,angular),sample(axial,angular-1),sample(axial-1,angular-1)]),
+      meanFinite([sample(axial,angular),sample(axial-1,angular),sample(axial,angular+1),sample(axial-1,angular+1)]),
+      meanFinite([sample(axial,angular),sample(axial+1,angular),sample(axial,angular+1),sample(axial+1,angular+1)]),
+      meanFinite([sample(axial,angular),sample(axial+1,angular),sample(axial,angular-1),sample(axial+1,angular-1)])
+    ];
+  }
+  if(face.kind.endsWith("-cap")){
+    const top=face.surfaceIndex>=sideCount+segments,base=sideCount+(top?segments:0),angular=face.surfaceIndex-base;
+    const sample=column=>surfaceThermalValue(face.id,base+((column%segments)+segments)%segments);
+    const centre=meanFinite(Array.from({length:segments},(_,index)=>sample(index)));
+    const before=meanFinite([sample(angular-1),sample(angular)]),after=meanFinite([sample(angular),sample(angular+1)]);
+    return top?[centre,before,after]:[centre,after,before];
+  }
+  return null;
+}
+function surfaceSamplePoint(cell,surfaceIndex){
+  const segments=cellSurface.angular_segments,rows=cellSurface.axial_segments,sideCount=segments*rows;
+  if(surfaceIndex<sideCount){
+    const axial=Math.floor(surfaceIndex/segments),angular=surfaceIndex%segments,angle=2*Math.PI*(angular+.5)/segments;
+    return [cell.x+cell.radius*Math.cos(angle),cell.y+cell.radius*Math.sin(angle),cell.z-cell.length/2+cell.length*(axial+.5)/rows];
+  }
+  const top=surfaceIndex>=sideCount+segments,angular=surfaceIndex-sideCount-(top?segments:0),angle=2*Math.PI*(angular+.5)/segments;
+  return [cell.x+.58*cell.radius*Math.cos(angle),cell.y+.58*cell.radius*Math.sin(angle),cell.z+(top?1:-1)*cell.length/2];
+}
+function cellSurfaceExtrema(){
+  const dataset=actualDatasets.get(cellSurface?.actual_dataset);if(!dataset)return null;
+  const frame=clamp(Math.round(simulationTime),0,dataset.specification.frame_count-1);
+  if(cellExtremaCache.frame===frame)return cellExtremaCache.value;
+  const validCount=dataset.specification.valid_count,offset=frame*validCount,scale=actualOneSecond.temperature_encoding;
+  let minimum=null,maximum=null;
+  for(let validIndex=0;validIndex<validCount;validIndex++){
+    const pointIndex=dataset.specification.valid_indices[validIndex],encoded=dataset.encoded[offset+validIndex];
+    const value=scale.minimum_k+encoded*scale.quantum_k-273.15;
+    const cellIndex=Math.floor(pointIndex/dataset.specification.samples_per_cell),surfaceIndex=pointIndex%dataset.specification.samples_per_cell,cell=model.cells[cellIndex];
+    const sample={value,cellId:cell.id,surfaceIndex,point:surfaceSamplePoint(cell,surfaceIndex)};
+    if(!minimum||value<minimum.value)minimum=sample;if(!maximum||value>maximum.value)maximum=sample;
+  }
+  cellExtremaCache={frame,value:{minimum,maximum}};return cellExtremaCache.value;
 }
 function portTemperature(id){return timeSeriesValue(flow.port_temperature_c?.[id]);}
 function portMetrics(id){
@@ -1542,9 +2063,21 @@ function portMetrics(id){
     pressurePa:flow.port_flow?.[`${prefix}_area_average_pressure_pa`]
   };
 }
+function updateDashboardMetrics(inletMetrics=portMetrics("IN"),outletMetrics=portMetrics("OUT")){
+  const timeIndex=clamp(Math.round(simulationTime),0,1800),timeLabel=`${timeIndex} s`;
+  const outletTemperature=temperatureGraphs?.outlet_mass_weighted_average_c?.[timeIndex]??outletMetrics.temperatureC;
+  const cellMaximum=temperatureGraphs?.battery_mesh_maximum_c?.[timeIndex];
+  dashboard.outlet.textContent=Number.isFinite(outletTemperature)?`${outletTemperature.toFixed(3)} °C`:"—";
+  dashboard.cellMaximum.textContent=Number.isFinite(cellMaximum)?`${cellMaximum.toFixed(3)} °C`:"—";
+  dashboard.inletVelocity.textContent=Number.isFinite(inletMetrics.velocityMS)?`${inletMetrics.velocityMS.toFixed(3)} m/s`:"—";
+  dashboard.pressureDrop.textContent=Number.isFinite(flow.port_flow?.pressure_drop_pa)?`${flow.port_flow.pressure_drop_pa.toFixed(1)} Pa`:"—";
+  dashboard.outletTime.textContent=timeLabel;
+  dashboard.cellTime.textContent=`23개 셀 · ${timeLabel}`;
+}
 function updatePortStateText(inletMetrics=portMetrics("IN"),outletMetrics=portMetrics("OUT")){
   const temperatureSemantics=actualOneSecond?"T 원본(무보정)":"T 표시보정 +"+flow.temperature_display_offset_c.toFixed(3)+" K";
   portState.textContent=`${temperatureSemantics} · IN T ${inletMetrics.temperatureC.toFixed(3)} °C / Ū ${inletMetrics.velocityMS.toFixed(3)} m/s / p̄ ${(inletMetrics.pressurePa/1000).toFixed(3)} kPa · OUT T ${outletMetrics.temperatureC.toFixed(3)} °C / Ū ${outletMetrics.velocityMS.toFixed(3)} m/s / p̄ ${(outletMetrics.pressurePa/1000).toFixed(3)} kPa · Δp ${flow.port_flow.pressure_drop_pa.toFixed(3)} Pa`;
+  updateDashboardMetrics(inletMetrics,outletMetrics);
 }
 function drawPortCallout(anchor,id,metrics,accent,w,h){
   if(!Number.isFinite(metrics.temperatureC)||!Number.isFinite(metrics.velocityMS)||!Number.isFinite(metrics.pressurePa))return;
@@ -1567,12 +2100,58 @@ function drawPortCallout(anchor,id,metrics,accent,w,h){
   ctx.fillText(`p̄   ${(metrics.pressurePa/1000).toFixed(3)} kPa`,left+8,top+64);
   ctx.restore();
 }
-function flowPoint(path,fraction){
-  const wrapped=((fraction%1)+1)%1,position=wrapped*(path.p.length-1);
-  const left=Math.floor(position),right=Math.min(path.p.length-1,left+1),weight=position-left;
+function thermalFaceGradient(face,points,range,fallback){
+  // Thousands of per-face CanvasGradient allocations landing on the exact
+  // one-second boundary caused the visible periodic hitch. During playback,
+  // keep the actual mesh-face value and reserve the cosmetic intra-face
+  // gradient for paused inspection.
+  if(flowPlaying)return fallback;
+  const temperatures=surfaceCornerTemperatures(face);
+  if(!smoothSectionInput.checked||!temperatures||!temperatures.every(Number.isFinite))return fallback;
+  let cold=0,hot=0;for(let index=1;index<temperatures.length;index++){if(temperatures[index]<temperatures[cold])cold=index;if(temperatures[index]>temperatures[hot])hot=index;}
+  if(Math.abs(temperatures[hot]-temperatures[cold])<1e-10)return fallback;
+  const gradient=ctx.createLinearGradient(points[cold].x,points[cold].y,points[hot].x,points[hot].y);
+  for(const [position,index] of [[0,cold],[.5,-1],[1,hot]]){
+    const temperature=index<0?meanFinite(temperatures):temperatures[index],colour=jet((temperature-range[0])/Math.max(1e-9,range[1]-range[0]));
+    gradient.addColorStop(position,`rgba(${colour[0]},${colour[1]},${colour[2]},.95)`);
+  }
+  return gradient;
+}
+function drawCellExtremumCallout(sample,title,accent,basis,scale,cx,cy,w,h,upper){
+  if(!sample)return;
+  const anchor=projected(sample.point,basis,scale,cx,cy),boxWidth=164,boxHeight=49;
+  const preferredX=anchor.x<w*.58?anchor.x+14:anchor.x-boxWidth-14,left=clamp(preferredX,104,w-boxWidth-10);
+  const preferredY=upper?anchor.y-boxHeight-16:anchor.y+16,top=clamp(preferredY,92,h-boxHeight-78);
+  const targetX=anchor.x<left?left:anchor.x>left+boxWidth?left+boxWidth:anchor.x,targetY=anchor.y<top?top:anchor.y>top+boxHeight?top+boxHeight:anchor.y;
+  ctx.save();ctx.strokeStyle=accent;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(anchor.x,anchor.y);ctx.lineTo(targetX,targetY);ctx.stroke();
+  ctx.beginPath();ctx.arc(anchor.x,anchor.y,5,0,2*Math.PI);ctx.fillStyle="rgba(6,16,25,.95)";ctx.fill();ctx.strokeStyle=accent;ctx.lineWidth=2;ctx.stroke();
+  ctx.fillStyle="rgba(5,14,24,.94)";ctx.fillRect(left,top,boxWidth,boxHeight);ctx.strokeStyle=accent;ctx.lineWidth=1;ctx.strokeRect(left+.5,top+.5,boxWidth-1,boxHeight-1);
+  ctx.fillStyle=accent;ctx.font="800 10px system-ui";ctx.fillText(`${title} · ${sample.cellId}`,left+8,top+16);
+  ctx.fillStyle="rgba(239,247,252,.98)";ctx.font="700 11px ui-monospace,monospace";ctx.fillText(`${sample.value.toFixed(4)} °C · t ${Math.round(simulationTime)} s`,left+8,top+35);ctx.restore();
+}
+function prepareFlowPathPhysics(path){
+  if(path.physics)return path.physics;
+  const cumulativeTimeS=[0],segmentLengthM=[];
+  for(let index=1;index<path.p.length;index++){
+    const lengthM=Math.hypot(...path.p[index].map((value,axis)=>value-path.p[index-1][axis]))/1000;
+    const speed0=Math.max(1e-6,path.s[index-1]),speed1=Math.max(1e-6,path.s[index]),delta=speed1-speed0;
+    const durationS=lengthM<=0?0:Math.abs(delta)<1e-9?lengthM/speed0:lengthM*Math.log(speed1/speed0)/delta;
+    segmentLengthM.push(lengthM);cumulativeTimeS.push(cumulativeTimeS.at(-1)+durationS);
+  }
+  path.physics={cumulativeTimeS,segmentLengthM,transitTimeS:cumulativeTimeS.at(-1)};
+  return path.physics;
+}
+function physicalFlowPoint(path,elapsedTimeS){
+  const physics=prepareFlowPathPhysics(path),total=physics.transitTimeS;
+  if(!Number.isFinite(total)||total<=0)return {point:path.p[0],speed:path.s[0]};
+  const target=((elapsedTimeS%total)+total)%total,times=physics.cumulativeTimeS;
+  let low=0,high=times.length-1;
+  while(low+1<high){const middle=(low+high)>>1;if(times[middle]<=target)low=middle;else high=middle;}
+  const left=low,right=Math.min(path.p.length-1,left+1),localTime=target-times[left],lengthM=physics.segmentLengthM[left];
+  const speed0=Math.max(1e-6,path.s[left]),speed1=Math.max(1e-6,path.s[right]),delta=speed1-speed0;
+  const weight=clamp(lengthM<=0?0:Math.abs(delta)<1e-9?localTime*speed0/lengthM:speed0*Math.expm1(delta*localTime/lengthM)/delta);
   const point=[0,1,2].map(axis=>path.p[left][axis]+weight*(path.p[right][axis]-path.p[left][axis]));
-  const speed=path.s[left]+weight*(path.s[right]-path.s[left]);
-  return {point,speed};
+  return {point,speed:path.s[left]+weight*(path.s[right]-path.s[left])};
 }
 function drawScalarLegend(w,h,title,range,unit,referenceRange=null){
   if(!flow.enabled||!range)return;
@@ -1581,7 +2160,8 @@ function drawScalarLegend(w,h,title,range,unit,referenceRange=null){
   for(let index=0;index<=8;index++){const t=index/8,[r,g,b]=jet(t);gradient.addColorStop(t,`rgb(${r},${g},${b})`);}
   ctx.fillStyle=gradient;ctx.fillRect(x,y,width,height);ctx.strokeStyle="rgba(230,240,250,.7)";ctx.strokeRect(x,y,width,height);
   ctx.fillStyle="rgba(232,242,250,.96)";ctx.font="700 11px system-ui";ctx.fillText(title,x-1,y-24);
-  const scaleLabel=actualOneSecond?"RAW CFD · NO INTERPOLATION":`DISPLAY CAL. +${flow.temperature_display_offset_c.toFixed(3)} K`;
+  const sectionSmooth=smoothSectionInput.checked&&(visualMode.startsWith("xy-")||visualMode.startsWith("xz-"));
+  const scaleLabel=actualOneSecond?(sectionSmooth?"RAW SAMPLES · DISPLAY SMOOTH":"RAW CFD · NO INTERPOLATION"):`DISPLAY CAL. +${flow.temperature_display_offset_c.toFixed(3)} K`;
   ctx.fillStyle="rgba(145,168,188,.96)";ctx.font="600 9px system-ui";ctx.fillText(unit==="C"?scaleLabel:"ACTUAL CFD SCALE",x-1,y-10);
   const intervals=unit==="C"?18:9;
   ctx.font="700 9px ui-monospace,monospace";
@@ -1608,16 +2188,19 @@ function sectionTemperature(section,index){
   if(Number.isFinite(a)&&Number.isFinite(b))return a+weight*(b-a);
   return Number.isFinite(a)?a:Number.isFinite(b)?b:null;
 }
+function sectionFieldValue(section,field,index){
+  return field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];
+}
 function bilinear(values,u,v){
   return values[0]*(1-u)*(1-v)+values[1]*u*(1-v)+values[2]*u*v+values[3]*(1-u)*v;
 }
 function bilinearPoint(points,u,v){
   return [0,1,2].map(axis=>bilinear(points.map(point=>point[axis]),u,v));
 }
-function drawActualSection(section,basis,scale,cx,cy,range,alpha){
+function drawDirectSampleTiles(section,field,basis,scale,cx,cy,range,alpha){
   const quads=[];
   for(let index=0;index<section.columns*section.rows;index++){
-    const value=sectionTemperature(section,index);if(!Number.isFinite(value))continue;
+    const value=sectionFieldValue(section,field,index);if(!Number.isFinite(value))continue;
     const centrePoint=planePoint(section,index),columnHalf=section.column_step_mm.map(value=>.5*value),rowHalf=section.row_step_mm.map(value=>.5*value);
     const points=[
       centrePoint.map((value,axis)=>value-columnHalf[axis]-rowHalf[axis]),
@@ -1639,11 +2222,12 @@ function drawActualSection(section,basis,scale,cx,cy,range,alpha){
 function drawSection(section,field,basis,scale,cx,cy,rangeOverride=null,alpha=.82,subdivisions=3){
   if(!section)return;
   const range=rangeOverride||(field==="temperature"?section.temperature_range_c:section.velocity_range_m_s);
-  if(field==="temperature"&&actualOneSecond&&section.actual_dataset){drawActualSection(section,basis,scale,cx,cy,range,alpha);return;}
+  const directlySampled=field==="velocity"||(field==="temperature"&&actualOneSecond&&section.actual_dataset);
+  if(directlySampled&&!smoothSectionInput.checked){drawDirectSampleTiles(section,field,basis,scale,cx,cy,range,alpha);return;}
   const quads=[];
   for(let row=0;row<section.rows-1;row++)for(let column=0;column<section.columns-1;column++){
     const ids=[row*section.columns+column,row*section.columns+column+1,(row+1)*section.columns+column+1,(row+1)*section.columns+column];
-    const values=ids.map(index=>field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index]);
+    const values=ids.map(index=>sectionFieldValue(section,field,index));
     if(!values.every(Number.isFinite))continue;
     const points=ids.map(index=>planePoint(section,index));
     for(let subRow=0;subRow<subdivisions;subRow++)for(let subColumn=0;subColumn<subdivisions;subColumn++){
@@ -1684,20 +2268,22 @@ function drawSectionLabel(section,basis,scale,cx,cy){
   ctx.fillStyle="rgba(5,14,24,.82)";ctx.fillRect(point.x+4,point.y-15,width,15);
   ctx.fillStyle="rgba(255,215,149,.98)";ctx.fillText(label,point.x+8,point.y-4);ctx.restore();
 }
-function drawSectionVelocity(section,basis,scale,cx,cy){
+function drawSectionVelocity(section,basis,scale,cx,cy,movingOnly=false,targetContext=ctx){
   if(!section||!section.velocity_vectors_m_s)return;
-  const limit=Math.max(1e-9,section.velocity_range_m_s[1]);
-  for(let row=1;row<section.rows-1;row+=2)for(let column=1;column<section.columns-1;column+=2){
+  const limit=Math.max(1e-9,section.velocity_range_m_s[1]),stride=Math.max(2,Math.ceil(Math.max(section.rows,section.columns)/24));
+  for(let row=1;row<section.rows-1;row+=stride)for(let column=1;column<section.columns-1;column+=stride){
     const index=row*section.columns+column,vector=section.velocity_vectors_m_s[index];
     if(!vector)continue;
     const magnitude=Math.hypot(...vector);if(magnitude<limit*.012)continue;
     const point=planePoint(section,index),length=3+8*Math.sqrt(clamp(magnitude/limit));
     const direction=vector.map(value=>value/magnitude),end=point.map((value,axis)=>value+direction[axis]*length);
     const a=projected(point,basis,scale,cx,cy),b=projected(end,basis,scale,cx,cy);
-    ctx.strokeStyle="rgba(245,251,255,.82)";ctx.lineWidth=.8;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
-    if(visibility.particles){
-      const phase=((simulationTime/210+index*.381966)%1),moving=point.map((value,axis)=>value+direction[axis]*length*phase);
-      const marker=projected(moving,basis,scale,cx,cy);ctx.beginPath();ctx.arc(marker.x,marker.y,1.7,0,2*Math.PI);ctx.fillStyle="rgba(255,255,255,.96)";ctx.fill();
+    if(!movingOnly){
+      targetContext.strokeStyle="rgba(245,251,255,.82)";targetContext.lineWidth=.8;targetContext.beginPath();targetContext.moveTo(a.x,a.y);targetContext.lineTo(b.x,b.y);targetContext.stroke();
+    }else if(visibility.particles){
+      const phase=sectionMarkerPhase(magnitude,index),moving=point.map((value,axis)=>value+direction[axis]*length*phase);
+      const marker=projected(moving,basis,scale,cx,cy);targetContext.beginPath();targetContext.arc(marker.x,marker.y,2,0,2*Math.PI);targetContext.fillStyle="rgba(255,255,255,.97)";targetContext.fill();
+      targetContext.strokeStyle="rgba(47,157,220,.9)";targetContext.lineWidth=1;targetContext.stroke();
     }
   }
 }
@@ -1715,53 +2301,72 @@ function drawFlow(paths,basis,scale,cx,cy){
     }
   }
 }
-function drawFlowParticles(paths,basis,scale,cx,cy){
+function drawFlowParticles(paths,basis,scale,cx,cy,targetContext=ctx){
   if(!flow.enabled||!visibility.particles)return;
-  const phase=simulationTime/30;
   for(let index=0;index<paths.length;index++){
-    const path=paths[index],base=phase+index*.61803398875;
+    const path=paths[index],physics=prepareFlowPathPhysics(path),baseTime=simulationTime*headDisplayScale()+index*.61803398875*physics.transitTimeS;
+    const trailStepS=Math.min(.006,physics.transitTimeS/80);
     for(let tail=4;tail>=0;tail--){
-      const sample=flowPoint(path,base-tail*.012),screen=projected(sample.point,basis,scale,cx,cy);
+      const sample=physicalFlowPoint(path,baseTime-tail*trailStepS),screen=projected(sample.point,basis,scale,cx,cy);
       const strength=clamp(sample.speed/flow.velocity_max_m_s),[r,g,bColor]=jet(strength);
       const alpha=.13+(4-tail)*.18,radius=1.2+(4-tail)*.62;
-      ctx.beginPath();ctx.arc(screen.x,screen.y,radius,0,2*Math.PI);
-      ctx.fillStyle=tail===0?`rgba(255,255,255,.96)`:`rgba(${r},${g},${bColor},${alpha})`;ctx.fill();
-      if(tail===0){ctx.strokeStyle=`rgba(${r},${g},${bColor},.95)`;ctx.lineWidth=1.3;ctx.stroke();}
+      targetContext.beginPath();targetContext.arc(screen.x,screen.y,radius,0,2*Math.PI);
+      targetContext.fillStyle=tail===0?`rgba(255,255,255,.96)`:`rgba(${r},${g},${bColor},${alpha})`;targetContext.fill();
+      if(tail===0){targetContext.strokeStyle=`rgba(${r},${g},${bColor},.95)`;targetContext.lineWidth=1.3;targetContext.stroke();}
     }
   }
 }
 
-const sceneBaseCache=document.createElement("canvas");
 function resize(){
-  const ratio=Math.min(window.devicePixelRatio||1,2), rect=canvas.getBoundingClientRect();
-  canvas.width=Math.max(1,Math.floor(rect.width*ratio)); canvas.height=Math.max(1,Math.floor(rect.height*ratio));
-  ctx.setTransform(ratio,0,0,ratio,0,0); draw();
+  const rect=sceneStage.getBoundingClientRect(),cssPixels=Math.max(1,rect.width*rect.height);
+  const ratio=Math.max(.8,Math.min(window.devicePixelRatio||1,1.75,Math.sqrt(3200000/cssPixels)));
+  for(const [target,targetContext] of [[canvas,ctx],[overlayCanvas,overlayCtx]]){
+    target.width=Math.max(1,Math.floor(rect.width*ratio));target.height=Math.max(1,Math.floor(rect.height*ratio));
+    targetContext.setTransform(ratio,0,0,ratio,0,0);
+  }
+  draw();
 }
 function drawScene(){
-  const w=canvas.clientWidth,h=canvas.clientHeight; ctx.clearRect(0,0,w,h);
+  // Clear the complete backing store in device coordinates. The control rows
+  // can change the CSS height before ResizeObserver updates the bitmap; using
+  // CSS dimensions here left a stale lower strip that looked like a duplicate.
+  ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,canvas.width,canvas.height);ctx.restore();
+  const w=canvas.clientWidth,h=canvas.clientHeight;
+  const meshRun=activeMeshRun();
+  if(meshRun?.id==="single"&&!meshRun.data_ready){
+    ctx.fillStyle="#0c1721";ctx.fillRect(0,0,w,h);
+    ctx.textAlign="center";ctx.fillStyle="rgba(99,215,229,.98)";ctx.font="800 18px system-ui";
+    ctx.fillText("표준 207,390셀 계산 프로파일",w/2,h/2-34);
+    ctx.fillStyle="rgba(232,242,250,.92)";ctx.font="650 13px system-ui";
+    ctx.fillText(meshRun.mesh_ready?"메시는 생성됐지만 CFD 결과 필드는 아직 없습니다.":"메시 및 CFD 계산 전입니다.",w/2,h/2-5);
+    ctx.fillStyle="rgba(145,168,188,.95)";ctx.font="600 11px system-ui";
+    ctx.fillText("정밀 1,316,854셀 결과를 이 옵션에 대신 표시하지 않습니다.",w/2,h/2+21);
+    ctx.textAlign="left";return;
+  }
   const basis=cameraBasis(), scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
   const cx=w/2,cy=h/2+8;
-  const thermalCells=["combined","cell-temperature","xz-temperature"].includes(visualMode);
+  const thermalCells=["combined","cell-temperature","xy-temperature","xz-temperature"].includes(visualMode);
   const thermalDisplay=flow.enabled&&(thermalCells||visualMode==="xy-temperature");
   const velocityDisplay=flow.enabled&&["velocity-streamlines","xy-velocity","xz-velocity"].includes(visualMode);
   const sectionMode=visualMode.startsWith("xy-")||visualMode.startsWith("xz-");
-  if(visualMode.startsWith("xy-")&&horizontalSection()){
+  if(visualMode.startsWith("xy-")&&!section3DInput.checked&&horizontalSection()){
     const selectedHorizontal=horizontalSection();
     if(visualMode==="xy-temperature")drawDirectXYGrid(selectedHorizontal,"temperature",w,h,visibility.section);
+    else if(smoothSectionInput.checked)drawDirectXYGrid(selectedHorizontal,"velocity",w,h,visibility.section);
     else if(horizontalSectionKey()==="xy"&&directXYVelocity)drawDirectXYVelocity(w,h,visibility.section);
     else drawDirectXYGrid(selectedHorizontal,"velocity",w,h,visibility.section);
     if(visibility.flow)drawDirectXYVelocityVectors(directXYLayout(w,h));
     if(flow.enabled){
       updatePortStateText();
       if(visibility.section&&visualMode==="xy-temperature")drawScalarLegend(w,h,"Temperature · XY",selectedHorizontal.temperature_range_c,"C",flow.paper_temperature_ranges_c?.xy);
-      if(visibility.section&&visualMode==="xy-velocity")drawScalarLegend(w,h,"XY velocity",horizontalSectionKey()==="xy"&&directXYVelocity?directXYVelocity.velocity_range_m_s:selectedHorizontal.velocity_range_m_s,"m/s");
+      if(visibility.section&&visualMode==="xy-velocity")drawScalarLegend(w,h,"XY velocity",!smoothSectionInput.checked&&horizontalSectionKey()==="xy"&&directXYVelocity?directXYVelocity.velocity_range_m_s:selectedHorizontal.velocity_range_m_s,"m/s");
       flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;
     }
     return;
   }
-  const sorted=faces.map(face=>({face,depth:face.points.reduce((s,p)=>s+projected(p,basis,scale,cx,cy).d,0)/face.points.length})).sort((a,b)=>a.depth-b.depth);
+  const sorted=projectedFaces(basis,scale,cx,cy,w,h);
   for(const item of sorted){
-    const pts=item.face.points.map(p=>projected(p,basis,scale,cx,cy));
+    const pts=item.points;
     ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y); ctx.closePath();
     const shade=Math.max(0,Math.min(1,(item.depth+90)/180));
     const isPort=item.face.kind.startsWith("port");
@@ -1780,26 +2385,26 @@ function drawScene(){
     else if(thermalCells&&temperature!==null){
       const range=cellSurface?.temperature_range_c||flow.temperature_range_c,normalised=(temperature-range[0])/Math.max(1e-9,range[1]-range[0]);
       const [r,g,b]=jet(normalised);
-      const boundaries=surfaceBoundaryTemperatures(item.face);
-      if(boundaries){
-        const lowerPoint={x:.5*(pts[0].x+pts[1].x),y:.5*(pts[0].y+pts[1].y)},upperPoint={x:.5*(pts[2].x+pts[3].x),y:.5*(pts[2].y+pts[3].y)};
-        const gradient=ctx.createLinearGradient(lowerPoint.x,lowerPoint.y,upperPoint.x,upperPoint.y);
-        const lowerColour=jet((boundaries.lower-range[0])/Math.max(1e-9,range[1]-range[0])),upperColour=jet((boundaries.upper-range[0])/Math.max(1e-9,range[1]-range[0]));
-        gradient.addColorStop(0,`rgba(${lowerColour[0]},${lowerColour[1]},${lowerColour[2]},.95)`);
-        gradient.addColorStop(.5,`rgba(${r},${g},${b},.95)`);
-        gradient.addColorStop(1,`rgba(${upperColour[0]},${upperColour[1]},${upperColour[2]},.95)`);
-        ctx.fillStyle=gradient;
-      }else ctx.fillStyle=`rgba(${r},${g},${b},.95)`;
+      const fallback=`rgba(${r},${g},${b},.95)`;ctx.fillStyle=thermalFaceGradient(item.face,pts,range,fallback);
     }else if(sectionMode||visualMode==="velocity-streamlines"){
       ctx.fillStyle=`rgba(12,28,43,${.08+.07*shade})`;
     }else{ctx.fillStyle=item.face.kind.endsWith("cap")?`rgba(79,207,222,${0.66+0.13*shade})`:`rgba(32,112,145,${0.68+0.16*shade})`;}
     ctx.fill();
-    ctx.strokeStyle=thermalCells&&!isPort?"rgba(225,238,246,.055)":"rgba(225,238,246,.26)";ctx.lineWidth=thermalCells&&!isPort?.25:.55;ctx.stroke();
+    const highlighted=!isPort&&item.face.id===highlightedCellId;
+    ctx.strokeStyle=highlighted?"rgba(255,244,160,.96)":thermalCells&&!isPort?"rgba(225,238,246,.045)":"rgba(225,238,246,.26)";
+    ctx.lineWidth=highlighted?1.35:thermalCells&&!isPort?.22:.55;ctx.stroke();
   }
   if(visibility.section){
-    if(visualMode==="xy-temperature")drawSection(horizontalSection(),"temperature",basis,scale,cx,cy,null,.82,3);
+    if(visualMode==="xy-temperature"){
+      const section=horizontalSection();
+      if(smoothSectionInput.checked)drawXYPlaneTexture(sectionRaster(section,"temperature",section.temperature_range_c),section,basis,scale,cx,cy,.88);
+      else drawSection(section,"temperature",basis,scale,cx,cy,null,.88,1);
+    }
     if(visualMode==="xy-velocity"){
-      if(horizontalSectionKey()!=="xy"||!drawDirectXYVelocity(w,h))drawSection(horizontalSection(),"velocity",basis,scale,cx,cy,null,.82,3);
+      const section=horizontalSection();
+      if(!smoothSectionInput.checked&&horizontalSectionKey()==="xy"&&directXYVelocity)drawDirectXYVelocity3D(section,basis,scale,cx,cy);
+      else if(smoothSectionInput.checked)drawXYPlaneTexture(sectionRaster(section,"velocity",section.velocity_range_m_s),section,basis,scale,cx,cy,.88);
+      else drawSection(section,"velocity",basis,scale,cx,cy,null,.88,1);
     }
     const selectedVertical=verticalSelection(),verticalAlpha=selectedVertical.length>1?.52:.82;
     const verticalSubdivisions=selectedVertical.length>1?2:3;
@@ -1828,6 +2433,13 @@ function drawScene(){
       drawPortCallout(inlet,"IN",inletMetrics,"rgba(255,189,91,.98)",w,h);
       drawPortCallout(outlet,"OUT",outletMetrics,"rgba(99,215,229,.98)",w,h);
     }
+    if(visualMode==="cell-temperature"&&visibility.cells){
+      const extrema=cellSurfaceExtrema();
+      if(extrema){
+        drawCellExtremumCallout(extrema.maximum,"CELL SURFACE MAX","rgba(255,119,78,.98)",basis,scale,cx,cy,w,h,true);
+        drawCellExtremumCallout(extrema.minimum,"CELL SURFACE MIN","rgba(86,216,238,.98)",basis,scale,cx,cy,w,h,false);
+      }
+    }
     updatePortStateText(inletMetrics,outletMetrics);
     if(["combined","cell-temperature"].includes(visualMode)&&visibility.cells)drawScalarLegend(w,h,"Cell surface T",cellSurface?.temperature_range_c||flow.temperature_range_c,"C",flow.paper_temperature_ranges_c?.cell);
     if(visualMode==="velocity-streamlines"&&visibility.flow)drawScalarLegend(w,h,"Velocity",[0,flow.velocity_max_m_s],"m/s");
@@ -1838,27 +2450,25 @@ function drawScene(){
     flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;
   }else{ctx.fillStyle="rgba(255,189,91,.92)";ctx.font="700 11px system-ui";ctx.fillText("Ø19 mm IN / OUT — A-04 assumed centres",16,h-34);}
 }
-function cacheCurrentScene(){
-  sceneBaseCache.width=canvas.width;sceneBaseCache.height=canvas.height;
-  sceneBaseCache.getContext("2d").drawImage(canvas,0,0);
-}
-function restoreCachedScene(){
-  if(!sceneBaseCache.width||!sceneBaseCache.height)return;
-  ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(sceneBaseCache,0,0);ctx.restore();
-}
 function drawDynamicOverlay(){
-  restoreCachedScene();
-  if(!flow.enabled||!visibility.flow)return;
-  if(visualMode.startsWith("xy-")&&horizontalSection()){
-    drawDirectXYVelocityVectors(directXYLayout(canvas.clientWidth,canvas.clientHeight),true);
+  overlayCtx.save();overlayCtx.setTransform(1,0,0,1,0,0);overlayCtx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);overlayCtx.restore();
+  if(!flow.enabled||!visibility.flow||(activeMeshRun()?.id==="single"&&!activeMeshRun()?.data_ready))return;
+  if(visualMode.startsWith("xy-")&&!section3DInput.checked&&horizontalSection()){
+    drawDirectXYVelocityVectors(directXYLayout(canvas.clientWidth,canvas.clientHeight),true,overlayCtx);
+    flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;return;
+  }
+  if((section3DInput.checked&&visualMode.startsWith("xy-"))||visualMode.startsWith("xz-")){
+    const w=canvas.clientWidth,h=canvas.clientHeight,basis=cameraBasis(),scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
+    const selected=visualMode.startsWith("xy-")?[horizontalSection()]:verticalSelection();
+    for(const section of selected)drawSectionVelocity(section,basis,scale,w/2,h/2+8,true,overlayCtx);
     flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;return;
   }
   if(!["combined","velocity-streamlines"].includes(visualMode))return;
   const w=canvas.clientWidth,h=canvas.clientHeight,basis=cameraBasis(),scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
-  drawFlowParticles(flow.streamlines||[],basis,scale,w/2,h/2+8);
+  drawFlowParticles(flow.streamlines||[],basis,scale,w/2,h/2+8,overlayCtx);
   flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;
 }
-function draw(){drawScene();cacheCurrentScene();lastSceneFrame=Math.round(simulationTime);drawDynamicOverlay();}
+function draw(){drawScene();lastSceneFrame=Math.round(simulationTime);drawDynamicOverlay();}
 canvas.addEventListener("pointerdown",e=>{dragging=true;lastX=e.clientX;lastY=e.clientY;canvas.setPointerCapture(e.pointerId);});
 canvas.addEventListener("pointermove",e=>{if(!dragging)return;yaw+=(e.clientX-lastX)*.009;pitch=Math.max(-1.48,Math.min(1.48,pitch-(e.clientY-lastY)*.009));lastX=e.clientX;lastY=e.clientY;draw();});
 canvas.addEventListener("pointerup",()=>dragging=false);
@@ -1870,25 +2480,25 @@ function selectView(name){
 document.querySelectorAll("[data-view]").forEach(button=>button.addEventListener("click",()=>selectView(button.dataset.view)));
 document.getElementById("reset").addEventListener("click",()=>{zoom=1;selectView("iso");});
 const modeDescriptions={
-  combined:["종합 T(t)+U(x) · Fig 8/9","L3 직접 셀 T(x,t)와 검증된 고정 U(x) 유선을 함께 표시"],
-  "cell-temperature":["셀 표면 T(x,t) · Fig 4/7/8",`L3 batterySolid 직접 셀값을 각도 ${cellSurface?.angular_segments||28} × 높이 ${cellSurface?.axial_segments||12}로 표시`],
-  "velocity-streamlines":["U(x) 유선 · Fig 10","유속으로 색칠한 고정 U(x) 유선과 이동 헤드"],
-  "xy-temperature":["XY 온도 T(t)+U(x) · Fig 6/14","선택한 Z 위치의 1 mm 직접 셀 T(x,t)와 고정 U(x) 이동 마커"],
-  "xy-velocity":["XY 속도 · Fig 11 · 고정 U(x)","선택한 Z 위치의 실제 L3 셀 중심 U값 표시 · 중앙은 절단 삼각형, 나머지는 1 mm 직접 셀 표본 · 색상장은 고정 · 보간/패딩 없음"],
-  "xz-temperature":["XZ 온도 · Fig 13","선택한 Y 위치들의 약 1 × 1.49 mm 직접 셀 T(x,t) 단면"],
-  "xz-velocity":["XZ 속도 · Fig 12","선택한 Y 위치들의 고정 XZ 속도 크기와 방향 마커"]
+  combined:["종합 화면","셀 온도와 실제 U(x)에 비례해 이동하는 유동 헤드"],
+  "cell-temperature":["셀 온도",`배터리 직접 표면 샘플 ${cellSurface?.angular_segments||28} × ${cellSurface?.axial_segments||12}+캡 · 현재 최고/최저점 표시`],
+  "velocity-streamlines":["유체 유선","유속으로 색칠한 고정 유동장과 실제 U(x)에 비례하는 이동 헤드"],
+  "xy-temperature":["가로 단면 온도","선택한 높이의 직접 셀 온도와 유동 방향을 표시"],
+  "xy-velocity":["가로 단면 유속","선택한 높이의 정밀 메시 실제 셀 중심 유속을 표시 · 보간/패딩 없음"],
+  "xz-temperature":["세로 단면 온도","선택한 세로 위치의 직접 셀 온도 단면을 표시"],
+  "xz-velocity":["세로 단면 유속","선택한 세로 위치의 유속 크기와 방향을 표시"]
 };
 function prepareActualMode(mode){
   if(!actualOneSecond)return;
   const names=[];
-  if(["combined","cell-temperature"].includes(mode))names.push("cell_surface");
+  if(["combined","cell-temperature","xz-temperature"].includes(mode)||(mode==="xy-temperature"&&section3DInput.checked))names.push("cell_surface");
   if(mode==="xy-temperature")names.push(horizontalSectionKey());
   if(mode==="xz-temperature")names.push(...verticalSectionInputs.filter(input=>input.checked).map(input=>input.value));
   const pending=names.filter(name=>!actualDatasets.has(name));
   if(!pending.length){setDataLoadStatus("");return;}
   const source=location.protocol==="file:"?"로컬 압축 데이터":"직접 셀 데이터";
   currentMode.textContent=`실제 1 s 셀값 로드 중 · ${pending.join(", ")}`;
-  setDataLoadStatus(`Figure 데이터 로드 중 · ${source} · ${pending.join(", ")}`);
+  setDataLoadStatus(`결과 데이터 로드 중 · ${source} · ${pending.join(", ")}`);
   Promise.all(pending.map(loadActualDataset)).then(()=>{
     if(visualMode!==mode)return;
     const failed=pending.filter(name=>actualDatasetErrors.has(name));
@@ -1904,20 +2514,30 @@ function prepareActualMode(mode){
     draw();
   });
 }
+function updateCanvasNote(mode=visualMode){
+  const description=modeDescriptions[mode]||modeDescriptions.combined;
+  const horizontalPosition=mode.startsWith("xy-")?` · ${horizontalSection()?.label||"Z = 50%"}`:"";
+  const temperatureNote=actualOneSecond?"T 원본 · 시간보간/패딩 없음":`온도 표시보정 +${flow.temperature_display_offset_c.toFixed(3)} K`;
+  const sectionRenderNote=mode.startsWith("xy-")||mode.startsWith("xz-")?(smoothSectionInput.checked?" · 실제 샘플 사이 화면만 부드럽게 · 무효영역 채움 없음":" · 실제 샘플 타일 그대로"):"";
+  const headScale=headDisplayScale(),headNote=visibility.particles?` · 헤드 ${headScale===1?"1× 실제속도":headScale+"× 표시속도"}`:"";
+  const dimensionNote=mode.startsWith("xy-")?` · ${section3DInput.checked?"3D 회전":"평면 보기"}`:"";
+  canvasNote.textContent=`${description[1]}${horizontalPosition}${sectionRenderNote}${dimensionNote}${headNote} · 드래그 회전 · 휠 확대/축소 · ${temperatureNote} · Ū·p̄ 실제 면적평균`;
+}
 function selectVisualMode(mode){
   visualMode=mode;
   setDataLoadStatus("");
   const description=modeDescriptions[mode]||modeDescriptions.combined;
   const horizontalPosition=mode.startsWith("xy-")?` · ${horizontalSection()?.label||"Z = 50%"}`:"";
   currentMode.textContent=description[0]+horizontalPosition;
-  const temperatureNote=actualOneSecond?"T 원본 · 보간/패딩 없음":`온도 표시보정 +${flow.temperature_display_offset_c.toFixed(3)} K`;
-  canvasNote.textContent=`${description[1]}${horizontalPosition} · 드래그 회전 · 휠 확대/축소 · ${temperatureNote} · Ū·p̄ 실제 면적평균`;
+  updateCanvasNote(mode);
   prepareActualMode(mode);
   horizontalSections.hidden=!mode.startsWith("xy-");
   verticalSections.hidden=!mode.startsWith("xz-");
-  if(mode.startsWith("xy-"))selectView("pz");
+  section3DOption.hidden=!mode.startsWith("xy-");
+  if(mode.startsWith("xy-"))selectView(section3DInput.checked?"iso":"pz");
   else if(mode.startsWith("xz-"))selectView(verticalSelection().length>1?"iso":"py");
   else selectView("iso");
+  requestAnimationFrame(resize);
 }
 modeFieldset.hidden=!flow.enabled;
 for(const input of modeInputs){
@@ -1935,6 +2555,12 @@ verticalSections.hidden=true;
 for(const [name,input] of Object.entries(optionInputs)){
   input.disabled=!flow.enabled;input.addEventListener("change",()=>{visibility[name]=input.checked;draw();});
 }
+smoothSectionInput.disabled=!flow.enabled;
+smoothSectionInput.addEventListener("change",()=>{directXYVelocityCache=null;updateCanvasNote();draw();});
+section3DInput.disabled=!flow.enabled;
+section3DInput.addEventListener("change",()=>{prepareActualMode(visualMode);updateCanvasNote();selectView(section3DInput.checked?"iso":"pz");});
+headRate.disabled=!flow.enabled;
+headRate.addEventListener("change",()=>{updateCanvasNote();drawDynamicOverlay();});
 function updateHorizontalSection({changeView=true}={}){
   let selected=horizontalSectionInputs.find(input=>input.checked&&!input.disabled);
   if(!selected){
@@ -1996,40 +2622,82 @@ if(flow.enabled){
   flowSampling.textContent=actualOneSecond?"CFD 원본 1 s · 직접 셀값 · 시간보간/패딩 없음":"화면 1 s · CFD 원본 15 s 선형보간";
   flowSeek.value=String(simulationTime);
   flowPlay.textContent=flowPlaying?"❚❚ 정지":"▶ 재생";
-  flowPlay.addEventListener("click",()=>{flowPlaying=!flowPlaying;flowPlay.textContent=flowPlaying?"❚❚ 정지":"▶ 재생";});
+  flowPlay.addEventListener("click",()=>{flowPlaying=!flowPlaying;flowPlay.textContent=flowPlaying?"❚❚ 정지":"▶ 재생";draw();});
   flowSeek.addEventListener("input",()=>{simulationTime=Number(flowSeek.value);draw();});
   flowRate.addEventListener("change",updateFlowDuration);updateFlowDuration();
 }
 function animate(timestamp){
   if(previousFrameTime===0)previousFrameTime=timestamp;
   const elapsed=Math.min(.1,(timestamp-previousFrameTime)/1000);previousFrameTime=timestamp;
-  if(flow.enabled&&flowPlaying&&figurePreview.hidden){
+  if(flow.enabled&&flowPlaying&&figurePreview.hidden&&activeMeshRun()?.data_ready!==false){
     simulationTime=(simulationTime+elapsed*Number(flowRate.value))%1800;
-    flowSeek.value=String(Math.round(simulationTime));sceneRenderAccumulator+=elapsed;
+    flowSeek.value=String(Math.round(simulationTime));sceneRenderAccumulator+=elapsed;overlayRenderAccumulator+=elapsed;
     const actualFrame=Math.round(simulationTime);
     const refreshScene=actualOneSecond
       ?actualFrame!==lastSceneFrame&&sceneRenderAccumulator>=1/12
       :sceneRenderAccumulator>=1/12;
-    if(refreshScene){sceneRenderAccumulator=0;draw();}
-    else drawDynamicOverlay();
+    if(refreshScene){sceneRenderAccumulator=0;overlayRenderAccumulator=0;draw();}
+    else if(overlayRenderAccumulator>=1/30){overlayRenderAccumulator=0;drawDynamicOverlay();}
   }
   advanceVideoPlayback(elapsed);
   requestAnimationFrame(animate);
 }
 function rows(element,values){ element.innerHTML=Object.entries(values).map(([key,value])=>`<dt>${key}</dt><dd>${value}</dd>`).join(""); }
-rows(document.getElementById("geometry"),{"외함":`${box.x} × ${box.y} × ${box.z} mm`,"노치 깊이":`${box.notch_depth} mm`,"배터리":`${model.cells.length} × Ø${model.cell_diameter_mm} × ${model.cell_length_mm} mm`,"포트":`Ø${model.port_diameter_mm} / Ø${model.port_diameter_mm} mm`,"배열":model.topology,"x / y pitch":`${model.pitch_mm.x} / ${model.pitch_mm.y} mm`});
-rows(document.getElementById("derived"),{"Re (Table 4)":model.derived.reynolds.toLocaleString(undefined,{maximumFractionDigits:1}),"논문 Re":model.derived.paper_reynolds.toLocaleString(),"셀당 발열":`${model.derived.cell_heat_w.toFixed(6)} W`,"총 발열":`${model.derived.total_heat_w.toFixed(6)} W`,"q‴":`${model.derived.qvol_w_m3.toLocaleString()} W/m³`});
+function renderActiveMeshRun(){
+  const run=activeMeshRun();if(!run)return;
+  const counts=run.counts||{},prefix=run.counts_are_targets?"목표 ":"";
+  const count=(value)=>Number.isFinite(value)?Number(value).toLocaleString():"—";
+  rows(meshRunDetail,{
+    "상태":run.state_label,
+    "전체 셀":`${prefix}${count(counts.total_cells)}`,
+    "유체 / 고체":`${prefix}${count(counts.fluid_cells)} / ${count(counts.solid_cells)}`,
+    "노드":`${prefix}${count(counts.points)}`,
+    "요소":run.element_family
+  });
+  meshRunNote.textContent=run.note;
+  const waiting=run.data_ready===false;
+  document.getElementById("status").textContent=waiting?`${run.label} · ${run.state_label}`:(actualOneSecond?"계산 완료 · 정밀 결과 · 1초 단위":model.status_label);
+  document.getElementById("result-badge").textContent=waiting?run.state_label:(model.actual_solver_data?"계산 완료":"준비 중");
+  document.getElementById("calculation-summary").innerHTML=waiting
+    ?`<strong>${run.label}</strong> · 자체 CFD 결과 없음`
+    :(model.actual_solver_data?`<strong>정밀 CFD 결과</strong> · ${(actualOneSecond?.mesh_cell_count||counts.total_cells).toLocaleString()} cells · 0–1800 s`:model.calculation_summary);
+  document.getElementById("calculation-note").textContent=waiting?run.note:model.calculation_note;
+  document.getElementById("calculation-card").classList.toggle("validated",model.actual_solver_data&&!waiting);
+  flowPlay.disabled=waiting||!flow.enabled;flowSeek.disabled=waiting||!flow.enabled;
+  draw();
+}
+if(meshRuns.length){
+  meshRunSelect.innerHTML=meshRuns.map(run=>`<option value="${run.id}">${run.label} · ${run.state_label}</option>`).join("");
+  meshRunSelect.value=activeMeshRunId;
+  meshRunSelect.addEventListener("change",()=>{
+    activeMeshRunId=meshRunSelect.value;
+    if(activeMeshRun()?.data_ready===false){flowPlaying=false;flowPlay.textContent="▶ 재생";}
+    const url=new URL(window.location.href);url.searchParams.set("mesh",activeMeshRunId);history.replaceState(null,"",url);
+    renderActiveMeshRun();
+  });
+}else{document.querySelector(".mesh-run-card").hidden=true;}
+rows(document.getElementById("geometry"),{"해석 영역":`${box.x} × ${box.y} × ${box.z} mm`,"배터리":`${model.cells.length}개 · Ø${model.cell_diameter_mm} × ${model.cell_length_mm} mm`,"입·출구":`각 Ø${model.port_diameter_mm} mm`,"셀 배열":"5–4–5–4–5 교차 배열"});
+rows(document.getElementById("derived"),{
+  "계산 격자":actualOneSecond?.mesh_cell_count?`${actualOneSecond.mesh_cell_count.toLocaleString()} cells`:"—",
+  "Reynolds 수":model.derived.reynolds.toLocaleString(undefined,{maximumFractionDigits:1}),
+  "총 발열":`${model.derived.total_heat_w.toFixed(3)} W`,
+  "냉각수 밀도":`${model.inputs.fluid_density_kg_m3} kg/m³`,
+  "비열 Cp":`${model.inputs.fluid_cp_J_kgK} J/(kg·K)`,
+  "점도 μ":`${model.inputs.dynamic_viscosity_Pa_s} Pa·s`,
+  "열전도율 k":`${model.inputs.fluid_k_W_mK} W/(m·K)`
+});
 const rawInletC=model.inputs.inlet_temperature_K-273.15;
-const displayedInletC=rawInletC+(flow.temperature_display_offset_c||0);
-const temperatureInputRows={"입구 속도":`${model.inputs.inlet_velocity_m_s} m/s`,"입구 온도 원본":`${model.inputs.inlet_temperature_K} K = ${rawInletC.toFixed(3)} °C`};
-temperatureInputRows[actualOneSecond?"Figure 1 온도 처리":"Figure 1 표시보정"]=actualOneSecond?"무보정 · K−273.15만 적용":`+${(flow.temperature_display_offset_c||0).toFixed(3)} K → ${displayedInletC.toFixed(3)} °C`;
-Object.assign(temperatureInputRows,{"냉각수 밀도":`${model.inputs.fluid_density_kg_m3} kg/m³`,"동점도 입력 μ":`${model.inputs.dynamic_viscosity_Pa_s} Pa·s`,"냉각수 Cp":`${model.inputs.fluid_cp_J_kgK} J/(kg·K)`,"냉각수 k":`${model.inputs.fluid_k_W_mK} W/(m·K)`});
-rows(document.getElementById("inputs"),temperatureInputRows);
+rows(document.getElementById("inputs"),{
+  "냉각수":"물 (Water)",
+  "입구 온도":`${rawInletC.toFixed(3)} °C`,
+  "입구 속도":`${model.inputs.inlet_velocity_m_s.toFixed(3)} m/s`,
+  "출구 압력":flow.port_flow?`${(flow.port_flow.outlet_area_average_pressure_pa/1000).toFixed(3)} kPa`:"—",
+  "해석 시간":"0–1800 s · 1 s 간격"
+});
 const figureGrid=document.getElementById("figures"),figureDetail=document.getElementById("figure-detail");
 const figurePreview=document.getElementById("figure-preview"),figureImage=document.getElementById("figure-image"),figureVideo=document.getElementById("figure-video"),artifactTabs=document.getElementById("artifact-tabs");
 const videoControls=document.getElementById("video-controls"),playbackRate=document.getElementById("playback-rate"),videoTime=document.getElementById("video-time"),videoSemantics=document.getElementById("video-semantics"),videoDuration=document.getElementById("video-duration");
 const videoPlay=document.getElementById("video-play"),videoSeek=document.getElementById("video-seek"),videoPrev=document.getElementById("video-prev"),videoNext=document.getElementById("video-next");
-const temperatureGraphs=flow.temperature_graphs||null;
 const temperatureGraphPanel=document.getElementById("temperature-chart-panel");
 const temperatureChartCanvas=document.getElementById("temperature-chart-canvas");
 const temperatureChartOpen=document.getElementById("temperature-chart-open");
@@ -2042,6 +2710,14 @@ const temperatureChartPng=document.getElementById("temperature-chart-png");
 const temperatureChartCsv=document.getElementById("temperature-chart-csv");
 const temperatureChartAllCsv=document.getElementById("temperature-chart-all-csv");
 const temperatureGraphSummary=document.getElementById("temperature-graph-summary");
+const convergenceGraphPanel=document.getElementById("convergence-chart-panel");
+const convergenceChartCanvas=document.getElementById("convergence-chart-canvas");
+const convergenceChartOpen=document.getElementById("convergence-chart-open");
+const convergenceChartClose=document.getElementById("convergence-chart-close");
+const convergenceChartStatus=document.getElementById("convergence-chart-status");
+const convergenceChartPng=document.getElementById("convergence-chart-png");
+const convergenceChartCsv=document.getElementById("convergence-chart-csv");
+const convergenceSummary=document.getElementById("convergence-summary");
 const temperatureMetricMeta={
   outlet:{title:"출구 평균 온도",filename:"outlet-average",key:"outlet_mass_weighted_average_c",definition:"출구 phi 질량유량 가중 평균"},
   "battery-maximum":{title:"배터리 최고 온도",filename:"battery-mesh-maximum",key:"battery_mesh_maximum_c",definition:"C01–C23 cell zone의 mesh max(T) 중 최고"},
@@ -2072,7 +2748,7 @@ function activeTemperatureGraph(){
 function paintTemperatureChart(context,width,height){
   const graph=activeTemperatureGraph(),series=graph.series;
   context.clearRect(0,0,width,height);context.fillStyle="#08111e";context.fillRect(0,0,width,height);
-  context.fillStyle="#e9f2fa";context.font="700 18px system-ui";context.fillText(`${graph.title} · 실제 L3 CFD · 1 s`,24,28);
+  context.fillStyle="#e9f2fa";context.font="700 18px system-ui";context.fillText(`${graph.title} · 정밀 CFD 실제값 · 1 s`,24,28);
   const values=series.flatMap(line=>line.values).filter(Number.isFinite);
   if(!values.length){context.fillStyle="#ffbd5b";context.font="700 14px system-ui";context.fillText("실제 온도 시계열 데이터가 없습니다.",24,62);return;}
   let low=Math.min(...values),high=Math.max(...values),span=Math.max(high-low,.002),padding=Math.max(span*.08,.001);
@@ -2145,7 +2821,7 @@ temperatureChartMetric.addEventListener("change",updateTemperatureChart);
 perCellMetric.addEventListener("change",drawTemperatureChart);
 temperatureChartOpen.addEventListener("click",()=>{
   if(!temperatureGraphs)return;
-  flowPlaying=false;flowPlay.textContent="▶ 재생";videoPlaying=false;figureVideo.pause();figurePreview.hidden=true;
+  flowPlaying=false;flowPlay.textContent="▶ 재생";videoPlaying=false;figureVideo.pause();figurePreview.hidden=true;convergenceGraphPanel.hidden=true;
   viewerControls.hidden=true;flowControls.hidden=true;canvasNote.hidden=true;temperatureGraphPanel.hidden=false;setDataLoadStatus("");
   requestAnimationFrame(drawTemperatureChart);
 });
@@ -2169,6 +2845,93 @@ if(temperatureGraphs){
   const last=1800;
   rows(temperatureGraphSummary,{"출구 평균":`${temperatureGraphs.outlet_mass_weighted_average_c[last].toFixed(4)} °C`,"배터리 최고":`${temperatureGraphs.battery_mesh_maximum_c[last].toFixed(4)} °C`,"표면 평균":`${temperatureGraphs.battery_surface_area_average_c[last].toFixed(4)} °C`,"내부 평균":`${temperatureGraphs.battery_internal_volume_average_c[last].toFixed(4)} °C`});
 }else{temperatureChartOpen.disabled=true;temperatureGraphSummary.innerHTML="<dt>상태</dt><dd>실제 데이터 없음</dd>";}
+function paintConvergenceChart(context,width,height){
+  context.clearRect(0,0,width,height);context.fillStyle="#08111e";context.fillRect(0,0,width,height);
+  context.fillStyle="#e9f2fa";context.font="700 18px system-ui";context.textAlign="left";
+  context.fillText(`${convergence.scope} 수렴 이력`,24,28);
+  const series=convergence.series||[],allValues=series.flatMap(line=>line.points.map(point=>point[1])).filter(value=>Number.isFinite(value)&&value>0);
+  if(!allValues.length){context.fillStyle="#ffbd5b";context.font="700 14px system-ui";context.fillText("저장된 residual 데이터가 없습니다.",24,62);return;}
+  const logHigh=Math.ceil(Math.log10(Math.max(...allValues))),logLow=Math.floor(Math.log10(Math.min(...allValues)));
+  const first=convergence.first_iteration,last=convergence.last_iteration,span=Math.max(1,last-first);
+  const left=82,right=28,columns=width>900?3:2,legendRows=Math.ceil(series.length/columns),top=50+legendRows*18,bottom=58;
+  const plotWidth=Math.max(100,width-left-right),plotHeight=Math.max(100,height-top-bottom),logSpan=Math.max(1,logHigh-logLow);
+  context.font="700 10px ui-monospace,monospace";
+  series.forEach((line,index)=>{
+    const column=index%columns,row=Math.floor(index/columns),x=left+column*plotWidth/columns,y=47+row*18;
+    context.strokeStyle=line.colour;context.lineWidth=2;context.beginPath();context.moveTo(x,y-4);context.lineTo(x+13,y-4);context.stroke();
+    context.fillStyle="#dcecf7";context.fillText(`${line.label} · ${line.final.toExponential(2)}`,x+18,y);
+  });
+  context.strokeStyle="#294158";context.lineWidth=1;context.strokeRect(left,top,plotWidth,plotHeight);
+  context.font="600 11px ui-monospace,monospace";
+  for(let tick=0;tick<=6;tick++){
+    const fraction=tick/6,x=left+fraction*plotWidth,iteration=Math.round(first+fraction*span);
+    context.strokeStyle="#29415888";context.beginPath();context.moveTo(x,top);context.lineTo(x,top+plotHeight);context.stroke();
+    context.fillStyle="#91a8bc";context.textAlign=tick===0?"left":tick===6?"right":"center";context.fillText(String(iteration),x,top+plotHeight+21);
+  }
+  for(let exponent=logLow;exponent<=logHigh;exponent++){
+    const y=top+(logHigh-exponent)/logSpan*plotHeight;
+    context.strokeStyle="#29415888";context.beginPath();context.moveTo(left,y);context.lineTo(left+plotWidth,y);context.stroke();
+    context.fillStyle="#91a8bc";context.textAlign="right";context.fillText(`1e${exponent}`,left-10,y+4);
+  }
+  for(const line of series){
+    if(Number.isFinite(line.configured_gate)&&line.configured_gate>0){
+      const y=top+(logHigh-Math.log10(line.configured_gate))/logSpan*plotHeight;
+      if(y>=top&&y<=top+plotHeight){context.save();context.setLineDash([4,5]);context.globalAlpha=.32;context.strokeStyle=line.colour;context.beginPath();context.moveTo(left,y);context.lineTo(left+plotWidth,y);context.stroke();context.restore();}
+    }
+    context.strokeStyle=line.colour;context.lineWidth=1.45;context.globalAlpha=.9;context.beginPath();
+    line.points.forEach((point,index)=>{
+      const x=left+(point[0]-first)/span*plotWidth,y=top+(logHigh-Math.log10(Math.max(point[1],Number.MIN_VALUE)))/logSpan*plotHeight;
+      if(index===0)context.moveTo(x,y);else context.lineTo(x,y);
+    });
+    context.stroke();context.globalAlpha=1;
+  }
+  const transientAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration";
+  const axisLabel=transientAxis?"누적 PIMPLE 전역 반복 횟수":"OpenFOAM 외부 반복 횟수";
+  context.fillStyle="#dcecf7";context.font="700 12px system-ui";context.textAlign="center";context.fillText(axisLabel,left+plotWidth/2,height-16);
+  context.save();context.translate(18,top+plotHeight/2);context.rotate(-Math.PI/2);context.fillText("Initial residual / |global continuity|",0,0);context.restore();
+}
+function drawConvergenceChart(){
+  if(convergenceGraphPanel.hidden)return;
+  const rect=convergenceChartCanvas.getBoundingClientRect();if(rect.width<1||rect.height<1)return;
+  const ratio=Math.min(window.devicePixelRatio||1,2);
+  convergenceChartCanvas.width=Math.round(rect.width*ratio);convergenceChartCanvas.height=Math.round(rect.height*ratio);
+  const context=convergenceChartCanvas.getContext("2d");context.setTransform(ratio,0,0,ratio,0,0);
+  paintConvergenceChart(context,rect.width,rect.height);
+  const transientAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration";
+  const iterationLabel=transientAxis?"누적 PIMPLE 전역 반복":"정상상태 외부 반복";
+  const linearTotal=convergence.linear_iteration_total?` · 방정식 내부 선형 반복 합계 ${convergence.linear_iteration_total.toLocaleString()}회`:"";
+  const timeRange=transientAxis&&Number.isFinite(convergence.last_time_s)?` · 물리시간 ${Number(convergence.first_time_s||0).toLocaleString()}–${Number(convergence.last_time_s).toLocaleString()} s`:"";
+  const comparison=transientAxis?" · ANSYS와 누적 반복 구조 대응 · 잔차값은 OpenFOAM 원본":" · 새 과도 계산부터 ANSYS형 누적 PIMPLE 축 적용";
+  convergenceChartStatus.textContent=`${convergence.scope} · ${iterationLabel} ${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회${timeRange}${linearTotal}${comparison}`;
+}
+convergenceChartOpen.addEventListener("click",()=>{
+  if(!convergence.available)return;
+  flowPlaying=false;flowPlay.textContent="▶ 재생";temperatureGraphPanel.hidden=true;figurePreview.hidden=true;
+  viewerControls.hidden=true;flowControls.hidden=true;canvasNote.hidden=true;convergenceGraphPanel.hidden=false;setDataLoadStatus("");
+  requestAnimationFrame(drawConvergenceChart);
+});
+convergenceChartClose.addEventListener("click",()=>{
+  convergenceGraphPanel.hidden=true;viewerControls.hidden=false;flowControls.hidden=!flow.enabled;canvasNote.hidden=false;
+  modeFieldset.hidden=!flow.enabled;displayOptions.hidden=!flow.enabled;horizontalSections.hidden=!flow.enabled||!visualMode.startsWith("xy-");verticalSections.hidden=!flow.enabled||!visualMode.startsWith("xz-");resize();
+});
+convergenceChartPng.addEventListener("click",()=>{
+  const exportCanvas=document.createElement("canvas");exportCanvas.width=1600;exportCanvas.height=900;
+  paintConvergenceChart(exportCanvas.getContext("2d"),1600,900);exportCanvas.toBlob(blob=>{if(blob)downloadBlob(blob,"cfd-residual-convergence.png");},"image/png");
+});
+convergenceChartCsv.addEventListener("click",()=>{
+  const series=convergence.series||[],iterations=[...new Set(series.flatMap(line=>line.points.map(point=>point[0])))].sort((a,b)=>a-b);
+  const axisHeader=convergence.axis_mode==="cumulative_pimple_outer_iteration"?"cumulative_pimple_global_iteration":"openfoam_outer_iteration";
+  const maps=series.map(line=>new Map(line.points)),lines=[[axisHeader,...series.map(line=>line.key)].map(csvValue).join(",")];
+  for(const iteration of iterations)lines.push([iteration,...maps.map(values=>values.get(iteration)??"")].map(csvValue).join(","));
+  downloadBlob(new Blob(["\ufeff",lines.join("\n")],{type:"text/csv;charset=utf-8"}),"cfd-residual-convergence.csv");
+});
+if(convergence.available){
+  const transientAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration";
+  const summaryRows={"상태":convergence.configured_residual_checks_passed?"수렴 기준 통과":"원본 로그 저장","계산 단계":convergence.scope};
+  summaryRows[transientAxis?"누적 PIMPLE 반복":"정상상태 외부 반복"]=`${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회`;
+  if(convergence.linear_iteration_total)summaryRows["방정식 내부 반복 합계"]=`${convergence.linear_iteration_total.toLocaleString()}회`;
+  rows(convergenceSummary,summaryRows);
+}else{convergenceChartOpen.disabled=true;convergenceSummary.innerHTML="<dt>상태</dt><dd>로그 없음</dd>";}
 let videoMode="none",videoPlaying=false,videoSimulationTime=0,videoFileTime=0,videoRenderAccumulator=0;
 function formatSimulationTime(value){
   const seconds=Math.max(0,Math.round(value));
@@ -2219,13 +2982,30 @@ function stepVideo(direction){
 videoPrev.addEventListener("click",()=>stepVideo(-1));
 videoNext.addEventListener("click",()=>stepVideo(1));
 figureVideo.addEventListener("loadedmetadata",()=>{figureVideo.pause();syncVideoFrame();});
-figureGrid.innerHTML=model.figures.map(item=>`<button data-figure="${item.id}" class="${item.status.endsWith("_READY")?"ready":""}" title="${item.status}">Fig ${item.id}</button>`).join("");
+const figureUi={
+  1:["3D 종합 화면","셀 온도와 유체 흐름을 시간에 따라 확인"],
+  2:["계산 메시","해석에 사용한 메시 구조 확인"],
+  3:["메시 품질","표준 메시의 셀 수와 품질 확인"],
+  4:["배터리 온도 변화","시간에 따른 배터리 온도 확인"],
+  6:["가로 단면 온도","선택 높이의 온도 분포 확인"],
+  7:["셀 표면 온도","배터리 표면 온도 분포 확인"],
+  8:["온도·유동 종합","셀 온도와 냉각수 흐름 동시 확인"],
+  9:["배터리 온도와 유선","배터리별 온도와 유선 확인"],
+  10:["유체 유선","냉각수 흐름 경로와 유속 확인"],
+  11:["가로 단면 유속","선택 높이의 유속 분포 확인"],
+  12:["세로 단면 유속","선택 위치의 세로 유속 분포 확인"],
+  13:["세로 단면 온도","선택 위치의 세로 온도 분포 확인"],
+  14:["가로 단면 온도","가로 온도 분포 확인"]
+};
+function figureSummary(item){const ui=figureUi[item.id]||["결과 화면","계산 결과 확인"];return `Fig. ${item.id} · ${ui[0]} — ${ui[1]}`;}
+figureGrid.innerHTML=model.figures.map(item=>`<button data-figure="${item.id}" class="${item.status.endsWith("_READY")?"ready":""}" title="${(figureUi[item.id]||["결과 화면"])[0]}">Fig ${item.id}</button>`).join("");
 const initialFigure=model.figures.find(item=>item.id===1);
-if(initialFigure)figureDetail.textContent=`Fig. 1 · ${initialFigure.title} · ${initialFigure.status} · 필요 데이터: ${initialFigure.required.join(", ")}`;
+if(initialFigure)figureDetail.textContent=figureSummary(initialFigure);
 figureGrid.querySelectorAll("[data-figure]").forEach(button=>button.addEventListener("click",()=>{
   temperatureGraphPanel.hidden=true;
+  convergenceGraphPanel.hidden=true;
   const item=model.figures.find(candidate=>String(candidate.id)===button.dataset.figure);
-  figureDetail.textContent=`Fig. ${item.id} · ${item.title} · ${item.status} · 필요 데이터: ${item.required.join(", ")}`;
+  figureDetail.textContent=figureSummary(item);
   const artifacts=item.viewer_artifacts||[];
   const interactiveFigureModes={4:"cell-temperature",6:"xy-temperature",7:"cell-temperature",8:"combined",9:"combined",10:"velocity-streamlines",11:"xy-velocity",12:"xz-velocity",13:"xz-temperature",14:"xy-temperature"};
   if(actualOneSecond&&interactiveFigureModes[item.id]){
@@ -2252,13 +3032,36 @@ figureGrid.querySelectorAll("[data-figure]").forEach(button=>button.addEventList
   artifactTabs.querySelectorAll("[data-artifact]").forEach(tab=>tab.addEventListener("click",()=>show(Number(tab.dataset.artifact))));
   figurePreview.hidden=false;viewerControls.hidden=true;canvasNote.hidden=true;flowControls.hidden=true;modeFieldset.hidden=true;displayOptions.hidden=true;horizontalSections.hidden=true;verticalSections.hidden=true;show(0);
 }));
-document.getElementById("cells").innerHTML=model.cells.map(c=>`<span>${c.id}</span>`).join("");
-document.getElementById("status").textContent=model.status_label;
-document.getElementById("calculation-summary").innerHTML=model.calculation_summary;
+const cellGrid=document.getElementById("cells");
+cellGrid.innerHTML=model.cells.map(cell=>`<button type="button" data-cell-id="${cell.id}" aria-label="${cell.id} 셀 강조">${cell.id}</button>`).join("");
+function showCellNotification(cellId){
+  highlightedCellId=cellId;clearTimeout(cellHighlightTimer);
+  for(const button of cellGrid.querySelectorAll("[data-cell-id]"))button.classList.toggle("active",button.dataset.cellId===cellId);
+  cellToast.textContent=`${cellId} 선택 · 3D 모델에서 잠시 강조됩니다`;cellToast.hidden=false;draw();
+  cellHighlightTimer=setTimeout(()=>{
+    highlightedCellId=null;cellToast.hidden=true;
+    for(const button of cellGrid.querySelectorAll("[data-cell-id]"))button.classList.remove("active");draw();
+  },1800);
+}
+cellGrid.querySelectorAll("[data-cell-id]").forEach(button=>button.addEventListener("click",()=>showCellNotification(button.dataset.cellId)));
+const meshCellCount=actualOneSecond?.mesh_cell_count;
+document.getElementById("status").textContent=actualOneSecond?"계산 완료 · 정밀 결과 · 1초 단위":model.status_label;
+document.getElementById("result-badge").textContent=model.actual_solver_data?"계산 완료":"준비 중";
+document.getElementById("calculation-summary").innerHTML=model.actual_solver_data
+  ?`<strong>정밀 CFD 결과</strong> · ${meshCellCount?meshCellCount.toLocaleString()+" cells · ":""}0–1800 s`
+  :model.calculation_summary;
 document.getElementById("calculation-note").textContent=model.calculation_note;
 document.getElementById("calculation-card").classList.toggle("validated",model.actual_solver_data);
-document.getElementById("provenance").textContent=`resolved ${model.resolved_input_sha256} · geometry ${model.geometry_sha256}`;
-window.addEventListener("resize",()=>{resize();drawTemperatureChart();});resize();requestAnimationFrame(animate);
+document.getElementById("provenance").textContent=model.actual_solver_data?"검증된 CFD 결과 뷰어":"형상 미리보기";
+renderActiveMeshRun();
+let stageResizeFrame=0;
+if(typeof ResizeObserver==="function"){
+  const stageResizeObserver=new ResizeObserver(()=>{
+    cancelAnimationFrame(stageResizeFrame);stageResizeFrame=requestAnimationFrame(resize);
+  });
+  stageResizeObserver.observe(sceneStage);
+}
+window.addEventListener("resize",()=>{resize();drawTemperatureChart();drawConvergenceChart();});resize();requestAnimationFrame(animate);
 '''
 
 
@@ -2283,8 +3086,8 @@ def _portable_dataset_javascript(name: str, raw: bytes) -> str:
         separators=(",", ":"),
     )
     return (
-        "window.MDPI_PACKED_DATA = window.MDPI_PACKED_DATA || {};\n"
-        f"window.MDPI_PACKED_DATA[{json.dumps(name)}] = "
+        "window.CFD_TWIN_PACKED_DATA = window.CFD_TWIN_PACKED_DATA || {};\n"
+        f"window.CFD_TWIN_PACKED_DATA[{json.dumps(name)}] = "
         f"{packed};\n"
     )
 
@@ -2338,29 +3141,29 @@ def write_viewer_bundle(
     if actual_solver_data:
         summary = result_manifest.get("final_summary", {})
         final_tmax_k = float(summary.get("battery_tmax_k", float("nan")))
-        status = "L0_CFD_RESULTS_READY"
+        status = "PRECISION_RESULT_READY"
         mesh_passed = mesh_independence.get("status") == "MESH_INDEPENDENCE_PASSED"
         status_label = (
-            "L0–L3 격자 독립성 PASS · 검증 결과"
+            "정밀 결과 · 역사적 격자 독립성 PASS"
             if mesh_passed
-            else "L0 CFD PASS · 논문 최종 아님"
+            else "검증 CFD 결과 · 논문 최종 아님"
         )
         calculation_summary = (
-            "<strong>실제 CFD 검증 완료</strong> — L0 1800 s 열 과도와 "
-            + ("L0–L3 격자 독립성" if mesh_passed else "L0 solver gate")
+            "<strong>실제 CFD 검증 완료</strong> — 1800 s 열 과도와 "
+            + ("역사적 격자 독립성" if mesh_passed else "solver gate")
             + "를 통과했습니다."
         )
         if mesh_passed:
             comparison = mesh_independence["comparisons"]["L2_to_L3"]
             calculation_note = (
-                f"L0 1800 s 체적 Tmax {final_tmax_k:.6f} K · "
-                f"L2→L3 ΔTmax {float(comparison['battery_tmax_difference_k']):.6f} K · "
+                f"1800 s 체적 Tmax {final_tmax_k:.6f} K · "
+                f"정밀도 비교 ΔTmax {float(comparison['battery_tmax_difference_k']):.6f} K · "
                 "Figure 1의 이동 헤드는 검증된 고정 U(x)를 따르며 "
                 "과도속도장이 아닙니다."
             )
         else:
             calculation_note = (
-                f"최종 체적 Tmax {final_tmax_k:.6f} K · Figure 3의 L1–L3 "
+                f"최종 체적 Tmax {final_tmax_k:.6f} K · Figure 3의 "
                 "격자 독립성 완료 전에는 논문 최종값으로 사용하지 않습니다."
             )
     else:
@@ -2412,10 +3215,10 @@ def write_viewer_bundle(
             shutil.copy2(source_manifest, data_dir / source_manifest.name)
             source_validation = source_dir / "actual_1s_validation.json"
             shutil.copy2(source_validation, data_dir / source_validation.name)
-            status = "L3_ACTUAL_ONE_SECOND_RESULTS_READY"
-            status_label = "L3 · 1 s 실제 셀값 · 20.000 °C 원본 · 보간/패딩 없음"
+            status = "PRECISION_ONE_SECOND_RESULTS_READY"
+            status_label = "정밀 결과 · 1 s 실제 셀값 · 20.000 °C 원본 · 보간/패딩 없음"
             calculation_summary = (
-                "<strong>L3 실제 CFD 재계산 완료</strong> — 1,316,854셀, "
+                "<strong>정밀 CFD 계산 완료</strong> — 1,316,854셀, "
                 "t=0–1800 s를 1 s 간격으로 직접 저장했습니다."
             )
             quantization_error = float(
@@ -2437,29 +3240,30 @@ def write_viewer_bundle(
         figure1 = next(figure for figure in figures if int(figure["id"]) == 1)
         figure1.update(
             {
-                "title": "Interactive T(t) + U(x) flow",
+                "title": "3D 종합 결과",
                 "status": (
-                    "L3_ACTUAL_ONE_SECOND_INTERACTIVE_READY"
+                    "PRECISION_ONE_SECOND_INTERACTIVE_READY"
                     if actual_one_second
-                    else "L0_CFD_INTERACTIVE_READY"
+                    else "PRECISION_INTERACTIVE_READY"
                 ),
-                "required": [
-                    "actual_T_t",
-                    "actual_battery_surface_T_xt",
-                    "actual_XY_XZ_T_t",
-                    "five_vertical_XZ_slices",
-                    "validated_fixed_U",
-                    "streamline_seed",
-                ],
                 "time_mode": "transient_temperature_fixed_velocity",
             }
         )
+    mesh_runs = _mesh_runs_payload(
+        case if case is not None else output / "__no_case__",
+        precision_data_ready=actual_solver_data,
+    )
+    convergence = (
+        _convergence_payload(case) if case is not None else {"available": False}
+    )
     model = {
         "schema_version": 1,
         "status": status,
         "status_label": status_label,
         "actual_solver_data": actual_solver_data,
         "interactive_cfd": interactive_cfd,
+        "mesh_runs": mesh_runs,
+        "convergence": convergence,
         "calculation_summary": calculation_summary,
         "calculation_note": calculation_note,
         "production_cad_ready": report["production_cad_ready"],
@@ -2539,12 +3343,22 @@ def write_viewer_bundle(
         "resolved_input_sha256": config.resolved_input_sha256,
         "geometry_sha256": config.geometry_sha256,
     }
-    _atomic_write(output / "index.html", HTML)
+    style_asset = f"style.{hashlib.sha256(CSS.encode('utf-8')).hexdigest()[:12]}.css"
+    app_asset = f"app.{hashlib.sha256(JAVASCRIPT.encode('utf-8')).hexdigest()[:12]}.js"
+    rendered_html = HTML.replace("__STYLE_ASSET__", style_asset).replace(
+        "__APP_ASSET__", app_asset
+    )
+    for obsolete in (*output.glob("style.*.css"), *output.glob("app.*.js")):
+        if obsolete.name not in {style_asset, app_asset}:
+            obsolete.unlink()
+    _atomic_write(output / "index.html", rendered_html)
     _atomic_write(output / "style.css", CSS)
     _atomic_write(output / "app.js", JAVASCRIPT)
+    _atomic_write(output / style_asset, CSS)
+    _atomic_write(output / app_asset, JAVASCRIPT)
     _atomic_write(
         output / "model.js",
-        "window.MDPI_MODEL = "
+        "window.CFD_TWIN_MODEL = "
         + json.dumps(model, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + ";\n",
     )
@@ -2554,7 +3368,7 @@ def write_viewer_bundle(
     )
     _atomic_write(
         output / "README_VIEWER.txt",
-        "MDPI CFD viewer\n\n"
+        "CFD digital-twin result viewer\n\n"
         "Keep this entire folder together and double-click index.html.\n"
         "Figure 13 and the other temperature modes load compressed direct-cell data\n"
         "from the data folder on demand, even when the page is opened as file://.\n"

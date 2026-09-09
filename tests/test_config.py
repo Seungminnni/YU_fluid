@@ -7,9 +7,9 @@ from pathlib import Path
 
 import yaml
 
-from mdpi_cfd.config import load_config
-from mdpi_cfd.errors import ConfigError
-from mdpi_cfd.geometry import cell_placements
+from cfd_twin.config import load_config
+from cfd_twin.errors import ConfigError
+from cfd_twin.geometry import cell_placements
 
 
 ROOT = Path(__file__).resolve().parents[1]

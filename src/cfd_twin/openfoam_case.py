@@ -1255,9 +1255,9 @@ set -eu
 case_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 profile=${1:-}
 case "$profile" in
-    steady_cold_flow|steady|frozen_flow|frozen_flow_actual_1s|full_transient_dt|full_transient_dt_half) ;;
+    steady_cold_flow|steady|frozen_flow|frozen_flow_actual_1s|full_transient_actual_1s|full_transient_dt|full_transient_dt_half) ;;
     *)
-        echo "usage: $0 {steady_cold_flow|steady|frozen_flow|frozen_flow_actual_1s|full_transient_dt|full_transient_dt_half}" >&2
+        echo "usage: $0 {steady_cold_flow|steady|frozen_flow|frozen_flow_actual_1s|full_transient_actual_1s|full_transient_dt|full_transient_dt_half}" >&2
         exit 2
         ;;
 esac
@@ -1288,14 +1288,24 @@ def _transient_pilot_script(
     run_name: str,
     frozen_flow: bool,
     field_interval_s: float = 15.0,
+    result_run: bool = False,
 ) -> str:
-    mode = "frozen-flow" if frozen_flow else "full-transient validation"
+    mode = (
+        "frozen-flow"
+        if frozen_flow
+        else "full-transient result" if result_run else "full-transient validation"
+    )
     initial_temperature = config.boundary.initial_solid_temperature_k
-    reconstruct_scope = "" if frozen_flow else "-latestTime"
-    required_python = " python3" if frozen_flow else ""
-    post_validation = ""
+    reconstruct_scope = "" if frozen_flow or result_run else "-latestTime"
+    required_python = " python3"
+    post_validation = f'''
+python3 "$case_dir/tools/extract_transient_residuals.py" \
+    --log "$run_dir/logs/solver/{run_name}.log" \
+    --csv "$run_dir/reports/solver/transient_residuals.csv" \
+    --summary "$run_dir/reports/solver/transient_residuals_summary.json"
+'''
     if frozen_flow:
-        post_validation = f'''
+        post_validation += f'''
 python3 "$case_dir/tools/validate_frozen_flow.py" \
     --log "$run_dir/logs/solver/{run_name}.log" \
     --run-dir "$run_dir" \
@@ -1508,6 +1518,16 @@ def write_openfoam_solver_bundle(
             ),
             "constant/batterySolid/fvOptions": heat_source_dict,
         },
+        "full_transient_actual_1s": {
+            **_solver_profile_files(
+                config,
+                delta_t=0.1,
+                frozen_flow=False,
+                field_write_interval_s=1.0,
+                actual_one_second_sampling=True,
+            ),
+            "constant/batterySolid/fvOptions": heat_source_dict,
+        },
         "full_transient_dt": {
             **_solver_profile_files(config, delta_t=0.1, frozen_flow=False),
             "constant/batterySolid/fvOptions": heat_source_dict,
@@ -1557,6 +1577,14 @@ def write_openfoam_solver_bundle(
             frozen_flow=True,
             field_interval_s=1800.0,
         ),
+        "AllrunFullTransientActual1s": _transient_pilot_script(
+            config,
+            profile="full_transient_actual_1s",
+            run_name="full_transient_actual_1s",
+            frozen_flow=False,
+            field_interval_s=1.0,
+            result_run=True,
+        ),
         "AllrunFullTransientDtPilot": _transient_pilot_script(
             config,
             profile="full_transient_dt",
@@ -1590,6 +1618,7 @@ def write_openfoam_solver_bundle(
         "activate-solver-profile.sh",
         "AllrunFrozenFlowThermalPilot",
         "AllrunFrozenFlowThermalActual1s",
+        "AllrunFullTransientActual1s",
         "AllrunFullTransientDtPilot",
         "AllrunFullTransientDtHalfPilot",
     ):
@@ -1635,6 +1664,24 @@ def write_openfoam_solver_bundle(
                 "interpolation_scheme": "cell",
                 "invalid_point_policy": "preserve_invalid_no_padding",
             },
+            "full_transient_actual_1s": {
+                "transient": True,
+                "frozenFlow": False,
+                "initial_deltaT_s": 0.1,
+                "max_deltaT_s": 0.1,
+                "adjust_time_step": True,
+                "maxCo": 5,
+                "nOuterCorrectors": 3,
+                "endTime_s": 1800,
+                "telemetry_interval_s": 1.0,
+                "direct_cell_probe_interval_s": 1.0,
+                "field_write_interval_s": 1.0,
+                "nominal_global_iterations_at_max_deltaT": 54000,
+                "iteration_axis": "cumulative_pimple_outer_iteration",
+                "residual_definition": "OpenFOAM raw initial linear-solver residual",
+                "fluent_scaled_residual": False,
+                "intended_use": "canonical new single-mesh result run",
+            },
             "full_transient_dt": {
                 "transient": True,
                 "frozenFlow": False,
@@ -1666,12 +1713,12 @@ def write_openfoam_solver_bundle(
         "pending_gates": [
             "OpenFOAM v2512 dictionary parse",
             "steady pilot convergence",
-            "frozen-flow temperature initialization and execution",
+            "full-transient 1 s output execution and residual history",
             "full-transient dt/dt-half equivalence",
             "mass and energy balance",
             "prism layer coverage",
             "battery-wall y+ distribution",
-            "L0-L3 mesh independence",
+            "single-mesh target count and topology",
         ],
         "files": sorted(files),
     }

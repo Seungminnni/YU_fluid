@@ -1,6 +1,6 @@
 # 구현 가정 및 차단 항목
 
-이 문서는 `MDPI_CFD_IMPLEMENTATION_FINAL_DESIGN.md`의 가정을 실행 코드 관점에서 고정한다.
+이 문서는 23셀 CFD 디지털 트윈의 가정을 실행 코드 관점에서 고정한다.
 
 | ID | 상태 | 현재 처리 | 해제 조건 |
 |---|---|---|---|
@@ -9,7 +9,7 @@
 | A-05/A-06 | 구현됨 | 초기온도 293 K, 외벽 adiabatic/no-slip | 별도 실험 조건 제공 시 case profile 추가 |
 | A-07 | 차단 아님 | solver Δt는 temporal study에서 선정 | OpenFOAM 실행 환경에서 pilot 완료 |
 | A-13 | 구현됨 | Table 4 `Re=6,773.5`; 논문 8,782는 메타데이터 | 원 저자의 점도/온도 계산 근거 확보 |
-| A-15 | 구현됨 | x pitch 19.0 mm 기본, 19.48557 mm 대안 기록 | CAD overlay 승인 |
+| A-15 | 구현됨 | x pitch 19.0 mm 기본, 19.48557 mm 대안 기록 | CAD 치수 검토 승인 |
 
 현재 A-04는 non-blocking warning이다. case manifest의
 `status=INPUT_BUNDLE_READY_NOT_RUNNABLE`, `runnable=false`는 CadQuery를 실행하지

@@ -1,15 +1,15 @@
-class MdpiCfdError(Exception):
+class CfdTwinError(Exception):
     """Base error for expected, user-facing failures."""
 
 
-class ConfigError(MdpiCfdError):
+class ConfigError(CfdTwinError):
     """Raised when a configuration violates the canonical model."""
 
 
-class ProfileError(MdpiCfdError):
+class ProfileError(CfdTwinError):
     """Raised when a heat-source profile is malformed or out of range."""
 
 
-class DependencyUnavailable(MdpiCfdError):
+class DependencyUnavailable(CfdTwinError):
     """Raised when an external solver or optional visualization tool is absent."""
 

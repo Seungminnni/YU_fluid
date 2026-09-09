@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.config import load_config
-from mdpi_cfd.mesh import write_mesh_source_bundle
+from cfd_twin.config import load_config
+from cfd_twin.mesh import write_mesh_source_bundle
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +55,7 @@ class MeshSourceTests(unittest.TestCase):
             self.assertFalse(manifest["production_mesh_ready"])
             self.assertFalse(manifest["mesh_generated"])
 
-    def test_gmsh_l0_is_rejected_because_production_uses_snappy(self) -> None:
+    def test_gmsh_rejects_production_profile_because_production_uses_snappy(self) -> None:
         config = load_config(BASELINE)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -66,8 +66,8 @@ class MeshSourceTests(unittest.TestCase):
             (cad / "cad_result.json").write_text(
                 json.dumps({"cad_geometry_checks_passed": True, "expected": {}})
             )
-            with self.assertRaisesRegex(Exception, "Production L0-L3"):
-                write_mesh_source_bundle(config, cad, root / "mesh", mesh_level="L0")
+            with self.assertRaisesRegex(Exception, "production mesh uses"):
+                write_mesh_source_bundle(config, cad, root / "mesh", mesh_level="single")
 
 
 if __name__ == "__main__":

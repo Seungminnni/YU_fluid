@@ -6,24 +6,27 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mdpi_cfd.config import load_config
-from mdpi_cfd.openfoam_zone_validation import (
+from cfd_twin.config import load_config
+from cfd_twin.openfoam_zone_validation import (
     EXPECTED_BATTERY_ZONES,
     validate_cell_zones,
 )
-from mdpi_cfd.openfoam_mesh_integrals import validate_mesh_integrals
-from mdpi_cfd.openfoam_interface_validation import validate_interfaces
-from mdpi_cfd.openfoam_layercheck import parse_layer_log
-from mdpi_cfd.openfoam_production_gate import (
+from cfd_twin.openfoam_mesh_integrals import validate_mesh_integrals
+from cfd_twin.openfoam_mesh_target_validation import validate_mesh_target
+from cfd_twin.openfoam_interface_validation import validate_interfaces
+from cfd_twin.openfoam_layercheck import parse_layer_log
+from cfd_twin.openfoam_production_gate import (
     REQUIRED_REPORTS,
     aggregate_production_gate,
 )
-from mdpi_cfd.openfoam_checkmesh import parse_checkmesh_log
-from mdpi_cfd.openfoam_surfacecheck import parse_surfacecheck_log
-from mdpi_cfd.openfoam_yplus_validation import validate_yplus
-from mdpi_cfd.production_mesh import (
+from cfd_twin.openfoam_checkmesh import parse_checkmesh_log
+from cfd_twin.openfoam_surfacecheck import parse_surfacecheck_log
+from cfd_twin.openfoam_yplus_validation import validate_yplus
+from cfd_twin.production_mesh import (
+    DEFAULT_MESH_PROFILE,
     EXPECTED_BATTERY_FILES,
     MESH_PRESETS,
+    SINGLE_MESH_TARGET_COUNTS,
     write_production_mesh_source_bundle,
 )
 
@@ -198,10 +201,13 @@ outerWall {{ type wall; nFaces {len(faces)-2}; startFace 2; }}
 
 
 class ProductionMeshTests(unittest.TestCase):
-    def test_l3_uses_measured_yplus_first_layer_correction(self) -> None:
-        self.assertEqual(MESH_PRESETS["L0"].first_layer_thickness_m, 15e-6)
-        self.assertEqual(MESH_PRESETS["L2"].first_layer_thickness_m, 15e-6)
-        self.assertEqual(MESH_PRESETS["L3"].first_layer_thickness_m, 14e-6)
+    def test_single_profile_records_the_supplied_207390_cell_contract(self) -> None:
+        preset = MESH_PRESETS[DEFAULT_MESH_PROFILE]
+        self.assertEqual(preset.target_cells, 207_390)
+        self.assertEqual(preset.target_fluid_cells, 136_550)
+        self.assertEqual(preset.target_solid_cells, 70_840)
+        self.assertEqual(preset.target_points, 221_878)
+        self.assertEqual(SINGLE_MESH_TARGET_COUNTS["total_cells"], 207_390)
 
     def test_source_bundle_has_exact_23_zone_and_two_region_contract(self) -> None:
         config = load_config(BASELINE)
@@ -218,7 +224,7 @@ class ProductionMeshTests(unittest.TestCase):
                 "runtime field", encoding="utf-8"
             )
             manifest = write_production_mesh_source_bundle(
-                config, cad, output, mesh_level="L0"
+                config, cad, output, mesh_level="single"
             )
             snappy = (output / "system" / "snappyHexMeshDict").read_text()
             allmesh = (output / "AllmeshProduction").read_text()
@@ -323,7 +329,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertEqual(fallback.count("source cylinderToCell;"), 23)
             self.assertTrue((output / "constant" / "triSurface" / "battery_C23.stl").is_file())
             self.assertIn(
-                "mdpi-openfoam-v2512-python3:local",
+                "cfd-twin-openfoam-v2512-python3:local",
                 (output / "compose.yaml").read_text(),
             )
             self.assertIn(
@@ -411,6 +417,18 @@ class ProductionMeshTests(unittest.TestCase):
                 ],
                 69,
             )
+            self.assertEqual(
+                manifest["solver_source"]["solver_profiles"][
+                    "full_transient_actual_1s"
+                ]["field_write_interval_s"],
+                1.0,
+            )
+            self.assertEqual(
+                manifest["solver_source"]["solver_profiles"]["frozen_flow"][
+                    "field_write_interval_s"
+                ],
+                15.0,
+            )
             self.assertTrue((output / "constant" / "regionProperties").is_file())
             self.assertTrue(
                 (output / "constant" / "batterySolid" / "fvOptions").is_file()
@@ -455,6 +473,13 @@ class ProductionMeshTests(unittest.TestCase):
                 / "system"
                 / "controlDict"
             ).read_text()
+            full_actual_control = (
+                output
+                / "profiles"
+                / "full_transient_actual_1s"
+                / "system"
+                / "controlDict"
+            ).read_text()
             transient_root = (
                 output / "profiles" / "frozen_flow" / "system" / "fvSolution"
             ).read_text()
@@ -484,6 +509,11 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("actual_xy85_temperature_1s", actual_control)
             self.assertIn("actual_battery_near_surface_temperature_1s", actual_control)
             self.assertEqual(actual_control.count("interpolationScheme cell;"), 11)
+            self.assertIn("deltaT 0.1;", full_actual_control)
+            self.assertIn("adjustTimeStep yes;", full_actual_control)
+            self.assertIn("maxDeltaT 0.1;", full_actual_control)
+            self.assertIn("writeInterval 1;", full_actual_control)
+            self.assertIn("actual_xy_temperature_1s", full_actual_control)
             self.assertIn("coolant_yPlus", frozen_control)
             self.assertIn("writeInterval 1800;", frozen_control)
             self.assertIn("frozenFlow yes;", frozen_solution)
@@ -495,12 +525,16 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("deltaT 0.05;", half_control)
             self.assertTrue((output / "AllrunFrozenFlowThermalPilot").is_file())
             self.assertTrue((output / "AllrunFrozenFlowThermalActual1s").is_file())
+            self.assertTrue((output / "AllrunFullTransientActual1s").is_file())
             self.assertTrue((output / "AllrunColdFlowPilot").is_file())
             self.assertTrue((output / "run-cold-flow-pilot.sh").is_file())
             self.assertTrue((output / "run-cold-flow-pilot.ps1").is_file())
             self.assertTrue((output / "run-frozen-flow-pilot.sh").is_file())
             self.assertTrue((output / "run-frozen-flow-pilot.ps1").is_file())
+            self.assertTrue((output / "run-full-transient-actual-1s.sh").is_file())
+            self.assertTrue((output / "run-full-transient-actual-1s.ps1").is_file())
             frozen_script = (output / "AllrunFrozenFlowThermalPilot").read_text()
+            full_actual_script = (output / "AllrunFullTransientActual1s").read_text()
             cold_script = (output / "AllrunColdFlowPilot").read_text()
             self.assertIn("validate_yplus.py", cold_script)
             self.assertIn("validate_cold_flow.py", cold_script)
@@ -515,6 +549,9 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("COLD_FLOW_VALIDATION_PASSED", frozen_script)
             self.assertIn("STEADY_CHT_VALIDATION_PASSED", frozen_script)
             self.assertIn("validate_frozen_flow.py", frozen_script)
+            self.assertIn("extract_transient_residuals.py", full_actual_script)
+            self.assertIn("transient_residuals.csv", full_actual_script)
+            self.assertTrue((output / "tools/extract_transient_residuals.py").is_file())
             self.assertNotIn(
                 'reconstructPar -case "$run_dir" -allRegions -latestTime',
                 frozen_script,
@@ -555,7 +592,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertEqual(passed["status"], "PRODUCTION_MESH_GATE_PASSED")
             self.assertTrue(passed["runnable_solver_pilots"])
             self.assertFalse(passed["publication_results_authorized"])
-            self.assertEqual(passed["required_report_count"], 30)
+            self.assertEqual(passed["required_report_count"], 31)
 
             (reports / "surfaceCheck_battery_C23.json").unlink()
             failed = aggregate_production_gate(reports)
@@ -565,6 +602,49 @@ class ProductionMeshTests(unittest.TestCase):
                 failed["errors"]["surfaceCheck_battery_C23.json"],
                 "missing report",
             )
+
+    def test_mesh_target_gate_uses_actual_counts_and_hexa_fraction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            zones = {"coolant": 136_550}
+            zones.update({f"battery_C{index:02d}": 3_080 for index in range(1, 23)})
+            zones["battery_C23"] = 3_080
+            # 23 * 3,080 = 70,840.
+            zone_report = root / "zones.json"
+            zone_report.write_text(
+                json.dumps(
+                    {
+                        "status": "CELLZONE_VALIDATION_PASSED",
+                        "mesh_cell_count": 207_390,
+                        "zone_cell_counts": zones,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            checkmesh = root / "checkMesh.log"
+            checkmesh.write_text(
+                "points: 221878\n"
+                "cells: 207390\n"
+                "    hexahedra: 196000\n"
+                "    prisms: 6000\n"
+                "    wedges: 390\n"
+                "    pyramids: 0\n"
+                "    tet wedges: 0\n"
+                "    tetrahedra: 0\n"
+                "    polyhedra: 5000\n",
+                encoding="utf-8",
+            )
+            report = validate_mesh_target(
+                zone_report,
+                checkmesh,
+                target_total_cells=207_390,
+                target_fluid_cells=136_550,
+                target_solid_cells=70_840,
+                target_points=221_878,
+            )
+            self.assertEqual(report["status"], "MESH_TARGET_VALIDATION_PASSED")
+            self.assertAlmostEqual(report["actual"]["hexahedron_fraction"], 196_000 / 207_390)
+            self.assertFalse(report["all_hexa_claimed"])
 
     def test_zone_validator_requires_full_exclusive_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
