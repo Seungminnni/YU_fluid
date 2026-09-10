@@ -1,3 +1,9 @@
+"""계산된 배터리 표면 y+가 경계층 해상도 기준을 만족하는지 검증한다.
+
+23개 계면의 실제 면적가중 통계를 사용하며, 전체 배터리 면적의 95% 이상이
+y+<1이어야 cold-flow gate를 통과한다.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -132,6 +138,8 @@ def validate_yplus(
     *,
     minimum_battery_area_fraction_below_1: float = 0.95,
 ) -> dict[str, object]:
+    """23개 배터리 patch의 y+ 값과 면적을 대응시켜 합격 여부를 계산한다."""
+
     mesh = Path(mesh_dir).resolve()
     field = Path(field_path).resolve()
     points = _points(mesh / "points")

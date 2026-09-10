@@ -1,3 +1,10 @@
+"""기준 YAML을 검증하고 모든 계산 입력을 SI 단위로 확정한다.
+
+이 모듈이 형상, 물성, 경계조건, 발열, 솔버 설정의 단일 진입점이다.
+아래에서 만든 ``ResolvedConfig``와 ``Derived`` 값은 CAD·메시·OpenFOAM·UI가
+공유하므로 각 단계에서 같은 수치를 다시 손으로 입력하지 않는다.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -485,6 +492,9 @@ def load_config(
         full_transient_validation=ft,
     )
 
+    # 여기부터는 사용자가 별도로 입력하지 않는 파생량이다. 셀 발열은
+    # q'''*Vcell, 유량은 Ain*Uin, Reynolds 수는 rho*U*D/mu로 계산한다.
+    # 난류 입구값은 I=난류강도와 길이척도 l=0.07D에서 k와 omega를 만든다.
     radius = cells.diameter_m / 2
     cell_volume = math.pi * radius**2 * cells.length_m
     qvol = battery.heat_source.qvol_w_m3 if battery.heat_source.qvol_w_m3 is not None else 16325.0
@@ -508,6 +518,7 @@ def load_config(
     diagonal_gap = math.hypot(cells.column_pitch_x_m, cells.stagger_offset_y_m) - cells.diameter_m
     if min(right_clearance, bottom_clearance, top_clearance, diagonal_gap) <= 0:
         raise ConfigError("cell layout intersects the enclosure or another cell")
+    # 등가저항은 논문 측정값이 아니라 상수 발열을 I^2R로 역산한 설명용 값이다.
     nominal_current = electrical.capacity_ah * electrical.discharge_rate_c
     eq_r = cell_heat / nominal_current**2
     derived = Derived(

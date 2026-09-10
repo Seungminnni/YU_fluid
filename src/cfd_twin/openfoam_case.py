@@ -1,3 +1,11 @@
+"""검증된 입력을 실제 OpenFOAM CHT case 파일로 변환한다.
+
+연속·운동량·난류·에너지 방정식을 Python으로 다시 구현하지 않는다.
+정상상태는 chtMultiRegionSimpleFoam, 과도상태는 chtMultiRegionFoam이 풀며,
+이 모듈은 두 솔버가 사용할 영역, 물성, 경계조건, fvSchemes, fvSolution,
+function object와 실행 순서를 재현 가능하게 생성한다.
+"""
+
 from __future__ import annotations
 
 import json
@@ -30,6 +38,8 @@ def _header(object_name: str, class_name: str = "dictionary", location: str | No
 
 
 def _region_properties() -> str:
+    """하나의 유체영역 coolant와 하나의 고체영역 batterySolid를 선언한다."""
+
     return _header("regionProperties") + '''regions
 (
     fluid (coolant)
@@ -39,6 +49,8 @@ def _region_properties() -> str:
 
 
 def _gravity() -> str:
+    """현재 기준모델은 g=0으로 부력과 자연대류를 사용하지 않는다."""
+
     return _header("g", "uniformDimensionedVectorField", "constant") + '''dimensions [0 1 -2 0 0 0 0];
 value      (0 0 0);
 '''
@@ -51,6 +63,8 @@ value      0;
 
 
 def _fluid_thermo(config: ResolvedConfig) -> str:
+    """탈이온수의 상수 rho, Cp, mu, Pr을 유체 열역학 파일로 만든다."""
+
     fluid = config.fluid
     prandtl = fluid.dynamic_viscosity_pa_s * fluid.specific_heat_j_kgk / fluid.thermal_conductivity_w_mk
     return _header("thermophysicalProperties") + f'''thermoType
@@ -89,6 +103,8 @@ mixture
 
 
 def _solid_thermo(config: ResolvedConfig) -> str:
+    """균질 배터리의 상수 rho, Cp, k를 고체 열역학 파일로 만든다."""
+
     battery = config.battery
     return _header("thermophysicalProperties") + f'''thermoType
 {{
@@ -125,6 +141,8 @@ mixture
 
 
 def _turbulence_properties(config: ResolvedConfig) -> str:
+    """RANS k-omega SST 모델을 켜는 turbulenceProperties를 만든다."""
+
     return _header("turbulenceProperties") + f'''simulationType RAS;
 
 RAS
@@ -158,6 +176,8 @@ def _field(
     boundary: str,
     region: str,
 ) -> str:
+    """내부 초기값과 patch 조건을 OpenFOAM volField 형식으로 감싼다."""
+
     return _header(name, class_name, f"0/{region}") + f'''dimensions      {dimensions};
 internalField   uniform {internal};
 boundaryField
@@ -168,6 +188,13 @@ boundaryField
 
 
 def _fluid_fields(config: ResolvedConfig) -> dict[str, str]:
+    """유체 U, p, p_rgh, T, k, omega, nut, alphat의 초기·경계조건을 만든다.
+
+    inlet은 -z 방향 고정속도/고정온도, outlet은 고정압력과 역류 안전조건,
+    외벽과 배터리 표면은 no-slip이다. 외벽 T의 zeroGradient는 단열이고,
+    배터리 계면의 coupledMixed 조건은 유체-고체 온도와 열유속을 연결한다.
+    """
+
     velocity = config.boundary.inlet_velocity_m_s
     temperature = config.boundary.inlet_temperature_k
     pressure = config.boundary.outlet_absolute_pressure_pa
@@ -264,6 +291,8 @@ def _fluid_fields(config: ResolvedConfig) -> dict[str, str]:
 
 
 def _solid_temperature(config: ResolvedConfig) -> str:
+    """고체 초기온도와 유체측 계면에 대응하는 CHT 온도조건을 만든다."""
+
     temperature = config.boundary.initial_solid_temperature_k
     boundary = f'''    ".*battery_C[0-9][0-9]_interface.*"
     {{
@@ -303,6 +332,8 @@ def _solid_pressure(config: ResolvedConfig) -> str:
 
 
 def _fluid_schemes(*, transient: bool = False) -> str:
+    """유체 방정식의 시간·대류·확산항 유한체적 이산화법을 정의한다."""
+
     ddt_scheme = "Euler" if transient else "steadyState"
     content = _header("fvSchemes") + '''ddtSchemes
 {
@@ -344,6 +375,8 @@ wallDist
 
 
 def _solid_schemes(*, transient: bool = False) -> str:
+    """대류가 없는 고체 엔탈피 방정식의 시간·확산 이산화법을 정의한다."""
+
     ddt_scheme = "Euler" if transient else "steadyState"
     content = _header("fvSchemes") + '''ddtSchemes
 {
@@ -376,6 +409,8 @@ snGradSchemes
 def _fluid_solution(
     *, conservative: bool = False, enthalpy_relaxation: float | None = None
 ) -> str:
+    """정상 SIMPLE 계산의 선형솔버, 잔차기준과 완화계수를 만든다."""
+
     non_orthogonal_correctors = 2 if conservative else 1
     pressure_relaxation = 0.3 if conservative else 0.7
     velocity_relaxation = 0.15 if conservative else 0.3
@@ -463,6 +498,12 @@ relaxationFactors
 
 
 def _transient_fluid_solution(*, frozen_flow: bool) -> str:
+    """과도 PIMPLE 설정을 만들고 현재 열해석에서는 수렴 유동장을 고정한다.
+
+    frozen_flow=True이면 U/p/k/omega를 다시 풀지 않고 에너지장만 시간 적분한다.
+    상수 물성과 g=0 조건에서는 온도가 운동량에 되먹임되지 않기 때문이다.
+    """
+
     frozen = "yes" if frozen_flow else "no"
     momentum_predictor = "no" if frozen_flow else "yes"
     return _header("fvSolution") + f'''solvers
@@ -564,6 +605,8 @@ relaxationFactors
 
 
 def _transient_solid_solution() -> str:
+    """과도 고체 엔탈피 h 방정식의 PCG/DIC 해법을 정의한다."""
+
     return _header("fvSolution") + '''solvers
 {
     h
@@ -589,6 +632,8 @@ PIMPLE
 
 
 def _root_solution(*, transient: bool) -> str:
+    """두 영역 사이 PIMPLE outer correction과 에너지 결합 횟수를 정의한다."""
+
     if transient:
         return _header("fvSolution") + '''solvers {}
 PIMPLE
@@ -790,6 +835,8 @@ def _probe_function(
 
 
 def _actual_one_second_sampling(config: ResolvedConfig) -> str:
+    """0~1,800 s UI에 필요한 단면·셀표면 직접 probe 위치를 생성한다."""
+
     """Compact direct-cell probes for the 1 s L3 visualisation run.
 
     The regular section locations are denser than the L3 background spacing,
@@ -1502,6 +1549,11 @@ def _solver_profile_files(
 def write_openfoam_solver_bundle(
     config: ResolvedConfig, output_dir: str | Path
 ) -> dict[str, object]:
+    """정상 유동, 정상 CHT, frozen/full 과도 계산 파일과 실행기를 기록한다.
+
+    발열은 heat_source.py가 만든 batterySolid/fvOptions로 연결하고, 각 계산은
+    이전 단계의 JSON gate가 통과한 경우에만 다음 단계로 진행하도록 구성한다.
+    """
     output = Path(output_dir).resolve()
     # Use the conservative pressure/velocity coupling validated by the prior
     # production pilots for the single active mesh profile.

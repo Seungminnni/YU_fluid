@@ -1,3 +1,10 @@
+"""23셀 배치 좌표를 만들고 형상 충돌·간격을 검증한다.
+
+YAML의 5-4-5-4-5 배열 규칙을 C01~C23 중심 좌표로 바꾸며, 원통 간격과
+22점 탱크 외곽까지의 거리를 검사한다. 이 좌표가 CAD, 메시 zone과 UI에서
+동일한 셀 ID를 유지하게 하는 기준이다.
+"""
+
 from __future__ import annotations
 
 import json
@@ -77,6 +84,8 @@ def _polygon_area(polygon: tuple[tuple[float, float], ...]) -> float:
 
 
 def cell_placements(config: ResolvedConfig) -> tuple[CellPlacement, ...]:
+    """5-4-5-4-5 규칙으로 C01~C23의 3차원 중심 좌표를 생성한다."""
+
     cells = config.cells
     enclosure = config.enclosure
     radius = cells.diameter_m / 2
@@ -85,6 +94,7 @@ def cell_placements(config: ResolvedConfig) -> tuple[CellPlacement, ...]:
     z = enclosure.height_z_m / 2
     placements: list[CellPlacement] = []
     next_id = 1
+    # 4개 셀 열만 y 방향으로 stagger_offset을 주어 삼각형에 가까운 유로를 만든다.
     for column, row_count in enumerate(EXPECTED_COUNTS):
         x = x0 + column * cells.column_pitch_x_m
         offset = 0.0 if row_count == max(EXPECTED_COUNTS) else cells.stagger_offset_y_m
@@ -108,6 +118,8 @@ def cell_placements(config: ResolvedConfig) -> tuple[CellPlacement, ...]:
 
 
 def geometry_report(config: ResolvedConfig) -> dict[str, object]:
+    """셀-셀, 셀-벽, 포트-외곽 충돌을 검사하고 추적 가능한 보고서를 만든다."""
+
     placements = cell_placements(config)
     radius = config.cells.diameter_m / 2
     min_pair = math.inf
@@ -138,6 +150,8 @@ def geometry_report(config: ResolvedConfig) -> dict[str, object]:
     if min(min_pair, left, right, bottom, top, lower_z, upper_z) <= 0:
         raise ConfigError("generated geometry contains a collision")
 
+    # 직사각형 폭/길이뿐 아니라 노치가 포함된 22점 폴리곤의 모든 선분까지
+    # 거리를 계산해야 코너나 노치와 셀이 겹치는 경우를 잡을 수 있다.
     outline_clearances = {
         cell.cell_id: _surface_clearance_to_outline(
             (cell.center_x_m, cell.center_y_m), radius, config.enclosure.outline_polygon_m
@@ -227,16 +241,20 @@ def geometry_report(config: ResolvedConfig) -> dict[str, object]:
 
 def _svg(config: ResolvedConfig, placements: tuple[CellPlacement, ...]) -> str:
     scale = 6.0
+    margin_x = 60.0
+    margin_y = 55.0
     width_mm = config.enclosure.width_x_m * 1000
     height_mm = config.enclosure.length_y_m * 1000
-    canvas_w = width_mm * scale
-    canvas_h = height_mm * scale
+    drawing_w = width_mm * scale
+    drawing_h = height_mm * scale
+    canvas_w = drawing_w + 2 * margin_x + 55
+    canvas_h = drawing_h + 2 * margin_y
     radius = config.cells.diameter_m * 1000 * scale / 2
     circles: list[str] = []
     labels: list[str] = []
     for cell in placements:
-        x = cell.center_x_m * 1000 * scale
-        y = canvas_h - cell.center_y_m * 1000 * scale
+        x = margin_x + cell.center_x_m * 1000 * scale
+        y = margin_y + drawing_h - cell.center_y_m * 1000 * scale
         circles.append(
             f'<circle cx="{x:.3f}" cy="{y:.3f}" r="{radius:.3f}" '
             'fill="#dcecff" stroke="#17324d" stroke-width="1.5" />'
@@ -247,7 +265,8 @@ def _svg(config: ResolvedConfig, placements: tuple[CellPlacement, ...]) -> str:
             f"{cell.cell_id}</text>"
         )
     outline = " ".join(
-        f"{x_m * 1000 * scale:.3f},{canvas_h - y_m * 1000 * scale:.3f}"
+        f"{margin_x + x_m * 1000 * scale:.3f},"
+        f"{margin_y + drawing_h - y_m * 1000 * scale:.3f}"
         for x_m, y_m in config.enclosure.outline_polygon_m
     )
     port_circles = []
@@ -255,8 +274,8 @@ def _svg(config: ResolvedConfig, placements: tuple[CellPlacement, ...]) -> str:
         ("IN", config.ports.inlet_center_xy_m),
         ("OUT", config.ports.outlet_center_xy_m),
     ):
-        x = center[0] * 1000 * scale
-        y = canvas_h - center[1] * 1000 * scale
+        x = margin_x + center[0] * 1000 * scale
+        y = margin_y + drawing_h - center[1] * 1000 * scale
         port_circles.append(
             f'<circle cx="{x:.3f}" cy="{y:.3f}" r="{radius:.3f}" '
             'fill="none" stroke="#e66b00" stroke-width="2" stroke-dasharray="7 4" />'
@@ -264,16 +283,150 @@ def _svg(config: ResolvedConfig, placements: tuple[CellPlacement, ...]) -> str:
             'font-family="sans-serif" font-size="9" fill="#b24700">'
             f'{label} A-04</text>'
         )
+    width_dimension_y = margin_y + drawing_h + 25
+    length_dimension_x = margin_x + drawing_w + 25
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_w:.0f}" height="{canvas_h:.0f}"
      viewBox="0 0 {canvas_w:.3f} {canvas_h:.3f}">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5"
+    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#435d70" /></marker></defs>
   <rect width="100%" height="100%" fill="white" />
+  <text x="{margin_x:.3f}" y="26" font-family="sans-serif" font-size="17"
+        font-weight="700" fill="#17324d">상면도 · X–Y 정투영</text>
   <polygon points="{outline}" fill="none" stroke="#111" stroke-width="2" />
   {''.join(circles)}
   {''.join(labels)}
   {''.join(port_circles)}
-  <text x="8" y="16" font-family="sans-serif" font-size="10" fill="#a00">
-    Port centres shown as A-04 assumptions; diameter is fixed at 19 mm.
+  <line x1="{margin_x:.3f}" y1="{width_dimension_y:.3f}"
+        x2="{margin_x + drawing_w:.3f}" y2="{width_dimension_y:.3f}"
+        stroke="#435d70" stroke-width="1.2" marker-start="url(#arrow)"
+        marker-end="url(#arrow)" />
+  <text x="{margin_x + drawing_w / 2:.3f}" y="{width_dimension_y - 7:.3f}"
+        text-anchor="middle" font-family="sans-serif" font-size="12"
+        font-weight="700" fill="#263f52">114 mm</text>
+  <line x1="{length_dimension_x:.3f}" y1="{margin_y:.3f}"
+        x2="{length_dimension_x:.3f}" y2="{margin_y + drawing_h:.3f}"
+        stroke="#435d70" stroke-width="1.2" marker-start="url(#arrow)"
+        marker-end="url(#arrow)" />
+  <text x="{length_dimension_x + 12:.3f}" y="{margin_y + drawing_h / 2:.3f}"
+        font-family="sans-serif" font-size="12" font-weight="700"
+        fill="#263f52">121 mm</text>
+  <text x="{margin_x:.3f}" y="{canvas_h - 10:.3f}"
+        font-family="sans-serif" font-size="10" fill="#b24700">
+    포트 중심은 A-04 기준 위치 · 포트 및 셀 직경 Ø19 mm
   </text>
+</svg>
+'''
+
+
+def _side_view_svg(
+    config: ResolvedConfig, placements: tuple[CellPlacement, ...]
+) -> str:
+    """실제 CAD 치수로 X-Z 정투영 측면도를 만든다."""
+
+    scale = 4.8
+    left, top = 145.0, 58.0
+    tank_w = config.enclosure.width_x_m * 1000
+    tank_h = config.enclosure.height_z_m * 1000
+    cell_d = config.cells.diameter_m * 1000
+    cell_h = config.cells.length_m * 1000
+    cell_z0 = (tank_h - cell_h) / 2
+    port_d = config.ports.inlet_diameter_m * 1000
+    port_h = config.ports.external_length_m * 1000
+    maximum_z, minimum_z = tank_h + port_h, -port_h
+    canvas_w = left + tank_w * scale + 160
+    canvas_h = top + (maximum_z - minimum_z) * scale + 84
+
+    def sx(x_mm: float) -> float:
+        return left + x_mm * scale
+
+    def sy(z_mm: float) -> float:
+        return top + (maximum_z - z_mm) * scale
+
+    columns: dict[int, list[CellPlacement]] = {}
+    for cell in placements:
+        columns.setdefault(cell.column_index, []).append(cell)
+    cell_shapes: list[str] = []
+    for cells in columns.values():
+        center_x = cells[0].center_x_m * 1000
+        x = sx(center_x - cell_d / 2)
+        y = sy(cell_z0 + cell_h)
+        width, height = cell_d * scale, cell_h * scale
+        label = f"{cells[0].cell_id}–{cells[-1].cell_id}"
+        cell_shapes.append(
+            f'<rect x="{x:.3f}" y="{y:.3f}" width="{width:.3f}" '
+            f'height="{height:.3f}" rx="5" fill="#dcecff" '
+            'stroke="#17324d" stroke-width="1.8" />'
+            f'<line x1="{sx(center_x):.3f}" y1="{y:.3f}" '
+            f'x2="{sx(center_x):.3f}" y2="{y + height:.3f}" '
+            'stroke="#7794ab" stroke-dasharray="6 4" />'
+            f'<text x="{sx(center_x):.3f}" y="{y + height / 2 - 5:.3f}" '
+            'text-anchor="middle" font-family="sans-serif" font-size="10" '
+            f'font-weight="700" fill="#17324d">{label}</text>'
+            f'<text x="{sx(center_x):.3f}" y="{y + height / 2 + 10:.3f}" '
+            'text-anchor="middle" font-family="sans-serif" font-size="9" '
+            f'fill="#516a7e">{len(cells)} cells</text>'
+        )
+
+    inlet_x = config.ports.inlet_center_xy_m[0] * 1000
+    outlet_x = config.ports.outlet_center_xy_m[0] * 1000
+    tank_left, tank_right = sx(0), sx(tank_w)
+    tank_top, tank_bottom = sy(tank_h), sy(0)
+    width_y = sy(minimum_z) + 36
+    height_x = tank_right + 42
+    cell_dimension_x = tank_left - 30
+
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_w:.0f}" height="{canvas_h:.0f}"
+     viewBox="0 0 {canvas_w:.3f} {canvas_h:.3f}">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5"
+    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#435d70" /></marker></defs>
+  <rect width="100%" height="100%" fill="white" />
+  <text x="{tank_left:.3f}" y="28" font-family="sans-serif" font-size="17"
+    font-weight="700" fill="#17324d">측면도 · X–Z 정투영</text>
+  <rect x="{tank_left:.3f}" y="{tank_top:.3f}" width="{tank_w * scale:.3f}"
+    height="{tank_h * scale:.3f}" fill="#f7fbfd" stroke="#111" stroke-width="2.2" />
+  {''.join(cell_shapes)}
+  <rect x="{sx(inlet_x - port_d / 2):.3f}" y="{sy(maximum_z):.3f}"
+    width="{port_d * scale:.3f}" height="{port_h * scale:.3f}"
+    fill="#fff1dd" stroke="#e66b00" stroke-width="2" />
+  <text x="{sx(inlet_x):.3f}" y="{sy(maximum_z) + port_h * scale / 2 - 3:.3f}"
+    text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700"
+    fill="#b24700">INLET</text>
+  <text x="{sx(inlet_x):.3f}" y="{sy(maximum_z) + port_h * scale / 2 + 11:.3f}"
+    text-anchor="middle" font-family="sans-serif" font-size="9"
+    fill="#b24700">Ø19 × 32</text>
+  <rect x="{sx(outlet_x - port_d / 2):.3f}" y="{tank_bottom:.3f}"
+    width="{port_d * scale:.3f}" height="{port_h * scale:.3f}"
+    fill="#e5f8fb" stroke="#168ca5" stroke-width="2" />
+  <text x="{sx(outlet_x):.3f}" y="{tank_bottom + port_h * scale / 2 - 3:.3f}"
+    text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700"
+    fill="#0c7389">OUTLET</text>
+  <text x="{sx(outlet_x):.3f}" y="{tank_bottom + port_h * scale / 2 + 11:.3f}"
+    text-anchor="middle" font-family="sans-serif" font-size="9"
+    fill="#0c7389">Ø19 × 32</text>
+  <line x1="{tank_left:.3f}" y1="{width_y:.3f}" x2="{tank_right:.3f}"
+    y2="{width_y:.3f}" stroke="#435d70" stroke-width="1.2"
+    marker-start="url(#arrow)" marker-end="url(#arrow)" />
+  <text x="{(tank_left + tank_right) / 2:.3f}" y="{width_y - 7:.3f}"
+    text-anchor="middle" font-family="sans-serif" font-size="12"
+    font-weight="700" fill="#263f52">114 mm</text>
+  <line x1="{height_x:.3f}" y1="{tank_top:.3f}" x2="{height_x:.3f}"
+    y2="{tank_bottom:.3f}" stroke="#435d70" stroke-width="1.2"
+    marker-start="url(#arrow)" marker-end="url(#arrow)" />
+  <text x="{height_x + 14:.3f}" y="{(tank_top + tank_bottom) / 2:.3f}"
+    font-family="sans-serif" font-size="12" font-weight="700"
+    fill="#263f52">82 mm</text>
+  <line x1="{cell_dimension_x:.3f}" y1="{sy(cell_z0 + cell_h):.3f}"
+    x2="{cell_dimension_x:.3f}" y2="{sy(cell_z0):.3f}"
+    stroke="#435d70" stroke-width="1.2" marker-start="url(#arrow)"
+    marker-end="url(#arrow)" />
+  <text x="{cell_dimension_x - 7:.3f}"
+    y="{(sy(cell_z0 + cell_h) + sy(cell_z0)) / 2:.3f}"
+    text-anchor="end" font-family="sans-serif" font-size="11"
+    font-weight="700" fill="#263f52">Cell 68 mm</text>
+  <text x="{tank_left:.3f}" y="{canvas_h - 24:.3f}" font-family="sans-serif"
+    font-size="10" fill="#667b89">동일 X열의 4/5개 셀은 측면 정투영에서 겹쳐 표시됨 · 포트 위치 A-04 기준</text>
 </svg>
 '''
 
@@ -350,5 +503,6 @@ def write_geometry_bundle(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
     )
     _atomic_write(output / "top_view.svg", _svg(config, placements))
+    _atomic_write(output / "side_view_xz.svg", _side_view_svg(config, placements))
     _atomic_write(output / "battery_surfaces.vtk", _vtk_cylinders(config, placements))
     return report

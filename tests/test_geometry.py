@@ -50,9 +50,21 @@ class GeometryTests(unittest.TestCase):
             output = Path(directory)
             self.assertTrue((output / "geometry_report.json").is_file())
             self.assertTrue((output / "top_view.svg").is_file())
+            self.assertTrue((output / "side_view_xz.svg").is_file())
             self.assertTrue((output / "battery_surfaces.vtk").is_file())
             self.assertFalse(report["production_cad_ready"])
-            self.assertIn("Port centres shown as A-04 assumptions", (output / "top_view.svg").read_text())
+            top_view = (output / "top_view.svg").read_text()
+            self.assertIn("상면도 · X–Y 정투영", top_view)
+            self.assertIn("114 mm", top_view)
+            self.assertIn("121 mm", top_view)
+            self.assertIn("포트 중심은 A-04 기준 위치", top_view)
+            side_view = (output / "side_view_xz.svg").read_text()
+            self.assertIn("측면도 · X–Z 정투영", side_view)
+            self.assertIn("114 mm", side_view)
+            self.assertIn("82 mm", side_view)
+            self.assertIn("Cell 68 mm", side_view)
+            self.assertIn("C01–C05", side_view)
+            self.assertIn("C19–C23", side_view)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from pathlib import Path
 from cfd_twin.config import load_config
 from cfd_twin.viewer import (
     _convergence_payload,
+    _energy_balance_payload,
     _portable_dataset_javascript,
     write_viewer_bundle,
 )
@@ -20,6 +21,26 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class ViewerTests(unittest.TestCase):
+    def test_energy_balance_payload_preserves_persisted_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            case = Path(directory)
+            results = case / "results"
+            results.mkdir()
+            (results / "energy_balance.csv").write_text(
+                "time_s,generated_W,removed_W,stored_W,imbalance_fraction\n"
+                "15,7.2,3.4,3.7,0.0138888889\n"
+                "30,7.2,5.5,1.69,0.0013888889\n",
+                encoding="utf-8",
+            )
+
+            payload = _energy_balance_payload(case)
+
+            self.assertTrue(payload["available"])
+            self.assertEqual(payload["times_s"], [15.0, 30.0])
+            self.assertEqual(payload["generated_w"], [7.2, 7.2])
+            self.assertAlmostEqual(payload["imbalance_percent"][-1], 0.13888889)
+            self.assertEqual(payload["final"]["time_s"], 30.0)
+
     def test_convergence_payload_includes_saved_solver_stages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             case = Path(directory)
@@ -138,6 +159,7 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('id="mesh-run-select"', html)
             self.assertIn("CFD 수렴 모니터", html)
             self.assertIn('id="convergence-chart-open"', html)
+            self.assertIn('<option value="energy-balance">6. 에너지 수지</option>', html)
             self.assertIn("해석 세부정보", html)
             self.assertIn('id="kpi-outlet-temperature"', html)
             self.assertIn('id="kpi-cell-maximum"', html)
@@ -190,13 +212,36 @@ class ViewerTests(unittest.TestCase):
             self.assertEqual(model["mesh_runs"][1]["counts"]["total_cells"], 207_390)
             self.assertFalse(model["mesh_runs"][1]["data_ready"])
             self.assertFalse(model["convergence"]["available"])
+            self.assertFalse(model["energy_balance"]["available"])
             self.assertIn('id="vertical-sections"', html)
             self.assertEqual(html.count('name="vertical-section"'), 5)
-            self.assertIn('id="vertical-all"', html)
+            self.assertEqual(
+                html.count('type="radio" name="vertical-section"'), 5
+            )
+            self.assertIn('id="vertical-section-plane"', html)
+            self.assertIn('YZ · X 고정 (5/4열)', html)
+            self.assertNotIn('id="vertical-all"', html)
             self.assertIn('id="vertical-centre"', html)
+            self.assertIn('class="card mesh-run-card"', html)
+            self.assertIn('class="card convergence-card"', html)
+            self.assertIn('class="card temperature-export-card"', html)
+            self.assertNotIn('class="card mesh-run-card" hidden', html)
+            self.assertNotIn('class="card convergence-card" hidden', html)
+            self.assertNotIn('class="card temperature-export-card" hidden', html)
+            self.assertEqual(html.count('class="card detail-card"'), 4)
+            self.assertNotIn('class="card detail-card" hidden', html)
+            self.assertIn('id="mesh-run-note" hidden', html)
+            self.assertNotIn(
+                "과도 단계는 고정 유동이므로 에너지만 계산합니다.", html
+            )
+            self.assertNotIn("PNG/CSV 저장</p>", html)
             self.assertIn('id="flow-only"', html)
             self.assertIn('id="port-state"', html)
             self.assertIn('id="temperature-chart-open"', html)
+            self.assertIn('id="mesh-figure-panel"', html)
+            self.assertIn('id="mesh-figure-canvas"', html)
+            self.assertIn('id="mesh-figure-image-grid"', html)
+            self.assertIn('id="mesh-figure-png"', html)
             self.assertIn('id="temperature-chart-metric"', html)
             self.assertIn('value="battery-maximum"', html)
             self.assertIn('value="surface-average"', html)
@@ -230,9 +275,32 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("function updateHorizontalSection", script)
             self.assertIn('sections[input.value]', script)
             self.assertIn('function verticalSelection', script)
+            self.assertIn('function verticalSectionKey', script)
+            self.assertIn('function verticalViewName', script)
+            self.assertIn('verticalSectionPlane.addEventListener', script)
             self.assertIn('for(const section of verticalSelection())drawSection', script)
             self.assertIn('function surfaceThermalValue', script)
             self.assertIn('function surfaceCornerTemperatures', script)
+            self.assertIn('function cellSectionTemperature', script)
+            self.assertIn('function temperatureSectionRange', script)
+            self.assertIn('function drawDirectXYCellCuts', script)
+            self.assertIn('function drawCellSectionCuts', script)
+            self.assertIn('function drawHorizontalCellCuts', script)
+            self.assertIn('function drawVerticalCellCuts', script)
+            self.assertIn('function exactSolidSectionActive', script)
+            self.assertIn('solid_temperature_1800_c', script)
+            self.assertIn(
+                'const thermalCells=["combined","cell-temperature"].includes(visualMode)',
+                script,
+            )
+            self.assertNotIn(
+                'const thermalCells=["combined","cell-temperature","xy-temperature","xz-temperature"]',
+                script,
+            )
+            self.assertIn('셀 전체표면 숨김 · 실제 교차 단면만 표시', script)
+            self.assertIn('batterySolid 체적평균', script)
+            self.assertIn('테두리=직접 표면표본', script)
+            self.assertIn('1,800 s batterySolid 저장 단면값', script)
             self.assertIn('function bilinear', script)
             self.assertIn('function bilinearPoint', script)
             self.assertIn('subdivisions=3', script)
@@ -276,9 +344,34 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("NO INVALID PADDING", script)
             self.assertIn("직접 셀값 · 시간보간/패딩 없음", script)
             self.assertIn("function drawDynamicOverlay", script)
+            self.assertIn("function paintMeshStructureFigure", script)
+            self.assertIn("function paintTwoResultFigure", script)
+            self.assertIn("function meshFinalMetrics", script)
+            self.assertIn(
+                "if([2,3].includes(item.id)&&meshRuns.length>=2)", script
+            )
+            self.assertIn("배터리 최고 온도 상승", script)
+            self.assertIn("표준 − 정밀", script)
+            self.assertIn("각 계산에 사용된 실제 polyMesh", script)
+            self.assertIn("const groups=new Map()", script)
+            self.assertNotIn("function eraseOverlayInsideCells", script)
+            self.assertNotIn(
+                'if(visibility.flow&&visualMode==="combined")drawFlow', script
+            )
+            self.assertIn(
+                'if(["combined","velocity-streamlines"].includes(visualMode))drawFlow',
+                script,
+            )
+            self.assertIn('ctx.strokeStyle="rgba(100,123,237,.72)"', script)
+            self.assertNotIn('ctx.strokeStyle="rgba(4,12,31,.78)"', script)
+            self.assertNotIn('ctx.strokeStyle="rgba(139,174,255,.94)"', script)
             self.assertIn("const sectionRasterCache=new WeakMap()", script)
             self.assertIn("Math.sqrt(3200000/cssPixels)", script)
-            self.assertIn("overlayRenderAccumulator>=1/60-.002", script)
+            self.assertIn("const overlayTargetFps=90", script)
+            self.assertIn(
+                "overlayRenderAccumulator>=1/overlayTargetFps-.001", script
+            )
+            self.assertIn("헤드 최대 90 FPS", script)
             self.assertIn("const timeVaryingScene=", script)
             self.assertNotIn("sceneBaseCache", script)
             self.assertIn("function paintTemperatureChart", script)
@@ -296,6 +389,23 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("function drawDirectXYVelocity3D", script)
             self.assertIn("function surfaceCornerTemperatures", script)
             self.assertIn("function thermalFaceGradient", script)
+            self.assertIn(
+                'ctx.globalAlpha=1;ctx.globalCompositeOperation="source-over"',
+                script,
+            )
+            self.assertIn(
+                'const fallback=`rgb(${r},${g},${b})`',
+                script,
+            )
+            self.assertIn(
+                'gradient.addColorStop(position,`rgb(${colour[0]},${colour[1]},${colour[2]})`)',
+                script,
+            )
+            self.assertIn('ctx.fillStyle="rgb(32,112,145)"', script)
+            self.assertNotIn(
+                'const fallback=`rgba(${r},${g},${b},.95)`',
+                script,
+            )
             self.assertIn("function cellSurfaceExtrema", script)
             self.assertIn("CELL SURFACE MAX", script)
             self.assertIn("CELL SURFACE MIN", script)

@@ -1,3 +1,10 @@
+"""배터리 체적발열 q'''(t)를 정의하고 OpenFOAM/Fluent 입력으로 변환한다.
+
+현재 기준 계산은 MDPI baseline의 상수 16,325 W/m^3를 사용한다. 시간표와
+I(t)^2 R(t)/Vcell 모드는 확장용 대체모델이며 공개되지 않은 논문 원본 UDF로
+간주하지 않는다.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -14,6 +21,8 @@ from .errors import ProfileError
 
 
 class HeatSource(Protocol):
+    """모든 발열모델이 제공해야 하는 공통 인터페이스."""
+
     mode: str
 
     def qvol(self, time_s: float) -> float: ...
@@ -25,6 +34,8 @@ class HeatSource(Protocol):
 
 @dataclass(frozen=True)
 class LinearSeries:
+    """시간 CSV를 읽어 구간별 선형보간하고 범위 밖 정책을 적용한다."""
+
     times_s: tuple[float, ...]
     values: tuple[float, ...]
     value_name: str
@@ -102,6 +113,8 @@ class LinearSeries:
 
 @dataclass(frozen=True)
 class ConstantVolumetricSource:
+    """모든 시간에 동일한 W/m^3를 반환하는 현재 기준 발열모델."""
+
     value_w_m3: float
     mode: str = "constant_qvol"
 
@@ -123,6 +136,8 @@ class ConstantVolumetricSource:
 
 @dataclass(frozen=True)
 class TableVolumetricSource:
+    """사용자 제공 time_s/qvol_W_m3 표에서 시간별 발열을 계산한다."""
+
     series: LinearSeries
     mode: str = "table_qvol"
 
@@ -143,6 +158,12 @@ class TableVolumetricSource:
 
 @dataclass(frozen=True)
 class ElectricalJouleSource:
+    """Joule 대체식 q'''=I(t)^2 R(t)/Vcell을 계산한다.
+
+    가역 엔트로피열과 반응·혼합열은 포함하지 않으므로 논문 UDF와 동일하다고
+    주장할 수 없다.
+    """
+
     current: LinearSeries
     resistance: LinearSeries
     cell_volume_m3: float
@@ -176,6 +197,8 @@ def _resolve_profile(config: ResolvedConfig, value: str) -> Path:
 
 
 def source_from_config(config: ResolvedConfig) -> HeatSource:
+    """YAML의 mode에 맞는 상수/시간표/Joule 발열 객체 하나를 선택한다."""
+
     spec = config.battery.heat_source
     if spec.mode == "constant_qvol":
         assert spec.qvol_w_m3 is not None
@@ -214,10 +237,11 @@ def _sample_source(source: HeatSource) -> list[tuple[float, float]]:
 
 
 def render_openfoam_fvoptions(source: HeatSource, energy_field: str) -> str:
-    """Render an OpenCFD v2512 scalarSemiImplicitSource dictionary.
+    """OpenCFD v2512의 scalarSemiImplicitSource dictionary를 만든다.
 
-    The target file belongs in the battery solid region, where selectionMode
-    all applies the specific W/m3 source to every battery cell.
+    결과 파일은 batterySolid/constant/fvOptions에 놓인다. selectionMode all과
+    volumeMode specific의 조합으로 23개 고체 셀 전체의 엔탈피 방정식에
+    W/m^3 단위 발열을 적용한다.
     """
 
     samples = _sample_source(source)

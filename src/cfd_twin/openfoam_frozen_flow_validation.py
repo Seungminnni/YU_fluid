@@ -1,3 +1,10 @@
+"""0~1,800 s frozen-flow 과도 CHT 결과의 완전성과 수렴성을 검증한다.
+
+유동장은 검증된 정상 U/p/k/omega를 유지하지만 유체·고체 에너지는 매 시간
+계면에서 결합된다. 1초 telemetry, 온도장 저장, 질량·에너지수지, 단조 가열,
+정상 CHT 종점 일치를 모두 확인한 뒤에만 UI 생성을 허용한다.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -108,6 +115,8 @@ def validate_frozen_flow(
     field_interval_s: float = 15.0,
     final_window_s: float = 60.0,
 ) -> dict[str, object]:
+    """과도 로그·원본 필드·정상 CHT 기준을 결합해 최종 열결과를 판정한다."""
+
     if steady_initial_temperature_k is None:
         steady_initial_temperature_k = initial_temperature_k
     parsed = parse_cold_flow_log(log_path)
@@ -119,6 +128,7 @@ def validate_frozen_flow(
         Path(mesh_integral_report_path).read_text(encoding="utf-8")
     )
     battery_volume = float(mesh_report["actual"]["battery_total_volume_m3"])
+    # 정상 CHT와 동일하게 목표 CAD 체적이 아닌 실제 메시 고체체적을 사용한다.
     heat_power = qvol_w_m3 * battery_volume
 
     telemetry_rows = []
@@ -222,6 +232,7 @@ def validate_frozen_flow(
         if len(tavg_series) >= 2
         else None
     )
+    # 최종온도가 정상 CHT와 0.01 K 이내여야 1,800 s가 열평형에 도달했다고 본다.
     checks = {
         "solver_clean_end": parsed["clean_end"] and not parsed["fatal_error"],
         "steady_cht_compound_gate_passed": steady_report.get("status")

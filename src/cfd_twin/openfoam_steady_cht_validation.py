@@ -1,3 +1,10 @@
+"""상수 발열 정상 CHT의 온도 안정성과 에너지수지를 검증한다.
+
+메시에서 적분한 실제 batterySolid 체적에 q'''를 곱해 입력열을 구하고,
+냉각수 입출구 엔탈피 증가와 비교한다. 마지막 구간의 온도 변화, 질량보존,
+압력 안정성, 잔차까지 모두 통과해야 과도 열해석을 허용한다.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -30,6 +37,8 @@ def validate_steady_cht(
     initial_temperature_k: float,
     monitor_window: int = 200,
 ) -> dict[str, object]:
+    """정상 CHT 로그와 이전 cold-flow/메시 보고서를 결합해 PASS를 판정한다."""
+
     parsed = parse_cold_flow_log(log_path)
     records = parsed["records"]
     times = sorted(float(time) for time in records)
@@ -46,6 +55,7 @@ def validate_steady_cht(
         Path(mesh_integral_report_path).read_text(encoding="utf-8")
     )
     battery_volume = float(mesh_report["actual"]["battery_total_volume_m3"])
+    # 입력열 [W] = 체적발열 [W/m^3] * 실제 메시 고체체적 [m^3].
     heat_power = qvol_w_m3 * battery_volume
 
     floors = dict(DEFAULT_RESIDUAL_FLOORS)
@@ -134,6 +144,7 @@ def validate_steady_cht(
         field in latest_bounds and latest_bounds[field].get("min", -1) >= 0
         for field in ("k", "omega")
     )
+    # 온도 span, 질량/에너지 불균형과 솔버 종료를 모두 만족해야 PASS다.
     checks = {
         "solver_clean_end": parsed["clean_end"] and not parsed["fatal_error"],
         "cold_flow_compound_gate_passed": cold_report.get("status")

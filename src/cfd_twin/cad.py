@@ -1,3 +1,10 @@
+"""검증된 형상 입력을 STEP과 snappyHexMesh용 STL로 변환한다.
+
+탱크 외곽과 두 포트를 합친 뒤 23개 원통을 빼서 하나의 냉각수 체적을 만든다.
+원통 자체는 battery solid로 보존하며, 해석 체적·면적과 CAD 측정값이 맞는지
+검사한 형상만 생산 메시 단계로 넘긴다.
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,6 +18,8 @@ from .geometry import cell_placements, geometry_report
 
 
 def _cad_model(config: ResolvedConfig) -> dict[str, object]:
+    """SI 입력을 CAD 작업 단위 mm와 해석식 기반 검증값으로 정리한다."""
+
     placements = cell_placements(config)
     report = geometry_report(config)
     cell_radius_mm = config.cells.diameter_m * 500
@@ -60,6 +69,8 @@ def _cad_model(config: ResolvedConfig) -> dict[str, object]:
 
 
 def _script(model: dict[str, object]) -> str:
+    """CadQuery에서 실행될 재현 가능한 CAD 생성 스크립트를 만든다."""
+
     payload = json.dumps(model, indent=2, sort_keys=True)
     return f'''from __future__ import annotations
 
@@ -83,6 +94,7 @@ cell_base_z = MODEL["cell_base_z_mm"]
 port_radius = MODEL["ports"]["diameter_mm"] / 2
 port_length = MODEL["ports"]["external_length_mm"]
 
+# 22점 상면을 z 방향으로 압출하고 상·하 원형 포트를 합쳐 외부 용기를 만든다.
 enclosure = cq.Workplane("XY").polyline(outline).close().extrude(height)
 inlet_x, inlet_y = MODEL["ports"]["inlet"]["center_xy_mm"]
 outlet_x, outlet_y = MODEL["ports"]["outlet"]["center_xy_mm"]
@@ -96,6 +108,7 @@ outlet = (
 )
 outer_with_ports = enclosure.union(inlet).union(outlet)
 
+# 냉각수 영역 = 포트를 포함한 탱크 체적 - 23개 배터리 원통 체적.
 cell_solids = []
 coolant = outer_with_ports
 for cell in MODEL["cells"]:

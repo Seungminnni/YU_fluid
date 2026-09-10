@@ -1,3 +1,10 @@
+"""정수 초 OpenFOAM probe를 휴대 가능한 UI 온도 프레임으로 포장한다.
+
+0초 초기장과 1~1,800초 직접 표본을 공통 범위 uint16으로 양자화한다.
+누락점을 이웃값으로 채우거나 시간/공간 보간하지 않으며, 저장 후 모든 값을
+다시 읽어 원본과 반 quantum 이내인지 전수 비교한다.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -148,6 +155,8 @@ def build_actual_one_second_bundle(
     initial_temperature_k: float = 293.15,
     end_time_s: int = 1800,
 ) -> dict[str, object]:
+    """11개 직접 probe 데이터셋을 총 1,801개의 uint16 프레임으로 만든다."""
+
     run = Path(run_dir).resolve()
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -185,6 +194,8 @@ def build_actual_one_second_bundle(
         probes[name] = probe
         dataset_ranges[name] = (dataset_low, dataset_high)
 
+    # 모든 데이터셋이 같은 Tmin/Tmax와 quantum을 공유해야 화면 간 색과
+    # 값의 해석이 일관된다. uint16 하나는 0~65535의 온도 구간을 나타낸다.
     span = max(high - low, 1e-12)
     quantum_k = span / 65535.0
     datasets: dict[str, dict[str, object]] = {}
@@ -258,7 +269,7 @@ def validate_actual_one_second_bundle(
     run_dir: str | Path,
     output_dir: str | Path,
 ) -> dict[str, object]:
-    """Re-read every packed value and compare it with its direct probe source."""
+    """포장값 전부를 복원해 직접 probe 원본과 허용오차 내 일치하는지 검사한다."""
 
     run = Path(run_dir).resolve()
     output = Path(output_dir).resolve()

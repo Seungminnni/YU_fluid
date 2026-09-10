@@ -1,3 +1,9 @@
+"""검증된 OpenFOAM 필드를 VTK로 읽어 UI용 표면·단면·유선을 추출한다.
+
+이 모듈은 CFD를 다시 계산하거나 임의 결과를 합성하지 않는다. 저장된 U/T
+필드를 읽고, 배터리 표면 삼각형과 입구에서 시작하는 유선을 후처리한다.
+"""
+
 from __future__ import annotations
 
 import math
@@ -24,7 +30,7 @@ LEGACY_DISPLAY_TEMPERATURE_OFFSET_C = 0.15
 
 
 def read_openfoam_dat(path: str | Path) -> list[tuple[float, ...]]:
-    """Read a numeric OpenFOAM function-object table."""
+    """OpenFOAM function object가 기록한 숫자 표를 유한값으로 검증해 읽는다."""
 
     rows: list[tuple[float, ...]] = []
     for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
@@ -44,7 +50,7 @@ def read_openfoam_dat(path: str | Path) -> list[tuple[float, ...]]:
 
 
 class OpenFoamResultReader:
-    """Small VTK adapter used to package validated solver fields for the viewer."""
+    """검증된 솔버 필드를 UI 데이터로 바꾸는 최소 VTK 어댑터."""
 
     def __init__(self, foam_file: Path):
         try:
@@ -91,6 +97,8 @@ class OpenFoamResultReader:
         return self._region("coolant"), self._region("batterySolid")
 
     def surface(self, dataset):
+        """계산영역 외피를 삼각형화하고 각 점의 실제 T 값을 반환한다."""
+
         surface = self.vtk.vtkDataSetSurfaceFilter()
         surface.SetInputData(dataset)
         triangles = self.vtk.vtkTriangleFilter()
@@ -109,6 +117,8 @@ class OpenFoamResultReader:
         return points, cells, temperature
 
     def streamline_paths(self, fluid, config: ResolvedConfig):
+        """입구 seed에서 고정 속도장 U를 따라 적분한 유선만 반환한다."""
+
         output = self._streamline_output(fluid, config)
         points = self.vtk_to_numpy(output.GetPoints().GetData()).copy()
         velocity = self.vtk_to_numpy(output.GetPointData().GetArray("U")).copy()
@@ -153,6 +163,8 @@ class OpenFoamResultReader:
         return paths
 
     def _streamline_output(self, fluid, config: ResolvedConfig):
+        # Runge-Kutta 4/5 적분은 저장된 정상 U(x)의 공간 경로를 구한다.
+        # 화면의 이동 헤드는 이 경로를 보여주는 효과이며 과도 U 재계산이 아니다.
         fluid.GetPointData().SetActiveVectors("U")
         inlet_source = self.vtk.vtkDiskSource()
         inlet_source.SetInnerRadius(0.0008)

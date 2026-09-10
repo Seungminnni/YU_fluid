@@ -1,3 +1,10 @@
+"""발열 없는 정상 유동이 수렴했는지 복합 기준으로 판정한다.
+
+OpenFOAM raw initial residual뿐 아니라 질량보존, 압력강하 안정성, 유한한
+최종장, 비음수 난류장과 실제 배터리 표면 y+를 모두 통과해야 다음 열해석을
+허용한다. 잔차 하나만 작다고 수렴으로 판정하지 않는다.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -27,6 +34,8 @@ def _finite(value: float | None) -> bool:
 
 
 def parse_cold_flow_log(path: str | Path) -> dict[str, object]:
+    """솔버 로그에서 반복별 잔차, 유량, 압력, 온도와 field bounds를 읽는다."""
+
     log = Path(path).resolve()
     text = log.read_text(encoding="utf-8", errors="replace")
     records: dict[float, dict[str, object]] = {}
@@ -191,6 +200,8 @@ def validate_cold_flow(
     pressure_drop_span_limit: float = 0.005,
     residual_floors: dict[str, float] | None = None,
 ) -> dict[str, object]:
+    """마지막 감시구간의 잔차·질량·압력·y+ gate를 한 번에 판정한다."""
+
     parsed = parse_cold_flow_log(log_path)
     records = parsed["records"]
     numeric_times = sorted(float(time) for time in records)
@@ -280,6 +291,7 @@ def validate_cold_flow(
     yplus_report = None
     if yplus_report_path is not None:
         yplus_report = json.loads(Path(yplus_report_path).read_text(encoding="utf-8"))
+    # 모든 항목의 AND가 최종 PASS다. 하나라도 실패하면 열원 계산으로 넘어가지 않는다.
     checks = {
         "solver_clean_end": parsed["clean_end"] and not parsed["fatal_error"],
         "final_iteration_present": final_record is not None,

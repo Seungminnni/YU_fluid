@@ -1,3 +1,6 @@
+# 이 파일은 기준 해석의 단일 입력 원본(SSOT)이다.
+# Python 코드는 여기의 단위 포함 값을 SI 단위로 변환한 뒤 CAD, 메시,
+# OpenFOAM 경계조건과 UI 메타데이터를 모두 같은 값에서 생성한다.
 schema_version: 3
 case_name: baseline_23cell
 mode: paper_geometry_baseline
@@ -6,6 +9,8 @@ mode: paper_geometry_baseline
 # digitizations are separate sensitivity overlays and never silently merged.
 
 geometry:
+  # 탱크 상면의 22점 외곽선을 z 방향으로 82 mm 압출한다.
+  # 단순 직육면체가 아니라 노치와 챔퍼를 포함한 실제 계산 외곽이다.
   enclosure:
     profile: pptx_measured_v1
     width_x: "114 mm"
@@ -41,6 +46,8 @@ geometry:
       columns: [2, 4]
     label_24mm_status: drawing_label_inconsistent_adopt_34mm_measured_land
   cells:
+    # C01~C23은 x 방향으로 5개 열을 만들고 각 열에 5/4/5/4/5개를 둔다.
+    # 홀수 열의 y 위치를 11.25 mm 이동해 엇갈림 배열을 만든다.
     count: 23
     diameter: "19 mm"
     length: "68 mm"
@@ -54,6 +61,8 @@ geometry:
     paper_nominal_surface_gap: "3.5 mm"
     regular_triangular_alternative_pitch_x: "19.48557 mm"
   ports:
+    # 포트 직경과 길이는 형상 입력이고, 중심 위치는 A-04 가정으로 추적한다.
+    # inlet은 탱크 상면에서 -z 방향, outlet은 하면에서 외부로 연결된다.
     inlet_diameter: "19 mm"
     outlet_diameter: "19 mm"
     external_length: "32 mm"
@@ -68,6 +77,7 @@ geometry:
     center_source: ASSUMPTION_A04
 
 fluid:
+  # 탈이온수의 상수 물성. 온도에 따른 밀도/점도 변화는 현재 모델에 없다.
   name: deionized_water
   density: "998.2 kg/m^3"
   specific_heat: "4182 J/(kg*K)"
@@ -75,11 +85,14 @@ fluid:
   dynamic_viscosity: "0.00112 Pa*s"
 
 battery:
+  # 23개 원통 셀을 동일한 등방성 균질 고체로 취급한다.
   density: "2000 kg/m^3"
   specific_heat: "900 J/(kg*K)"
   thermal_conductivity: "27 W/(m*K)"
   initial_temperature: "293 K"
   heat_source:
+    # 현재 완료 결과는 MDPI 기준값인 균일 체적발열 16,325 W/m^3를 사용한다.
+    # I(t)^2 R(t)/V 방식은 별도 overlay를 선택할 때만 사용한다.
     mode: constant_qvol
     qvol: "16325 W/m^3"
   electrical_metadata:
@@ -88,6 +101,8 @@ battery:
     discharge_rate_c: 2.0
 
 boundary:
+  # 아래 값은 openfoam_case.py가 U, p_rgh, T, k, omega 경계파일로 변환한다.
+  # 외벽 zeroGradient(T)는 단열, gravity=0은 부력 미사용을 뜻한다.
   inlet_velocity: "0.4 m/s"
   inlet_temperature: "293 K"
   turbulence_intensity: 0.05
@@ -99,6 +114,8 @@ boundary:
   gravity: [0, 0, 0]
 
 solver:
+  # 정상 유동/CHT는 SIMPLE, 과도 열해석은 PIMPLE을 사용한다.
+  # kOmegaSST는 OpenFOAM constant/coolant/turbulenceProperties로 기록된다.
   distribution: OpenCFD
   version: v2512
   energy_field: h

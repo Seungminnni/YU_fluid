@@ -1,3 +1,11 @@
+"""CAD 표면으로부터 계산 가능한 OpenFOAM 다중영역 메시를 만든다.
+
+핵심 순서는 blockMesh 배경격자 → snappyHexMesh 곡면 적합/경계층 →
+배터리 코어 refineMesh → zone 검증 → coolant/batterySolid 영역 분리다.
+생성 목표 셀 수는 참고값일 뿐이며, 최종 보고서에는 polyMesh에서 다시 센
+실제 셀 수와 요소 종류만 기록한다.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +22,7 @@ from .geometry import cell_placements
 from .openfoam_case import write_openfoam_solver_bundle
 
 
+# 배터리 STL 이름과 C01~C23 ID가 CAD, zone, 계면, UI에서 동일해야 한다.
 EXPECTED_BATTERY_FILES = tuple(
     f"battery_C{index:02d}.stl" for index in range(1, 24)
 )
@@ -21,6 +30,8 @@ DEFAULT_MESH_PROFILE = "single"
 SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE,)
 DEFAULT_MPI_RANKS = 10
 DEFAULT_MESH_MPI_RANKS = 1
+# 10은 요청 layer 수다. snappyHexMesh가 품질을 위해 국부적으로 층을
+# 종료할 수 있으므로 실제 coverage와 thickness는 별도 gate로 재검증한다.
 PRISM_LAYER_COUNT = 10
 MINIMUM_LAYER_COVERAGE = 0.75
 MINIMUM_WANTED_THICKNESS_FRACTION = 0.45
@@ -122,6 +133,8 @@ def _fmt(value: float) -> str:
 
 
 def _bounds(config: ResolvedConfig) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """형상 바깥 5 mm 여유를 둔 blockMesh 배경 박스 범위를 반환한다."""
+
     margin = 0.005
     return (
         (-margin, -margin, -config.ports.external_length_m - margin),
@@ -134,6 +147,8 @@ def _bounds(config: ResolvedConfig) -> tuple[tuple[float, float, float], tuple[f
 
 
 def _block_mesh_dict(config: ResolvedConfig, preset: MeshPreset) -> tuple[str, tuple[int, int, int]]:
+    """명목 5 mm 육면체 배경격자의 blockMeshDict를 생성한다."""
+
     lower, upper = _bounds(config)
     counts = tuple(
         max(1, math.ceil((hi - lo) / preset.background_cell_m))
@@ -206,6 +221,8 @@ def _surface_feature_extract_dict() -> str:
 
 
 def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
+    """탱크/배터리 STL snap, 국부 refinement와 coolant측 prism층을 정의한다."""
+
     # Keep enclosure and port surfaces one level finer than the battery skin so
     # the 19 mm circular caps remain resolved on the standard mesh.
     outer_surface_min_level = max(1, preset.surface_min_level)
@@ -473,6 +490,8 @@ def _topo_set_ports_dict(config: ResolvedConfig) -> str:
 
 
 def _topo_set_coolant_dict(config: ResolvedConfig) -> str:
+    """전체 셀에서 23개 battery zone을 빼 나머지를 coolant zone으로 만든다."""
+
     lower, upper = _bounds(config)
     subtract_batteries = "\n".join(
         f'''    {{
@@ -507,6 +526,8 @@ def _topo_set_coolant_dict(config: ResolvedConfig) -> str:
 
 
 def _topo_set_battery_core_dict(config: ResolvedConfig) -> str:
+    """CHT 표면은 유지하면서 각 배터리 내부 코어만 추가 세분할 셀을 고른다."""
+
     placements = cell_placements(config)
     z1 = (config.enclosure.height_z_m - config.cells.length_m) / 2
     z2 = z1 + config.cells.length_m
@@ -527,6 +548,8 @@ def _topo_set_battery_core_dict(config: ResolvedConfig) -> str:
 
 
 def _refine_mesh_battery_core_dict() -> str:
+    """선택한 배터리 코어를 hexa 위상으로 한 단계 세분하는 설정을 만든다."""
+
     return _foam_header("refineMeshDict.batteryCore") + '''set batteryCore;
 
 coordinateSystem global;
@@ -1248,6 +1271,12 @@ def write_production_mesh_source_bundle(
     *,
     mesh_level: str = DEFAULT_MESH_PROFILE,
 ) -> dict[str, object]:
+    """메시 dictionary, 실행기, 검증기를 한 OpenFOAM case 묶음으로 기록한다.
+
+    이 함수는 목표 숫자를 결과로 가장하지 않는다. 실제 실행 뒤 생성되는
+    mesh_target_composition/checkMesh/zone/interface 보고서가 모두 통과해야
+    솔버 단계가 실행될 수 있다.
+    """
     if mesh_level not in SUPPORTED_LEVELS:
         raise CfdTwinError(
             f"production mesh level must be one of {', '.join(SUPPORTED_LEVELS)}"
