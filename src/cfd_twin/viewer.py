@@ -1597,7 +1597,8 @@ dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; fon
 .cell-grid { display:grid; grid-template-columns:repeat(8,1fr); gap:5px; }
 .cell-grid button { min-width:0; padding:6px 2px; text-align:center; border:1px solid #c9d8df; border-radius:3px;
   color:#346477; background:#f4f9fb; font-size:10px; }
-.cell-grid button:hover,.cell-grid button.active { border-color:#168ac1; color:#075f85; background:#e5f5fb; }
+.cell-grid button:hover { border-color:#168ac1; color:#075f85; background:#e5f5fb; }
+.cell-grid button.active { border-color:#05080a; color:#fff; background:#05080a; box-shadow:0 0 0 2px #ffffffb8; }
 .cell-toast { position:fixed; z-index:50; top:82px; right:18px; max-width:min(320px,calc(100vw - 36px));
   padding:10px 13px; border:1px solid #38a5ca; border-radius:5px; color:#eaf9ff; background:#0b2230ee;
   box-shadow:0 10px 28px #07131c42; font-size:12px; font-weight:700; }
@@ -2426,8 +2427,8 @@ function drawScene(){
     }else{ctx.fillStyle=item.face.kind.endsWith("cap")?`rgba(79,207,222,${0.66+0.13*shade})`:`rgba(32,112,145,${0.68+0.16*shade})`;}
     ctx.fill();
     const highlighted=!isPort&&item.face.id===highlightedCellId;
-    ctx.strokeStyle=highlighted?"rgba(255,244,160,.96)":thermalCells&&!isPort?"rgba(225,238,246,.045)":"rgba(225,238,246,.26)";
-    ctx.lineWidth=highlighted?1.35:thermalCells&&!isPort?.22:.55;ctx.stroke();
+    ctx.strokeStyle=highlighted?"rgba(2,5,7,.99)":thermalCells&&!isPort?"rgba(225,238,246,.045)":"rgba(225,238,246,.26)";
+    ctx.lineWidth=highlighted?2.4:thermalCells&&!isPort?.22:.55;ctx.stroke();
   }
   if(visibility.section){
     if(visualMode==="xy-temperature"){
