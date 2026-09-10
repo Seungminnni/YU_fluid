@@ -97,10 +97,23 @@ solving velocity would reproduce the same converged field. The coupled fluid
 and solid energy equations advance at 1 s physical steps. Direct telemetry and
 both regional temperature fields are written at every integer second from 0
 through 1,800 s; the validated static flow field is reused at each display
-state without temporal interpolation. A fully recomputed PIMPLE profile remains
-available for time-step sensitivity work, but its 14 µm prisms reduce the
-Courant-limited step to about 0.0034 s and make it unsuitable as the production
-path.
+state without temporal interpolation. A fully recomputed PIMPLE path remains
+available for future dynamic-thermal coupling. A measured pilot on the standard
+mesh showed that the 14 µm prisms reduce the Courant-limited internal step to
+about 0.003425 s at `maxCo=5`. Therefore the full path must pass staged 1 s,
+10 s and 60 s checks before an 1,800 s run is authorized. The browser output
+interval may stay at 1 s even when the numerical solver takes many smaller
+steps within that second.
+
+A time-varying source by itself does not change `U` when fluid properties are
+constant and gravity is zero; the present frozen-flow result remains a valid
+one-way energy calculation under exactly those assumptions. The full PIMPLE
+path becomes mandatory when the future UDF introduces temperature/SOC feedback
+together with temperature-dependent density or viscosity, buoyancy, or any
+other thermal-to-momentum coupling. Temperature-dependent conductivity or heat
+capacity alone requires updated nonlinear energy coupling but not a momentum
+recalculation. The implementation
+and acceptance gates are fixed in [`docs/FULL_TRANSIENT_PLAN.md`](docs/FULL_TRANSIENT_PLAN.md).
 
 The convergence graph uses raw OpenFOAM initial linear-solver residuals. The
 standard result plots its 1,800 one-second energy iterations; the optional
@@ -133,7 +146,7 @@ Python 3.12 or newer is required.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[cad,mesh,results,media]'
+.venv/bin/python -m pip install -e '.[cad,results,media]'
 .venv/bin/cfd-twin doctor
 .venv/bin/cfd-twin validate-config configs/baseline_23cell.yaml
 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -181,9 +194,9 @@ order:
 ./run-steady-pilot.sh
 ./run-steady-continue.sh          # only if the steady gate requests it
 ./run-frozen-flow-actual-1s.sh    # canonical exact one-way CHT, 0–1800 s
-./run-full-transient-actual-1s.sh # optional fully repeated momentum/energy run
-./run-full-transient-dt-pilot.sh
-./run-full-transient-dt-half-pilot.sh
+./run-full-transient-dt-pilot.sh      # mandatory short pilot before full coupling
+./run-full-transient-dt-half-pilot.sh # time-step sensitivity comparison
+./run-full-transient-actual-1s.sh     # only after the staged full-coupling gates pass
 ```
 
 The two shorter transient pilots check time-step sensitivity. The canonical
@@ -208,6 +221,15 @@ temperature, streamlines, XY/XZ temperature and velocity sections, cell IDs,
 inlet/outlet values, convergence history and exportable temperature graphs.
 Mouse drag rotates, the wheel zooms, checkboxes control cells/flow/sections,
 and multiple section positions can be selected.
+
+All velocity views use one mesh-specific global range taken from every coolant
+cell-centred `|U|` value. Streamline colour, XY/XZ section colour, vector length
+and port colour therefore have the same numerical meaning. The viewer also
+shows the selected section's local peak so a genuinely slower centre section is
+not mistaken for a different scale. Moving heads use the same actual-`|U|`
+proportional rule and the same display-rate multiplier in every mode; their
+screen travel differs because a section head moves on a short vector glyph
+while the combined view head follows a full 3D streamline.
 
 The graph panel exports PNG or CSV for outlet average temperature, battery
 mesh maximum, area-weighted battery surface average, volume-weighted battery
@@ -243,17 +265,26 @@ Every YAML overlay and command-line override is recorded in the resolved input
 and its SHA-256 provenance. Final-design constraints, including the two 19 mm
 ports, remain enforced.
 
-## Preserved outputs
+## Generated-artifact policy
 
-Generated solver fields, validation reports and the current portable viewer
-are intentionally excluded from source-control cleanup. The main preserved
-directories are:
+The authoritative solver fields, their validation/provenance reports and the
+current portable viewer are the results that must be retained. Failed attempts,
+interrupted MPI partitions, superseded result copies, Gmsh smoke meshes,
+candidate CAD renders, temporary PDF renders, Python caches and duplicate ZIP
+files are classified as disposable build artifacts. Some large deletion
+candidates remain on disk until they receive separate explicit deletion
+authorization. The retained directories are:
 
 - `build/case_validated` — CAD, mesh, solver fields, telemetry and validation;
 - `build/reference_viewer` — portable current viewer;
 - `build/case_validated/production/L3` — archived precision-result provenance;
 - `build/case_validated/production/single` — active standard calculation.
 
-Do not delete or relabel those directories when cleaning source code. Git
-ignores `build/`, local environments, dependency caches, documents and archive
-files so large or private artifacts are not committed accidentally.
+Within the precision directory, `runs/frozen_flow_actual_1s_xy5` is the
+authoritative one-second replay. The older replay without all five XY cuts is
+superseded but still exists as a Git-ignored deletion candidate. Git ignores
+`build/`, local environments, dependency caches, documents, temporary files
+and archives so large or private artifacts are not committed accidentally. All
+generated files must be reproducible from the tracked configuration and source
+code; a failed run may be deleted after its small diagnostic facts have been
+recorded in documentation and the exact deletion scope has been authorized.

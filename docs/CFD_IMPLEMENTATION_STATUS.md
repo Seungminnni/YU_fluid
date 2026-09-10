@@ -290,8 +290,9 @@ measurement; this estimate is not itself a pass.
   temperature range and the display-only +0.150 K datum correction is disclosed.
 - XZ temperature and velocity modes now expose five independently selectable
   cuts at Y=18.2, 39.3, 60.5, 81.7 and 102.8 mm. `중앙만` restores the original
-  centre plane and `5단면` shows every cut translucently in an ISO view. All
-  selected planes share one union range so the same colour means the same value.
+  centre plane and `5단면` shows every cut translucently in an ISO view.
+  Velocity colour and vector length use the full coolant-cell global range, so
+  the same colour means the same value in streamlines and every XY/XZ plane.
 - Section rendering now bilinearly subdivides every 37x41 XY or 37x27 XZ probe
   quad 3x3 for effective 109x121 and 109x79 display lattices. Showing all five
   XZ cuts uses 2x2 subdivision per source quad to preserve mouse interaction.
@@ -328,3 +329,42 @@ measurement; this estimate is not itself a pass.
 - Full 3D L3 fields are retained at 0 and 1,800 s. This avoids writing 1,801
   duplicate multi-region volumes while the direct one-second probes retain the
   requested animation data.
+
+## 2026-09-10 dynamic-thermal path and artifact cleanup
+
+- The current validated standard and precision replays remain one-way CHT:
+  constant coolant properties and zero gravity prevent temperature from feeding
+  back into the momentum equations. A dynamic source can still be used in this
+  path when only the energy equation changes.
+- A separate full-transient `chtMultiRegionFoam`/PIMPLE path is retained for the
+  planned SOC- and temperature-dependent heat source plus temperature-dependent
+  properties or buoyancy. It recomputes `U`, `p_rgh`, `k`, `omega`, fluid energy
+  and solid energy at every internal time step and writes browser data at 1 s.
+- The first standard-mesh full-transient pilot was deliberately stopped rather
+  than presented as a result. It reached 0.73624309 s in 215 adaptive time steps
+  and 645 PIMPLE outer corrections. At `maxCo=5`, `deltaT` stabilized near
+  0.003425414 s; the last recorded wall time was 197 s. Linear extrapolation is
+  about 525,484 time steps, 1,576,452 outer corrections and 5.6 days for 1,800 s,
+  so 1/10/60 s gates and a `deltaT/2` comparison are mandatory first.
+- The transient residual parser now infers omitted OpenFOAM v2512 outer-correction
+  markers from repeated region cycles. It no longer collapses three coupled
+  corrections into one x-axis point. The plotted value remains the raw OpenFOAM
+  initial linear-solver residual, not a fabricated Fluent scaled residual.
+- The viewer now derives one velocity display range from every coolant
+  cell-centred `|U|`: 0--0.633058 m/s for the 1,316,854-cell precision result and
+  0--0.596063 m/s for the 216,577-cell standard result. Streamlines, XY/XZ
+  contours, vectors and ports all use this mesh-specific range. Each section's
+  own maximum remains visible as a diagnostic, but no longer rescales its colours
+  or vector lengths. Moving heads use the same `|U|`-proportional calculation and
+  one shared display-rate multiplier across all modes.
+- Retained generated data: the current portable viewer, both adopted meshes,
+  their passed cold-flow/steady results, the standard one-second replay and the
+  upgraded precision `frozen_flow_actual_1s_xy5` replay.
+- Removed on 2026-09-11: the standalone `actual_1s_source`, `cad`, `case`,
+  `geometry_candidate`, `mesh_smoke`, `overlay` and `reference_case` staging
+  directories plus `tmp` PDF-render scratch data.
+- Still present as Git-ignored deletion candidates: the failed y+ runs, the
+  superseded precision `frozen_flow_actual_1s` replay, L3 `processor0` through
+  `processor9`, duplicate viewer ZIPs and reconstructible caches. The aborted
+  full-transient pilot is intentionally retained as performance/Courant
+  evidence.

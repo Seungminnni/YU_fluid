@@ -60,6 +60,34 @@ class OpenfoamTransientResidualTests(unittest.TestCase):
             self.assertEqual(rows[0]["global_iteration"], "1")
             self.assertNotIn("rows", summary_path.read_text(encoding="utf-8"))
 
+    def test_infers_outer_corrections_when_openfoam_omits_pimple_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "solver.log"
+            lines = ["Time = 0.003"]
+            for outer in range(1, 4):
+                lines.extend(
+                    (
+                        "Solving for fluid region coolant",
+                        "smoothSolver: Solving for Ux, Initial residual = "
+                        f"{1e-2 / outer:.8g}, Final residual = 1e-7, No Iterations 2",
+                        "Solving for solid region batterySolid",
+                        "PCG: Solving for h, Initial residual = "
+                        f"{2e-2 / outer:.8g}, Final residual = 1e-8, No Iterations 1",
+                    )
+                )
+            log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            report = extract_transient_residuals(log)
+
+            self.assertEqual(report["explicit_pimple_markers"], 0)
+            self.assertEqual(report["time_step_count"], 1)
+            self.assertEqual(report["global_iteration_count"], 3)
+            self.assertEqual(report["row_count"], 6)
+            self.assertEqual(
+                sorted({row["outer_corrector"] for row in report["rows"]}),
+                [1, 2, 3],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

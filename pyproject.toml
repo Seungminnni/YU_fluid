@@ -12,8 +12,6 @@ dependencies = ["PyYAML>=6.0"]
 [project.optional-dependencies]
 media = ["Pillow>=10"]
 cad = ["cadquery>=2.5"]
-mesh = ["gmsh>=4.13"]
-gui = ["PySide6>=6.8", "pyvista>=0.44", "vtk>=9.3"]
 results = ["numpy>=2.0", "matplotlib>=3.9", "vtk>=9.3"]
 
 [project.scripts]

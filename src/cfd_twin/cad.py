@@ -269,7 +269,7 @@ def write_cad_source_bundle(config: ResolvedConfig, output_dir: str | Path) -> d
             "23 battery solids are present",
             "fluid-solid interface areas match analytic cylinders",
             "inlet/outlet areas match pi*D^2/4",
-            "mesh smoke test and checkMesh pass",
+            "production blockMesh/snappyHexMesh and checkMesh gates pass",
         ],
         "geometry_report_summary": {
             "minimum_cell_gap_m": geometry["clearances"]["minimum_cell_cell_surface_m"],

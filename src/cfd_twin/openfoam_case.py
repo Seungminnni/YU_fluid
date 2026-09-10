@@ -905,6 +905,7 @@ def _transient_control_dict(
     *,
     delta_t: float,
     frozen_flow: bool,
+    end_time_s: float = 1800.0,
     field_write_interval_s: float = 15.0,
     actual_one_second_sampling: bool = False,
     temperature_field_write_interval_s: float | None = None,
@@ -935,7 +936,7 @@ def _transient_control_dict(
 startFrom startTime;
 startTime 0;
 stopAt endTime;
-endTime 1800;
+endTime {end_time_s:.12g};
 deltaT {delta_t:.12g};
 adjustTimeStep {adjustable};
 maxCo 5;
@@ -1450,6 +1451,7 @@ def _solver_profile_files(
     *,
     delta_t: float | None = None,
     frozen_flow: bool = False,
+    end_time_s: float = 1800.0,
     include_battery_temperatures: bool = True,
     conservative: bool = False,
     enthalpy_relaxation: float | None = None,
@@ -1480,6 +1482,7 @@ def _solver_profile_files(
             config,
             delta_t=delta_t,
             frozen_flow=frozen_flow,
+            end_time_s=end_time_s,
             field_write_interval_s=field_write_interval_s,
             actual_one_second_sampling=actual_one_second_sampling,
             temperature_field_write_interval_s=temperature_field_write_interval_s,
@@ -1548,11 +1551,15 @@ def write_openfoam_solver_bundle(
             "constant/batterySolid/fvOptions": heat_source_dict,
         },
         "full_transient_dt": {
-            **_solver_profile_files(config, delta_t=0.1, frozen_flow=False),
+            **_solver_profile_files(
+                config, delta_t=0.1, frozen_flow=False, end_time_s=1.0
+            ),
             "constant/batterySolid/fvOptions": heat_source_dict,
         },
         "full_transient_dt_half": {
-            **_solver_profile_files(config, delta_t=0.05, frozen_flow=False),
+            **_solver_profile_files(
+                config, delta_t=0.05, frozen_flow=False, end_time_s=1.0
+            ),
             "constant/batterySolid/fvOptions": heat_source_dict,
         },
     }
@@ -1707,6 +1714,7 @@ def write_openfoam_solver_bundle(
                 "transient": True,
                 "frozenFlow": False,
                 "deltaT_max_s": 0.1,
+                "endTime_s": 1.0,
                 "maxCo": 5,
                 "nOuterCorrectors": 3,
             },
@@ -1714,6 +1722,7 @@ def write_openfoam_solver_bundle(
                 "transient": True,
                 "frozenFlow": False,
                 "deltaT_max_s": 0.05,
+                "endTime_s": 1.0,
                 "maxCo": 5,
                 "nOuterCorrectors": 3,
             },

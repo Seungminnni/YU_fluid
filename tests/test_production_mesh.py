@@ -538,6 +538,13 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("maxDeltaT 0.1;", full_actual_control)
             self.assertIn("writeInterval 1;", full_actual_control)
             self.assertIn("actual_xy_temperature_1s", full_actual_control)
+            self.assertIn("endTime 1;", half_control)
+            self.assertEqual(
+                manifest["solver_source"]["solver_profiles"]["full_transient_dt"][
+                    "endTime_s"
+                ],
+                1.0,
+            )
             self.assertIn("coolant_yPlus", frozen_control)
             self.assertIn("writeInterval 1800;", frozen_control)
             self.assertIn("frozenFlow yes;", frozen_solution)

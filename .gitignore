@@ -18,6 +18,9 @@ tmp/
 .env
 .env.*
 *.log
+*.bak
+*.orig
+*~
 
 # Generated archives are release artifacts, not source files
 *.zip

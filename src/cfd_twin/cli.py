@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .case_builder import dependency_report, prepare_case_inputs
+from .case_builder import dependency_report
 from .cad import execute_cad_source, write_cad_source_bundle
 from .config import load_config
 from .errors import CfdTwinError
@@ -74,26 +74,6 @@ def _generate_heat_source(args: argparse.Namespace) -> int:
             "output": str(Path(args.output).resolve()),
             "manifest": manifest,
             "samples_W_m3": samples,
-        }
-    )
-    return 0
-
-
-def _prepare_case(args: argparse.Namespace) -> int:
-    config = _load(args)
-    manifest = prepare_case_inputs(
-        config,
-        args.output,
-        execute_cad=args.execute_cad,
-        execute_mesh_level=args.execute_mesh,
-    )
-    _json(
-        {
-            "status": manifest["status"],
-            "runnable": manifest["runnable"],
-            "output": str(Path(args.output).resolve()),
-            "blockers": manifest["blockers"],
-            "warnings": manifest["warnings"],
         }
     )
     return 0
@@ -186,21 +166,6 @@ def build_parser() -> argparse.ArgumentParser:
     heat.add_argument("--output", required=True)
     heat.add_argument("--sample-time", type=float, default=1800.0)
     heat.set_defaults(func=_generate_heat_source)
-
-    case = subparsers.add_parser("prepare-case")
-    add_config_inputs(case)
-    case.add_argument("--output", required=True)
-    case.add_argument(
-        "--execute-cad",
-        action="store_true",
-        help="run CadQuery export and geometry checks inside the case bundle",
-    )
-    case.add_argument(
-        "--execute-mesh",
-        choices=("smoke",),
-        help="also generate a Gmsh volume mesh; this implies --execute-cad",
-    )
-    case.set_defaults(func=_prepare_case)
 
     viewer = subparsers.add_parser("build-viewer")
     add_config_inputs(viewer)

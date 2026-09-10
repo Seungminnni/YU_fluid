@@ -933,6 +933,10 @@ def _interactive_legacy_cfd_payload(
         ]
         section["velocity_range_m_s"] = [0.0, max(valid_speed)]
 
+    final_cell_velocity = backend.vtk_to_numpy(
+        final_fluid.GetCellData().GetArray("U")
+    )
+    velocity_max_m_s = float(np.linalg.norm(final_cell_velocity, axis=1).max())
     lengths = [float(path[4]) for path in selected]
     direct_xy_velocity = _direct_precision_xy_velocity_cut(config, case)
     return {
@@ -975,7 +979,12 @@ def _interactive_legacy_cfd_payload(
                 maximum_surface_sample_distance_mm, 4
             ),
         },
-        "velocity_max_m_s": max(max(path["s"]) for path in browser_paths),
+        "velocity_range_m_s": [0.0, velocity_max_m_s],
+        "velocity_max_m_s": velocity_max_m_s,
+        "velocity_scale_semantics": (
+            "shared global range from every coolant cell-centred U magnitude; "
+            "used by streamlines, XY sections, XZ sections, vectors, and ports"
+        ),
         "streamlines": browser_paths,
         "streamline_count": len(browser_paths),
         "source_streamline_count": len(all_paths),
@@ -1199,6 +1208,7 @@ def _interactive_actual_cfd_payload(
     locator.SetDataSet(fluid)
     locator.BuildLocator()
     cell_velocity = backend.vtk_to_numpy(fluid.GetCellData().GetArray("U"))
+    velocity_max_m_s = float(backend.np.linalg.norm(cell_velocity, axis=1).max())
     sections: dict[str, dict[str, object]] = {}
     for name, (kind, horizontal, vertical, fraction, label) in plane_specs.items():
         if name not in manifest["datasets"]:
@@ -1327,7 +1337,13 @@ def _interactive_actual_cfd_payload(
             "padding": False,
             "datasets": datasets,
         },
-        "velocity_max_m_s": max(max(path["s"]) for path in browser_paths),
+        "velocity_range_m_s": [0.0, velocity_max_m_s],
+        "velocity_max_m_s": velocity_max_m_s,
+        "velocity_scale_semantics": (
+            f"shared global range from every {mesh_label}-mesh coolant "
+            "cell-centred U magnitude; used by streamlines, XY sections, "
+            "XZ sections, vectors, and ports"
+        ),
         "streamlines": browser_paths,
         "streamline_count": len(browser_paths),
         "source_streamline_count": len(all_paths),
@@ -1864,7 +1880,7 @@ let highlightedCellId=null,cellHighlightTimer=null,cellExtremaCache={frame:-1,va
 const requestedMode=initialParams.get("mode");
 if(requestedMode){const requestedInput=modeInputs.find(input=>input.value===requestedMode);if(requestedInput){for(const input of modeInputs)input.checked=input===requestedInput;}}
 const requestedTime=Number(initialParams.get("t"));
-let simulationTime = Number.isFinite(requestedTime)?Math.max(0,Math.min(1800,requestedTime)):0, flowPlaying = Boolean(flow.enabled)&&initialParams.get("autoplay")!=="0", previousFrameTime = 0, sceneRenderAccumulator = 0, overlayRenderAccumulator = 0, lastSceneFrame = -1;
+let simulationTime = Number.isFinite(requestedTime)?Math.max(0,Math.min(1800,requestedTime)):0, flowPlaying = Boolean(flow.enabled)&&initialParams.get("autoplay")!=="0", previousFrameTime = 0, sceneRenderAccumulator = 0, overlayRenderAccumulator = 0, lastSceneFrame = -1, lastFlowClockSecond = -1;
 let visualMode = modeInputs.find(input=>input.checked)?.value || "combined";
 const box = model.enclosure_mm;
 const centre = [box.x/2, box.y/2, box.z/2];
@@ -1983,6 +1999,12 @@ const n=model.outline_mm.length,edges=[];
 for(let i=0;i<n;i++){const j=(i+1)%n;edges.push([i,j],[i+n,j+n],[i,i+n]);}
 
 function clamp(value,low=0,high=1){return Math.max(low,Math.min(high,value));}
+function velocityDisplayRange(){
+  const range=flow.velocity_range_m_s;
+  if(Array.isArray(range)&&range.length===2&&Number.isFinite(range[1])&&range[1]>range[0])return range;
+  return [0,Math.max(1e-9,Number(flow.velocity_max_m_s)||0)];
+}
+function velocityDisplayMaximum(){return Math.max(1e-9,velocityDisplayRange()[1]);}
 function jet(value){
   const t=clamp(value),r=clamp(1.5-Math.abs(4*t-3)),g=clamp(1.5-Math.abs(4*t-2)),b=clamp(1.5-Math.abs(4*t-1));
   return [Math.round(255*r),Math.round(255*g),Math.round(255*b)];
@@ -2033,7 +2055,7 @@ function buildDirectXYVelocityCache(){
   if(directXYVelocityCache||!directXYVelocity)return directXYVelocityCache;
   const factor=8,width=Math.round(box.x*factor),height=Math.round(box.y*factor);
   const target=document.createElement("canvas");target.width=width;target.height=height;
-  const targetContext=target.getContext("2d"),range=directXYVelocity.velocity_range_m_s;
+  const targetContext=target.getContext("2d"),range=velocityDisplayRange();
   targetContext.imageSmoothingEnabled=false;
   for(let index=0;index<directXYVelocity.triangles.length;index++){
     const triangle=directXYVelocity.triangles[index],value=directXYVelocity.velocity_m_s[index];
@@ -2104,12 +2126,12 @@ function drawDirectXYVelocity(w,h,showScalar=true){
   ctx.fillStyle="rgba(232,242,250,.96)";ctx.font="700 10px ui-monospace,monospace";
   ctx.fillText(`PRECISION MESH ACTUAL VALUES · ${directXYVelocity.triangle_count.toLocaleString()} CUT TRIANGLES · NO PADDING`,layout.plotLeft,layout.plotTop-12);
   ctx.fillStyle="rgba(145,168,188,.98)";ctx.font="650 10px system-ui";
-  ctx.fillText("FROZEN-FLOW U(x): 색상장은 고정 · 이동 마커는 실제 벡터 방향 표시",layout.plotLeft,layout.plotBottom+22);
+  ctx.fillText("FROZEN-FLOW U(x) · 전체 유동장 공통 색상범위 · 이동 마커 속도는 |U|와 공통 배율에 비례",layout.plotLeft,layout.plotBottom+22);
   return true;
 }
 function drawDirectXYGrid(section,field,w,h,showScalar=true){
   if(!section)return false;
-  const layout=directXYLayout(w,h),range=field==="temperature"?section.temperature_range_c:section.velocity_range_m_s;
+  const layout=directXYLayout(w,h),range=field==="temperature"?section.temperature_range_c:velocityDisplayRange();
   ctx.save();ctx.beginPath();ctx.rect(layout.plotLeft,layout.plotTop,layout.plotRight-layout.plotLeft,layout.plotBottom-layout.plotTop);ctx.clip();
   ctx.fillStyle="rgba(7,16,27,.98)";ctx.fillRect(layout.left,layout.top,layout.width,layout.height);
   if(showScalar&&range){
@@ -2142,7 +2164,7 @@ function sectionMarkerPhase(speed,index){
 }
 function drawDirectXYVelocityVectors(layout,movingOnly=false,targetContext=ctx){
   const section=horizontalSection();if(!section?.velocity_vectors_m_s)return;
-  const limit=Math.max(1e-9,section.velocity_range_m_s[1]);
+  const limit=velocityDisplayMaximum();
   targetContext.save();targetContext.beginPath();targetContext.rect(layout.plotLeft,layout.plotTop,layout.plotRight-layout.plotLeft,layout.plotBottom-layout.plotTop);targetContext.clip();
   for(let row=2;row<section.rows-2;row+=5)for(let column=2;column<section.columns-2;column+=5){
     const index=row*section.columns+column,vector=section.velocity_vectors_m_s[index];if(!vector)continue;
@@ -2349,7 +2371,7 @@ function drawScalarLegend(w,h,title,range,unit,referenceRange=null){
   ctx.fillStyle="rgba(232,242,250,.96)";ctx.font="700 11px system-ui";ctx.fillText(title,x-1,y-24);
   const sectionSmooth=smoothSectionInput.checked&&(visualMode.startsWith("xy-")||visualMode.startsWith("xz-"));
   const scaleLabel=actualOneSecond?(sectionSmooth?"RAW SAMPLES · DISPLAY SMOOTH":"RAW CFD · NO INTERPOLATION"):`DISPLAY CAL. +${flow.temperature_display_offset_c.toFixed(3)} K`;
-  ctx.fillStyle="rgba(145,168,188,.96)";ctx.font="600 9px system-ui";ctx.fillText(unit==="C"?scaleLabel:"ACTUAL CFD SCALE",x-1,y-10);
+  ctx.fillStyle="rgba(145,168,188,.96)";ctx.font="600 9px system-ui";ctx.fillText(unit==="C"?scaleLabel:"ACTUAL CFD · GLOBAL U SCALE",x-1,y-10);
   const intervals=unit==="C"?18:9;
   ctx.font="700 9px ui-monospace,monospace";
   for(let index=0;index<=intervals;index++){
@@ -2408,7 +2430,7 @@ function drawDirectSampleTiles(section,field,basis,scale,cx,cy,range,alpha){
 }
 function drawSection(section,field,basis,scale,cx,cy,rangeOverride=null,alpha=.82,subdivisions=3){
   if(!section)return;
-  const range=rangeOverride||(field==="temperature"?section.temperature_range_c:section.velocity_range_m_s);
+  const range=rangeOverride||(field==="temperature"?section.temperature_range_c:velocityDisplayRange());
   const directlySampled=field==="velocity"||(field==="temperature"&&actualOneSecond&&section.actual_dataset);
   if(directlySampled&&!smoothSectionInput.checked){drawDirectSampleTiles(section,field,basis,scale,cx,cy,range,alpha);return;}
   const quads=[];
@@ -2444,9 +2466,18 @@ function verticalSelection(){
   return verticalSectionInputs.filter(input=>input.checked).map(input=>sections[input.value]).filter(Boolean);
 }
 function verticalRange(field){
+  if(field==="velocity")return velocityDisplayRange();
   const selected=verticalSelection(),ranges=selected.map(section=>field==="temperature"?section.temperature_range_c:section.velocity_range_m_s).filter(Boolean);
   if(!ranges.length)return null;
   return [Math.min(...ranges.map(range=>range[0])),Math.max(...ranges.map(range=>range[1]))];
+}
+function selectedSectionVelocityPeak(mode=visualMode){
+  if(mode.startsWith("xy-"))return horizontalSection()?.velocity_range_m_s?.[1]??null;
+  if(mode.startsWith("xz-")){
+    const peaks=verticalSelection().map(section=>section.velocity_range_m_s?.[1]).filter(Number.isFinite);
+    return peaks.length?Math.max(...peaks):null;
+  }
+  return null;
 }
 function drawSectionLabel(section,basis,scale,cx,cy){
   const point=projected(section.origin_mm,basis,scale,cx,cy),label=section.label||"XZ";
@@ -2457,7 +2488,7 @@ function drawSectionLabel(section,basis,scale,cx,cy){
 }
 function drawSectionVelocity(section,basis,scale,cx,cy,movingOnly=false,targetContext=ctx){
   if(!section||!section.velocity_vectors_m_s)return;
-  const limit=Math.max(1e-9,section.velocity_range_m_s[1]),stride=Math.max(2,Math.ceil(Math.max(section.rows,section.columns)/24));
+  const limit=velocityDisplayMaximum(),stride=Math.max(2,Math.ceil(Math.max(section.rows,section.columns)/24));
   for(let row=1;row<section.rows-1;row+=stride)for(let column=1;column<section.columns-1;column+=stride){
     const index=row*section.columns+column,vector=section.velocity_vectors_m_s[index];
     if(!vector)continue;
@@ -2479,7 +2510,7 @@ function drawFlow(paths,basis,scale,cx,cy){
   for(const path of paths){
     for(let index=1;index<path.p.length;index++){
       const a=projected(path.p[index-1],basis,scale,cx,cy),b=projected(path.p[index],basis,scale,cx,cy);
-      const speed=0.5*(path.s[index-1]+path.s[index]),strength=clamp(speed/flow.velocity_max_m_s);
+      const speed=0.5*(path.s[index-1]+path.s[index]),strength=clamp(speed/velocityDisplayMaximum());
       const [r,g,bColor]=jet(strength);
       ctx.strokeStyle=visualMode==="velocity-streamlines"
         ?`rgba(${Math.min(255,Math.round(.45*r+80))},${Math.min(255,Math.round(.45*g+90))},${Math.min(255,Math.round(.45*bColor+130))},${.58+.24*strength})`
@@ -2495,7 +2526,7 @@ function drawFlowParticles(paths,basis,scale,cx,cy,targetContext=ctx){
     const trailStepS=Math.min(.006,physics.transitTimeS/80);
     for(let tail=4;tail>=0;tail--){
       const sample=physicalFlowPoint(path,baseTime-tail*trailStepS),screen=projected(sample.point,basis,scale,cx,cy);
-      const strength=clamp(sample.speed/flow.velocity_max_m_s),[r,g,bColor]=jet(strength);
+      const strength=clamp(sample.speed/velocityDisplayMaximum()),[r,g,bColor]=jet(strength);
       const alpha=.13+(4-tail)*.18,radius=1.2+(4-tail)*.62;
       targetContext.beginPath();targetContext.arc(screen.x,screen.y,radius,0,2*Math.PI);
       targetContext.fillStyle=tail===0?`rgba(255,255,255,.96)`:`rgba(${r},${g},${bColor},${alpha})`;targetContext.fill();
@@ -2546,8 +2577,8 @@ function drawScene(){
     if(flow.enabled){
       updatePortStateText();
       if(visibility.section&&visualMode==="xy-temperature")drawScalarLegend(w,h,"Temperature · XY",selectedHorizontal.temperature_range_c,"C",flow.paper_temperature_ranges_c?.xy);
-      if(visibility.section&&visualMode==="xy-velocity")drawScalarLegend(w,h,"XY velocity",!smoothSectionInput.checked&&horizontalSectionKey()==="xy"&&directXYVelocity?directXYVelocity.velocity_range_m_s:selectedHorizontal.velocity_range_m_s,"m/s");
-      flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;
+      if(visibility.section&&visualMode==="xy-velocity")drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
+      updateFlowClock();
     }
     return;
   }
@@ -2565,7 +2596,7 @@ function drawScene(){
     }
     else if(isPort&&velocityDisplay){
       const key=item.face.id==="IN"?"inlet_mean_velocity_m_s":"outlet_mean_velocity_m_s";
-      const normalised=flow.port_flow[key]/Math.max(1e-9,flow.velocity_max_m_s),[r,g,b]=jet(normalised);
+      const normalised=flow.port_flow[key]/velocityDisplayMaximum(),[r,g,b]=jet(normalised);
       ctx.fillStyle=`rgba(${r},${g},${b},.88)`;
     }
     else if(isPort){ctx.fillStyle=`rgba(239,147,43,${0.62+0.14*shade})`;}
@@ -2590,8 +2621,8 @@ function drawScene(){
     if(visualMode==="xy-velocity"){
       const section=horizontalSection();
       if(!smoothSectionInput.checked&&horizontalSectionKey()==="xy"&&directXYVelocity)drawDirectXYVelocity3D(section,basis,scale,cx,cy);
-      else if(smoothSectionInput.checked)drawXYPlaneTexture(sectionRaster(section,"velocity",section.velocity_range_m_s),section,basis,scale,cx,cy,.88);
-      else drawSection(section,"velocity",basis,scale,cx,cy,null,.88,1);
+      else if(smoothSectionInput.checked)drawXYPlaneTexture(sectionRaster(section,"velocity",velocityDisplayRange()),section,basis,scale,cx,cy,.88);
+      else drawSection(section,"velocity",basis,scale,cx,cy,velocityDisplayRange(),.88,1);
     }
     const selectedVertical=verticalSelection(),verticalAlpha=selectedVertical.length>1?.52:.82;
     const verticalSubdivisions=selectedVertical.length>1?2:3;
@@ -2629,12 +2660,12 @@ function drawScene(){
     }
     updatePortStateText(inletMetrics,outletMetrics);
     if(["combined","cell-temperature"].includes(visualMode)&&visibility.cells)drawScalarLegend(w,h,"Cell surface T",cellSurface?.temperature_range_c||flow.temperature_range_c,"C",flow.paper_temperature_ranges_c?.cell);
-    if(visualMode==="velocity-streamlines"&&visibility.flow)drawScalarLegend(w,h,"Velocity",[0,flow.velocity_max_m_s],"m/s");
+    if(visualMode==="velocity-streamlines"&&visibility.flow)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
     if(visualMode==="xy-temperature"&&visibility.section)drawScalarLegend(w,h,"Temperature · XY",horizontalSection()?.temperature_range_c,"C",flow.paper_temperature_ranges_c?.xy);
-    if(visualMode==="xy-velocity"&&visibility.section)drawScalarLegend(w,h,"XY velocity",horizontalSectionKey()==="xy"?directXYVelocity?.velocity_range_m_s:horizontalSection()?.velocity_range_m_s,"m/s");
+    if(visualMode==="xy-velocity"&&visibility.section)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
     if(visualMode==="xz-temperature"&&visibility.section)drawScalarLegend(w,h,"Temperature · XZ",verticalRange("temperature"),"C",flow.paper_temperature_ranges_c?.xz);
-    if(visualMode==="xz-velocity"&&visibility.section)drawScalarLegend(w,h,"XZ velocity",verticalRange("velocity"),"m/s");
-    flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;
+    if(visualMode==="xz-velocity"&&visibility.section)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
+    updateFlowClock();
   }else{ctx.fillStyle="rgba(255,189,91,.92)";ctx.font="700 11px system-ui";ctx.fillText("Ø19 mm IN / OUT — A-04 assumed centres",16,h-34);}
 }
 function drawDynamicOverlay(){
@@ -2642,18 +2673,18 @@ function drawDynamicOverlay(){
   if(!flow.enabled||!visibility.flow||(activeMeshRun()?.id==="single"&&!activeMeshRun()?.data_ready))return;
   if(visualMode.startsWith("xy-")&&!section3DInput.checked&&horizontalSection()){
     drawDirectXYVelocityVectors(directXYLayout(canvas.clientWidth,canvas.clientHeight),true,overlayCtx);
-    flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;return;
+    updateFlowClock();return;
   }
   if((section3DInput.checked&&visualMode.startsWith("xy-"))||visualMode.startsWith("xz-")){
     const w=canvas.clientWidth,h=canvas.clientHeight,basis=cameraBasis(),scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
     const selected=visualMode.startsWith("xy-")?[horizontalSection()]:verticalSelection();
     for(const section of selected)drawSectionVelocity(section,basis,scale,w/2,h/2+8,true,overlayCtx);
-    flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;return;
+    updateFlowClock();return;
   }
   if(!["combined","velocity-streamlines"].includes(visualMode))return;
   const w=canvas.clientWidth,h=canvas.clientHeight,basis=cameraBasis(),scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
   drawFlowParticles(flow.streamlines||[],basis,scale,w/2,h/2+8,overlayCtx);
-  flowTime.textContent=`t = ${Math.round(simulationTime)} s / 1800 s`;
+  updateFlowClock();
 }
 function draw(){drawScene();lastSceneFrame=Math.round(simulationTime);drawDynamicOverlay();}
 canvas.addEventListener("pointerdown",e=>{dragging=true;lastX=e.clientX;lastY=e.clientY;canvas.setPointerCapture(e.pointerId);});
@@ -2667,13 +2698,13 @@ function selectView(name){
 document.querySelectorAll("[data-view]").forEach(button=>button.addEventListener("click",()=>selectView(button.dataset.view)));
 document.getElementById("reset").addEventListener("click",()=>{zoom=1;selectView("iso");});
 const modeDescriptions={
-  combined:["종합 화면","셀 온도와 실제 U(x)에 비례해 이동하는 유동 헤드"],
+  combined:["종합 화면","셀 온도와 실제 U(x)에 비례해 이동하는 유동 헤드 · 단면과 동일한 U 기준"],
   "cell-temperature":["셀 온도",`배터리 직접 표면 샘플 ${cellSurface?.angular_segments||28} × ${cellSurface?.axial_segments||12}+캡 · 현재 최고/최저점 표시`],
-  "velocity-streamlines":["유체 유선","유속으로 색칠한 고정 유동장과 실제 U(x)에 비례하는 이동 헤드"],
+  "velocity-streamlines":["유체 유선","전체 유체 셀 공통 U 범위로 색칠한 고정 유동장과 실제 U(x)에 비례하는 이동 헤드"],
   "xy-temperature":["가로 단면 온도","선택한 높이의 직접 셀 온도와 유동 방향을 표시"],
-  "xy-velocity":["가로 단면 유속","선택한 높이의 정밀 메시 실제 셀 중심 유속을 표시 · 보간/패딩 없음"],
+  "xy-velocity":["가로 단면 유속","선택한 높이의 실제 셀 중심 유속 · 전체 유동장 공통 U 범위 · 보간/패딩 없음"],
   "xz-temperature":["세로 단면 온도","선택한 세로 위치의 직접 셀 온도 단면을 표시"],
-  "xz-velocity":["세로 단면 유속","선택한 세로 위치의 유속 크기와 방향을 표시"]
+  "xz-velocity":["세로 단면 유속","선택한 세로 위치의 유속 크기와 방향 · 전체 유동장 공통 U 범위"]
 };
 function prepareActualMode(mode){
   if(!actualOneSecond)return;
@@ -2707,8 +2738,10 @@ function updateCanvasNote(mode=visualMode){
   const temperatureNote=actualOneSecond?"T 원본 · 시간보간/패딩 없음":`온도 표시보정 +${flow.temperature_display_offset_c.toFixed(3)} K`;
   const sectionRenderNote=mode.startsWith("xy-")||mode.startsWith("xz-")?(smoothSectionInput.checked?" · 실제 샘플 사이 화면만 부드럽게 · 무효영역 채움 없음":" · 실제 샘플 타일 그대로"):"";
   const headScale=headDisplayScale(),headNote=visibility.particles?` · 헤드 ${headScale===1?"1× 실제속도":headScale+"× 표시속도"}`:"";
+  const velocityMode=["combined","velocity-streamlines","xy-velocity","xz-velocity"].includes(mode);
+  const localPeak=selectedSectionVelocityPeak(mode),velocityNote=velocityMode?` · U 공통범위 0–${velocityDisplayMaximum().toFixed(3)} m/s${Number.isFinite(localPeak)?` · 현재 단면 최고 ${localPeak.toFixed(3)} m/s`:""}`:"";
   const dimensionNote=mode.startsWith("xy-")?` · ${section3DInput.checked?"3D 회전":"평면 보기"}`:"";
-  canvasNote.textContent=`${description[1]}${horizontalPosition}${sectionRenderNote}${dimensionNote}${headNote} · 드래그 회전 · 휠 확대/축소 · ${temperatureNote} · Ū·p̄ 실제 면적평균`;
+  canvasNote.textContent=`${description[1]}${horizontalPosition}${sectionRenderNote}${dimensionNote}${velocityNote}${headNote} · 드래그 회전 · 휠 확대/축소 · ${temperatureNote} · Ū·p̄ 실제 면적평균`;
 }
 function selectVisualMode(mode){
   visualMode=mode;
@@ -2805,9 +2838,16 @@ function formatWallDuration(seconds){
 function updateFlowDuration(){
   const rate=Number(flowRate.value);flowDuration.textContent=`${rate}× 완주 ${formatWallDuration(1800/rate)}`;
 }
+function updateFlowClock({force=false}={}){
+  const second=Math.round(simulationTime);
+  if(!force&&second===lastFlowClockSecond)return;
+  lastFlowClockSecond=second;
+  flowSeek.value=String(second);
+  flowTime.textContent=`t = ${second} s / 1800 s`;
+}
 if(flow.enabled){
   flowSampling.textContent=actualOneSecond?"CFD 원본 1 s · 직접 셀값 · 시간보간/패딩 없음":"화면 1 s · CFD 원본 15 s 선형보간";
-  flowSeek.value=String(simulationTime);
+  updateFlowClock({force:true});
   flowPlay.textContent=flowPlaying?"❚❚ 정지":"▶ 재생";
   flowPlay.addEventListener("click",()=>{flowPlaying=!flowPlaying;flowPlay.textContent=flowPlaying?"❚❚ 정지":"▶ 재생";draw();});
   flowSeek.addEventListener("input",()=>{simulationTime=Number(flowSeek.value);draw();});
@@ -2818,13 +2858,14 @@ function animate(timestamp){
   const elapsed=Math.min(.1,(timestamp-previousFrameTime)/1000);previousFrameTime=timestamp;
   if(flow.enabled&&flowPlaying&&figurePreview.hidden&&activeMeshRun()?.data_ready!==false){
     simulationTime=(simulationTime+elapsed*Number(flowRate.value))%1800;
-    flowSeek.value=String(Math.round(simulationTime));sceneRenderAccumulator+=elapsed;overlayRenderAccumulator+=elapsed;
+    sceneRenderAccumulator+=elapsed;overlayRenderAccumulator+=elapsed;updateFlowClock();
     const actualFrame=Math.round(simulationTime);
-    const refreshScene=actualOneSecond
+    const timeVaryingScene=["combined","cell-temperature","xy-temperature","xz-temperature"].includes(visualMode);
+    const refreshScene=timeVaryingScene&&(actualOneSecond
       ?actualFrame!==lastSceneFrame&&sceneRenderAccumulator>=1/12
-      :sceneRenderAccumulator>=1/12;
+      :sceneRenderAccumulator>=1/12);
     if(refreshScene){sceneRenderAccumulator=0;overlayRenderAccumulator=0;draw();}
-    else if(overlayRenderAccumulator>=1/30){overlayRenderAccumulator=0;drawDynamicOverlay();}
+    else if(overlayRenderAccumulator>=1/60-.002){overlayRenderAccumulator=Math.max(0,overlayRenderAccumulator-1/60);drawDynamicOverlay();}
   }
   advanceVideoPlayback(elapsed);
   requestAnimationFrame(animate);

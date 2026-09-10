@@ -27,6 +27,8 @@ def extract_transient_residuals(log_path: str | Path) -> dict[str, object]:
     current_outer = 0
     current_global: int | None = None
     current_region: str | None = None
+    current_regions_seen: set[str] = set()
+    current_time_has_explicit_marker = False
     global_iteration = 0
     explicit_pimple_markers = 0
     solver_clean_end = False
@@ -56,18 +58,35 @@ def extract_transient_residuals(log_path: str | Path) -> dict[str, object]:
                 current_outer = 0
                 current_global = None
                 current_region = None
+                current_regions_seen.clear()
+                current_time_has_explicit_marker = False
                 continue
 
             pimple_match = re.search(r"\bPIMPLE:\s*(?:iteration|Iteration)\s+(\d+)", line)
             if pimple_match:
                 explicit_pimple_markers += 1
+                current_time_has_explicit_marker = True
                 activate_iteration(int(pimple_match.group(1)))
                 current_region = None
+                current_regions_seen.clear()
                 continue
 
             region_match = re.search(r"Solving for (?:fluid|solid) region (\S+)", line)
             if region_match:
                 current_region = region_match.group(1)
+                if not current_time_has_explicit_marker:
+                    # OpenCFD v2512 can omit the textual ``PIMPLE: iteration``
+                    # marker.  chtMultiRegionFoam still prints each region once
+                    # per outer correction, so the first repeated region starts
+                    # the next correction.  This preserves the true nonlinear
+                    # iteration axis instead of collapsing all correctors in a
+                    # physical time step into one point.
+                    if current_global is None:
+                        activate_iteration(1)
+                    elif current_region in current_regions_seen:
+                        activate_iteration(current_outer + 1)
+                        current_regions_seen.clear()
+                    current_regions_seen.add(current_region)
                 continue
 
             residual_match = re.search(
@@ -77,9 +96,8 @@ def extract_transient_residuals(log_path: str | Path) -> dict[str, object]:
             )
             if residual_match and current_time is not None and current_region:
                 if current_global is None:
-                    # Some OpenFOAM builds omit the textual PIMPLE marker.  In
-                    # that case each Time block is kept as one explicit sample;
-                    # no unrecorded correctors are invented.
+                    # Defensive fallback for logs that omit both PIMPLE and
+                    # region markers. No unrecorded correctors are invented.
                     activate_iteration(1)
                 assert current_global is not None
                 field = residual_match.group(1)
