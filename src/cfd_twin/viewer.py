@@ -265,8 +265,24 @@ def _convergence_payload(case: Path) -> dict[str, object]:
             }
         )
     final_checks = validation.get("residual_checks", {})
-    return {
+    primary_id = (
+        "transient_energy"
+        if axis_mode == "transient_time_step_iteration"
+        else "full_transient"
+        if axis_mode == "cumulative_pimple_outer_iteration"
+        else "steady_cht"
+    )
+    primary_label = (
+        "1초 과도 · 에너지"
+        if primary_id == "transient_energy"
+        else "전체 과도 CHT"
+        if primary_id == "full_transient"
+        else "정상 CHT · 유동+에너지"
+    )
+    payload = {
         "available": bool(series),
+        "id": primary_id,
+        "label": primary_label,
         "source": "actual OpenFOAM solver log",
         "scope": scope,
         "source_files": source_logs,
@@ -307,6 +323,136 @@ def _convergence_payload(case: Path) -> dict[str, object]:
             "relabeled as a normalized Fluent continuity residual."
         ),
     }
+
+    def _steady_history(
+        *, run_name: str, history_id: str, label: str, scope_text: str,
+        validation_name: str,
+    ) -> dict[str, object] | None:
+        run_path = case / f"production/single/runs/{run_name}"
+        log_path = run_path / f"logs/solver/{run_name}.log"
+        if not log_path.is_file():
+            return None
+        parsed = parse_cold_flow_log(log_path)
+        if not parsed["records"]:
+            return None
+
+        history_grouped: dict[str, dict[int, float]] = {}
+        history_continuity: dict[int, float] = {}
+        history_linear_total = 0
+        for iteration_text, record in parsed["records"].items():
+            iteration = int(round(float(iteration_text)))
+            for qualified, values in record["residuals"].items():
+                if not values:
+                    continue
+                history_linear_total += sum(
+                    int(value.get("linear_iterations", 0)) for value in values
+                )
+                history_grouped.setdefault(qualified, {})[iteration] = max(
+                    float(value["initial"]) for value in values
+                )
+            continuity_values = record.get("continuity")
+            if continuity_values is not None:
+                continuity_value = abs(float(continuity_values["global"]))
+                if continuity_value > 0:
+                    history_continuity[iteration] = continuity_value
+        if history_continuity:
+            history_grouped["continuity.global"] = history_continuity
+
+        validation_path = run_path / f"reports/solver/{validation_name}"
+        history_validation: dict[str, object] = {}
+        history_sources = [str(log_path.relative_to(case))]
+        if validation_path.is_file():
+            history_validation = json.loads(validation_path.read_text(encoding="utf-8"))
+            history_sources.append(str(validation_path.relative_to(case)))
+
+        history_floors = history_validation.get("residual_floors", {})
+        history_series = []
+        history_iterations: set[int] = set()
+        for key in labels:
+            points = sorted(history_grouped.get(key, {}).items())
+            if not points:
+                continue
+            stride = max(1, math.ceil(len(points) / 1200))
+            sampled = [
+                [iteration, value]
+                for index, (iteration, value) in enumerate(points)
+                if index % stride == 0 or index == len(points) - 1
+            ]
+            history_iterations.update(iteration for iteration, _ in points)
+            history_series.append(
+                {
+                    "key": key,
+                    "label": labels[key],
+                    "colour": colours[key],
+                    "points": sampled,
+                    "raw_point_count": len(points),
+                    "final": points[-1][1],
+                    "configured_gate": history_floors.get(key),
+                }
+            )
+        if not history_series or not history_iterations:
+            return None
+        history_checks = history_validation.get("residual_checks", {})
+        return {
+            "available": True,
+            "id": history_id,
+            "label": label,
+            "source": "actual OpenFOAM solver log",
+            "scope": scope_text,
+            "source_files": history_sources,
+            "series": history_series,
+            "axis_mode": "openfoam_outer_iteration",
+            "iteration_count": len(history_iterations),
+            "first_iteration": min(history_iterations),
+            "last_iteration": max(history_iterations),
+            "linear_iteration_total": history_linear_total or None,
+            "time_step_count": None,
+            "first_time_s": None,
+            "last_time_s": None,
+            "validation_status": history_validation.get("status", "SAVED_HISTORY"),
+            "configured_residual_checks_passed": (
+                bool(history_checks)
+                and all(bool(value) for value in history_checks.values())
+            ),
+            "available_during_calculation": True,
+            "live_note": (
+                "This is a completed, saved multi-equation OpenFOAM solver history."
+            ),
+            "iteration_axis_note": (
+                "The x-axis is the OpenFOAM steady outer-iteration number. "
+                "Velocity, pressure, turbulence and energy equations are shown from "
+                "the actual solver log."
+            ),
+            "semantics": payload["semantics"],
+        }
+
+    histories = []
+    for history in (
+        _steady_history(
+            run_name="steady_cold_flow",
+            history_id="cold_flow",
+            label="유동 초기화 · U/p/k/ω",
+            scope_text="새 표준 결과 · 유동 초기화",
+            validation_name="cold_flow_validation.json",
+        ),
+        _steady_history(
+            run_name="steady_cht",
+            history_id="steady_cht",
+            label="정상 CHT · 유동+에너지",
+            scope_text="새 표준 결과 · 정상 CHT",
+            validation_name="steady_cht_validation.json",
+        ),
+    ):
+        if history is not None and history["id"] != primary_id:
+            histories.append(history)
+    histories.append(dict(payload))
+    payload["histories"] = histories
+    payload["default_history_id"] = (
+        "steady_cht"
+        if any(history["id"] == "steady_cht" for history in histories)
+        else primary_id
+    )
+    return payload
 
 
 def _direct_precision_xy_velocity_cut(
@@ -1362,7 +1508,9 @@ HTML = '''<!doctype html>
           <div class="convergence-chart-toolbar">
             <button id="convergence-chart-close" type="button">← 3D 화면</button>
             <strong>CFD 수렴 이력</strong>
-            <span>실제 솔버 반복 기준 · 로그 축</span>
+            <label for="convergence-history-select">계산 단계</label>
+            <select id="convergence-history-select" aria-label="CFD convergence calculation stage"></select>
+            <span>실제 솔버 로그 · 잔차 로그 축</span>
             <button id="convergence-chart-png" type="button">PNG 추출</button>
             <button id="convergence-chart-csv" type="button">CSV 추출</button>
           </div>
@@ -1404,7 +1552,7 @@ HTML = '''<!doctype html>
         <h2>CFD 수렴 모니터</h2>
         <dl id="convergence-summary"></dl>
         <button id="convergence-chart-open" type="button">수렴 그래프 열기</button>
-        <p>잔차만이 아니라 질량·온도·압력 안정성도 함께 판정합니다.</p>
+        <p>과도 단계는 고정 유동이므로 에너지만 계산합니다. 유동·정상 CHT 다중 잔차는 그래프의 계산 단계에서 확인할 수 있습니다.</p>
       </section>
       <section class="card temperature-export-card">
         <h2>온도 그래프</h2>
@@ -1435,7 +1583,7 @@ HTML = '''<!doctype html>
   </main>
   <div id="cell-toast" class="cell-toast" role="status" aria-live="polite" hidden></div>
   <footer id="provenance"></footer>
-  <script src="model.js"></script>
+  <script src="__MODEL_ASSET__"></script>
   <script src="__APP_ASSET__"></script>
 </body>
 </html>
@@ -1552,7 +1700,7 @@ button.active { color:#fff; background:#167dac; border-color:#167dac; }
 .temperature-chart-panel[hidden],.convergence-chart-panel[hidden] { display:none; }
 .temperature-chart-toolbar,.convergence-chart-toolbar { display:flex; align-items:center; gap:7px; flex-wrap:wrap; color:var(--muted); font-size:11px; }
 .temperature-chart-toolbar button,.convergence-chart-toolbar button { padding:6px 9px; font-size:10px; }
-.temperature-chart-toolbar select { border:1px solid #bccbd3; border-radius:4px; color:#31434f; background:#fff;
+.temperature-chart-toolbar select,.convergence-chart-toolbar select { border:1px solid #bccbd3; border-radius:4px; color:#31434f; background:#fff;
   padding:6px 8px; font-weight:700; }
 .temperature-chart-canvas-wrap,.convergence-chart-canvas-wrap { flex:1 1 auto; min-height:280px; overflow:hidden; }
 #temperature-chart-canvas,#convergence-chart-canvas { width:100%; height:100%; display:block; }
@@ -1592,8 +1740,9 @@ aside { min-width:0; overflow:visible; padding-right:3px; }
 .warning strong { color:var(--amber); }
 .warning.validated { border-color:var(--line); border-left-color:var(--success); background:#f5fbf8; }
 .warning.validated strong { color:#15745f; }
-dl { margin:0; display:grid; grid-template-columns:1fr auto; gap:7px 12px; font-size:12px; }
-dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; font-weight:700; }
+dl { margin:0; display:grid; grid-template-columns:minmax(76px,.72fr) minmax(0,1.28fr); gap:7px 12px; font-size:12px; }
+dt { min-width:0; color:var(--muted); word-break:keep-all; overflow-wrap:normal; }
+dd { min-width:0; margin:0; text-align:right; overflow-wrap:anywhere; word-break:keep-all; font-variant-numeric:tabular-nums; font-weight:700; }
 .cell-grid { display:grid; grid-template-columns:repeat(8,1fr); gap:5px; }
 .cell-grid button { min-width:0; padding:6px 2px; text-align:center; border:1px solid #c9d8df; border-radius:3px;
   color:#346477; background:#f4f9fb; font-size:10px; }
@@ -1664,7 +1813,9 @@ const requestedMeshRun=initialParams.get("mesh");
 let activeMeshRunId=meshRuns.some(run=>run.id===requestedMeshRun)?requestedMeshRun:(meshRuns.find(run=>run.data_ready)?.id||meshRuns[0]?.id||"precision");
 const flow=(model.interactive_cfd_by_mesh||{})[activeMeshRunId]||model.interactive_cfd||{enabled:false};
 const temperatureGraphs=flow.temperature_graphs||null;
-const convergence=model.convergence||{available:false};
+const convergenceBundle=model.convergence||{available:false};
+const convergenceHistories=convergenceBundle.histories?.length?convergenceBundle.histories:[convergenceBundle];
+let convergence=convergenceHistories.find(history=>history.id===convergenceBundle.default_history_id)||convergenceHistories[0]||{available:false};
 const meshRunSelect=document.getElementById("mesh-run-select");
 const meshRunDetail=document.getElementById("mesh-run-detail");
 const meshRunNote=document.getElementById("mesh-run-note");
@@ -2753,6 +2904,7 @@ const convergenceChartStatus=document.getElementById("convergence-chart-status")
 const convergenceChartPng=document.getElementById("convergence-chart-png");
 const convergenceChartCsv=document.getElementById("convergence-chart-csv");
 const convergenceSummary=document.getElementById("convergence-summary");
+const convergenceHistorySelect=document.getElementById("convergence-history-select");
 const temperatureMetricMeta={
   outlet:{title:"출구 평균 온도",filename:"outlet-average",key:"outlet_mass_weighted_average_c",definition:"출구 phi 질량유량 가중 평균"},
   "battery-maximum":{title:"배터리 최고 온도",filename:"battery-mesh-maximum",key:"battery_mesh_maximum_c",definition:"C01–C23 cell zone의 mesh max(T) 중 최고"},
@@ -2936,9 +3088,20 @@ function drawConvergenceChart(){
   const iterationLabel=pimpleAxis?"누적 PIMPLE 전역 반복":timeStepAxis?"1초 과도 에너지 반복":"정상상태 외부 반복";
   const linearTotal=convergence.linear_iteration_total?` · 방정식 내부 선형 반복 합계 ${convergence.linear_iteration_total.toLocaleString()}회`:"";
   const timeRange=transientAxis&&Number.isFinite(convergence.last_time_s)?` · 물리시간 ${Number(convergence.first_time_s||0).toLocaleString()}–${Number(convergence.last_time_s).toLocaleString()} s`:"";
-  const comparison=pimpleAxis?" · ANSYS와 누적 반복 구조 대응 · 잔차값은 OpenFOAM 원본":timeStepAxis?" · 속도·압력은 선행 수렴 후 고정 · OpenFOAM 원본 잔차":"";
+  const comparison=pimpleAxis?" · 완전 연성 과도 반복 구조 · OpenFOAM 원본 잔차":timeStepAxis?" · 속도·압력·난류는 선행 단계에서 수렴 후 고정 · 이 단계는 energy만 계산":" · U/p/k/ω/h 실제 로그 · Fluent scaled residual과 수치 정의는 다름";
   convergenceChartStatus.textContent=`${convergence.scope} · ${iterationLabel} ${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회${timeRange}${linearTotal}${comparison}`;
 }
+for(const history of convergenceHistories){
+  if(!history?.available)continue;
+  const option=document.createElement("option");option.value=history.id||"";option.textContent=history.label||history.scope||history.id;
+  convergenceHistorySelect.appendChild(option);
+}
+convergenceHistorySelect.value=convergence.id||"";
+convergenceHistorySelect.hidden=convergenceHistorySelect.options.length<=1;
+convergenceHistorySelect.addEventListener("change",()=>{
+  convergence=convergenceHistories.find(history=>history.id===convergenceHistorySelect.value)||convergence;
+  renderConvergenceSummary();drawConvergenceChart();
+});
 convergenceChartOpen.addEventListener("click",()=>{
   if(!convergence.available)return;
   flowPlaying=false;flowPlay.textContent="▶ 재생";temperatureGraphPanel.hidden=true;figurePreview.hidden=true;
@@ -2951,22 +3114,26 @@ convergenceChartClose.addEventListener("click",()=>{
 });
 convergenceChartPng.addEventListener("click",()=>{
   const exportCanvas=document.createElement("canvas");exportCanvas.width=1600;exportCanvas.height=900;
-  paintConvergenceChart(exportCanvas.getContext("2d"),1600,900);exportCanvas.toBlob(blob=>{if(blob)downloadBlob(blob,"cfd-residual-convergence.png");},"image/png");
+  paintConvergenceChart(exportCanvas.getContext("2d"),1600,900);exportCanvas.toBlob(blob=>{if(blob)downloadBlob(blob,`cfd-residual-${convergence.id||"convergence"}.png`);},"image/png");
 });
 convergenceChartCsv.addEventListener("click",()=>{
   const series=convergence.series||[],iterations=[...new Set(series.flatMap(line=>line.points.map(point=>point[0])))].sort((a,b)=>a-b);
   const axisHeader=convergence.axis_mode==="cumulative_pimple_outer_iteration"?"cumulative_pimple_global_iteration":convergence.axis_mode==="transient_time_step_iteration"?"transient_energy_iteration":"openfoam_outer_iteration";
   const maps=series.map(line=>new Map(line.points)),lines=[[axisHeader,...series.map(line=>line.key)].map(csvValue).join(",")];
   for(const iteration of iterations)lines.push([iteration,...maps.map(values=>values.get(iteration)??"")].map(csvValue).join(","));
-  downloadBlob(new Blob(["\ufeff",lines.join("\n")],{type:"text/csv;charset=utf-8"}),"cfd-residual-convergence.csv");
+  downloadBlob(new Blob(["\ufeff",lines.join("\n")],{type:"text/csv;charset=utf-8"}),`cfd-residual-${convergence.id||"convergence"}.csv`);
 });
-if(convergence.available){
-  const pimpleAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration",timeStepAxis=convergence.axis_mode==="transient_time_step_iteration";
-  const summaryRows={"상태":convergence.configured_residual_checks_passed?"수렴 기준 통과":"원본 로그 저장","계산 단계":convergence.scope};
-  summaryRows[pimpleAxis?"누적 PIMPLE 반복":timeStepAxis?"1초 에너지 반복":"정상상태 외부 반복"]=`${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회`;
-  if(convergence.linear_iteration_total)summaryRows["방정식 내부 반복 합계"]=`${convergence.linear_iteration_total.toLocaleString()}회`;
-  rows(convergenceSummary,summaryRows);
-}else{convergenceChartOpen.disabled=true;convergenceSummary.innerHTML="<dt>상태</dt><dd>로그 없음</dd>";}
+function renderConvergenceSummary(){
+  if(convergence.available){
+    const pimpleAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration",timeStepAxis=convergence.axis_mode==="transient_time_step_iteration";
+    const validationPassed=String(convergence.validation_status||"").endsWith("_PASSED")||convergence.configured_residual_checks_passed;
+    const summaryRows={"상태":validationPassed?"복합 검증 통과":"원본 로그 저장","계산 단계":convergence.label||convergence.scope};
+    summaryRows[pimpleAxis?"누적 PIMPLE 반복":timeStepAxis?"1초 에너지 반복":"정상 외부 반복"]=`${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회`;
+    if(convergence.linear_iteration_total)summaryRows["내부 반복 합계"]=`${convergence.linear_iteration_total.toLocaleString()}회`;
+    rows(convergenceSummary,summaryRows);convergenceChartOpen.disabled=false;
+  }else{convergenceChartOpen.disabled=true;convergenceSummary.innerHTML="<dt>상태</dt><dd>로그 없음</dd>";}
+}
+renderConvergenceSummary();
 let videoMode="none",videoPlaying=false,videoSimulationTime=0,videoFileTime=0,videoRenderAccumulator=0;
 function formatSimulationTime(value){
   const seconds=Math.max(0,Math.round(value));
@@ -3417,25 +3584,33 @@ def write_viewer_bundle(
         "resolved_input_sha256": config.resolved_input_sha256,
         "geometry_sha256": config.geometry_sha256,
     }
+    model_javascript = (
+        "window.CFD_TWIN_MODEL = "
+        + json.dumps(model, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + ";\n"
+    )
     style_asset = f"style.{hashlib.sha256(CSS.encode('utf-8')).hexdigest()[:12]}.css"
     app_asset = f"app.{hashlib.sha256(JAVASCRIPT.encode('utf-8')).hexdigest()[:12]}.js"
+    model_asset = (
+        f"model.{hashlib.sha256(model_javascript.encode('utf-8')).hexdigest()[:12]}.js"
+    )
     rendered_html = HTML.replace("__STYLE_ASSET__", style_asset).replace(
         "__APP_ASSET__", app_asset
-    )
-    for obsolete in (*output.glob("style.*.css"), *output.glob("app.*.js")):
-        if obsolete.name not in {style_asset, app_asset}:
+    ).replace("__MODEL_ASSET__", model_asset)
+    for obsolete in (
+        *output.glob("style.*.css"),
+        *output.glob("app.*.js"),
+        *output.glob("model.*.js"),
+    ):
+        if obsolete.name not in {style_asset, app_asset, model_asset}:
             obsolete.unlink()
     _atomic_write(output / "index.html", rendered_html)
     _atomic_write(output / "style.css", CSS)
     _atomic_write(output / "app.js", JAVASCRIPT)
     _atomic_write(output / style_asset, CSS)
     _atomic_write(output / app_asset, JAVASCRIPT)
-    _atomic_write(
-        output / "model.js",
-        "window.CFD_TWIN_MODEL = "
-        + json.dumps(model, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + ";\n",
-    )
+    _atomic_write(output / "model.js", model_javascript)
+    _atomic_write(output / model_asset, model_javascript)
     _atomic_write(
         output / "viewer_manifest.json",
         json.dumps(model, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

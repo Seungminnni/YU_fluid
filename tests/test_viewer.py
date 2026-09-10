@@ -20,6 +20,51 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class ViewerTests(unittest.TestCase):
+    def test_convergence_payload_includes_saved_solver_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            case = Path(directory)
+            transient_dir = (
+                case
+                / "production/single/runs/frozen_flow_actual_1s/reports/solver"
+            )
+            transient_dir.mkdir(parents=True)
+            (transient_dir / "transient_residuals.csv").write_text(
+                "global_iteration,time_s,time_step_index,outer_corrector,region,field,initial_residual,final_residual,linear_iterations,residual_definition\n"
+                "1,1,1,1,batterySolid,h,0.1,0.01,2,OpenFOAM raw\n",
+                encoding="utf-8",
+            )
+            solver_log = "\n".join(
+                (
+                    "Time = 1",
+                    "Solving for fluid region coolant",
+                    "smoothSolver: Solving for Ux, Initial residual = 0.2, Final residual = 0.02, No Iterations 3",
+                    "Solving for solid region batterySolid",
+                    "smoothSolver: Solving for h, Initial residual = 0.3, Final residual = 0.03, No Iterations 4",
+                    "Time = 2",
+                    "Solving for fluid region coolant",
+                    "smoothSolver: Solving for Ux, Initial residual = 0.02, Final residual = 0.002, No Iterations 2",
+                    "Solving for solid region batterySolid",
+                    "smoothSolver: Solving for h, Initial residual = 0.03, Final residual = 0.003, No Iterations 3",
+                    "End",
+                )
+            )
+            for run_name in ("steady_cold_flow", "steady_cht"):
+                log_dir = case / f"production/single/runs/{run_name}/logs/solver"
+                log_dir.mkdir(parents=True)
+                (log_dir / f"{run_name}.log").write_text(
+                    solver_log, encoding="utf-8"
+                )
+
+            payload = _convergence_payload(case)
+
+            histories = {history["id"]: history for history in payload["histories"]}
+            self.assertEqual(payload["default_history_id"], "steady_cht")
+            self.assertEqual(
+                set(histories), {"cold_flow", "steady_cht", "transient_energy"}
+            )
+            self.assertEqual(histories["cold_flow"]["last_iteration"], 2)
+            self.assertEqual(len(histories["steady_cht"]["series"]), 2)
+
     def test_transient_convergence_prefers_cumulative_pimple_axis(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             case = Path(directory)
@@ -75,8 +120,10 @@ class ViewerTests(unittest.TestCase):
             html = (output / "index.html").read_text(encoding="utf-8")
             script = (output / "app.js").read_text(encoding="utf-8")
             self.assertRegex(html, r'href="style\.[0-9a-f]{12}\.css"')
+            self.assertRegex(html, r'src="model\.[0-9a-f]{12}\.js"')
             self.assertRegex(html, r'src="app\.[0-9a-f]{12}\.js"')
             self.assertNotIn("__STYLE_ASSET__", html)
+            self.assertNotIn("__MODEL_ASSET__", html)
             self.assertNotIn("__APP_ASSET__", html)
             self.assertIn("CFD 미실행", html)
             self.assertIn('data-view="px"', html)
