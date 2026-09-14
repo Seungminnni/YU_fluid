@@ -15,7 +15,20 @@ from pathlib import Path
 
 from .config import ResolvedConfig
 from .geometry import cell_placements
-from .heat_source import render_openfoam_fvoptions, source_from_config
+from .heat_source import (
+    ConstantVolumetricSource,
+    render_openfoam_fvoptions,
+    source_from_config,
+)
+
+
+STRICT_STEADY_RESIDUAL_TARGET = 1.0e-6
+
+
+def _steady_qvol(config: ResolvedConfig) -> float:
+    """정상 CHT가 사용하는 t=0 발열을 반환한다."""
+
+    return source_from_config(config).qvol(0.0)
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -464,7 +477,7 @@ SIMPLE
     pRefValue 101325;
     residualControl
     {
-        p_rgh 1e-5;
+        p_rgh 1e-6;
         U 1e-6;
         h 1e-7;
         k 1e-6;
@@ -564,7 +577,8 @@ relaxationFactors
 {{
     equations
     {{
-        h 0.9;
+        // Stabilise the partitioned fluid/solid interface fixed-point loop.
+        h 0.3;
     }}
 }}
 '''
@@ -628,6 +642,14 @@ PIMPLE
 {
     nNonOrthogonalCorrectors 1;
 }
+relaxationFactors
+{
+    equations
+    {
+        // Match the fluid-side damping across the CHT interface.
+        h 0.3;
+    }
+}
 '''
 
 
@@ -641,7 +663,13 @@ PIMPLE
     nOuterCorrectors 3;
     energyCoupling
     {
-        maxIter 1;
+        // loopControl uses `iterations`; `maxIter` is a linear-solver key and
+        // does not activate the additional fluid/solid energy loop.
+        iterations 20;
+        convergence
+        {
+            "h" 1e-6;
+        }
     }
 }
 '''
@@ -784,7 +812,7 @@ def _steady_control_dict(*, include_battery_temperatures: bool = True) -> str:
 startFrom startTime;
 startTime 0;
 stopAt endTime;
-endTime 2000;
+endTime 5000;
 deltaT 1;
 writeControl timeStep;
 writeInterval 100;
@@ -1047,7 +1075,7 @@ python3 "$case_dir/tools/validate_steady_cht.py" \
     --log "$run_dir/logs/solver/steady_cht.log" \
     --cold-flow-report "$case_dir/runs/steady_cold_flow/reports/solver/cold_flow_validation.json" \
     --mesh-integral-report "$case_dir/reports/production_mesh/mesh_integrals_pre_split.json" \
-    --qvol {config.battery.heat_source.qvol_w_m3:.12g} \
+    --qvol {_steady_qvol(config):.12g} \
     --coolant-cp {config.fluid.specific_heat_j_kgk:.12g} \
     --initial-temperature {config.boundary.initial_solid_temperature_k:.12g} \
     --output "$run_dir/reports/solver/steady_cht_validation.json"
@@ -1236,7 +1264,7 @@ python3 "$case_dir/tools/validate_steady_cht.py" \
     --log "$log" \
     --cold-flow-report "$case_dir/runs/steady_cold_flow/reports/solver/cold_flow_validation.json" \
     --mesh-integral-report "$case_dir/reports/production_mesh/mesh_integrals_pre_split.json" \
-    --qvol {config.battery.heat_source.qvol_w_m3:.12g} \
+    --qvol {_steady_qvol(config):.12g} \
     --coolant-cp {config.fluid.specific_heat_j_kgk:.12g} \
     --initial-temperature {config.boundary.initial_solid_temperature_k:.12g} \
     --output "$run_dir/reports/solver/steady_cht_validation.json"
@@ -1376,7 +1404,8 @@ python3 "$case_dir/tools/validate_frozen_flow.py" \
     --run-dir "$run_dir" \
     --steady-report "$case_dir/runs/steady_cht/reports/solver/steady_cht_validation.json" \
     --mesh-integral-report "$case_dir/reports/production_mesh/mesh_integrals_pre_split.json" \
-    --qvol {config.battery.heat_source.qvol_w_m3:.12g} \
+    --qvol {_steady_qvol(config):.12g} \
+    --qvol-samples "$case_dir/heat_source_reference/heat_source_samples.csv" \
     --coolant-cp {config.fluid.specific_heat_j_kgk:.12g} \
     --initial-temperature {initial_temperature:.12g} \
     --steady-initial-temperature "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-{initial_temperature:.12g}}}" \
@@ -1565,8 +1594,17 @@ def write_openfoam_solver_bundle(
         config,
         include_battery_temperatures=False
     )
+    dynamic_heat_source = source_from_config(config)
     heat_source_dict = render_openfoam_fvoptions(
-        source_from_config(config), config.solver.energy_field
+        dynamic_heat_source, config.solver.energy_field
+    )
+    # chtMultiRegionSimpleFoam's Time value is an outer-iteration counter, not
+    # physical discharge time. Feeding a transient table to this profile would
+    # therefore ramp q''' as iterations advance. The steady reference must use
+    # the explicitly selected t=0 source; only transient profiles get the table.
+    steady_heat_source_dict = render_openfoam_fvoptions(
+        ConstantVolumetricSource(_steady_qvol(config)),
+        config.solver.energy_field,
     )
     profiles = {
         "steady_cold_flow": {
@@ -1575,7 +1613,7 @@ def write_openfoam_solver_bundle(
         },
         "steady": {
             **steady_profile,
-            "constant/batterySolid/fvOptions": heat_source_dict,
+            "constant/batterySolid/fvOptions": steady_heat_source_dict,
         },
         "frozen_flow": {
             **_solver_profile_files(config, delta_t=1.0, frozen_flow=True),
@@ -1788,7 +1826,10 @@ def write_openfoam_solver_bundle(
         "flow_and_field_diagnostic_function_objects": 7,
         "heat_source_field": config.solver.energy_field,
         "heat_source_mode": config.battery.heat_source.mode,
-        "qvol_W_m3": config.battery.heat_source.qvol_w_m3,
+        "qvol_at_steady_time_zero_W_m3": _steady_qvol(config),
+        "steady_residual_target": STRICT_STEADY_RESIDUAL_TARGET,
+        "steady_maximum_iterations": 5000,
+        "strict_target_is_audited_not_silently_relaxed": True,
         "initial_temperature_K": config.boundary.initial_solid_temperature_k,
         "solver_pilot_ready": False,
         "publication_results_authorized": False,

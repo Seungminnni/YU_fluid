@@ -209,6 +209,43 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertEqual(preset.target_points, 221_878)
         self.assertEqual(SINGLE_MESH_TARGET_COUNTS["total_cells"], 207_390)
 
+    def test_800k_profile_encodes_the_executed_yplus_calibration(self) -> None:
+        preset = MESH_PRESETS["production_800k"]
+        self.assertEqual(preset.target_cells, 800_000)
+        self.assertEqual(preset.background_cell_m, 0.00290)
+        self.assertEqual(preset.first_layer_thickness_m, 12e-6)
+        self.assertEqual(preset.minimum_hexahedron_fraction, 0.90)
+        self.assertEqual(preset.maximum_non_orthogonality, 70.0)
+        self.assertEqual(preset.maximum_skewness, 5.0)
+        self.assertEqual(preset.generation_max_non_orthogonality, 69.5)
+        self.assertEqual(
+            preset.calibration_status,
+            "CALIBRATED_EXECUTED_849284_YPLUS_PASSED",
+        )
+
+    def test_800k_bundle_encodes_numeric_gates_and_no_ai_decision(self) -> None:
+        config = load_config(BASELINE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "production"
+            manifest = write_production_mesh_source_bundle(
+                config,
+                _fake_cad(config, root),
+                output,
+                mesh_level="production_800k",
+            )
+            allmesh = (output / "AllmeshProduction").read_text()
+            self.assertIn("--target-total-cells 800000", allmesh)
+            self.assertIn("--minimum-hexahedron-fraction 0.9", allmesh)
+            self.assertIn("--max-non-orthogonality 70", allmesh)
+            self.assertIn("--max-skewness 5", allmesh)
+            self.assertEqual(
+                manifest["calibration_status"],
+                "CALIBRATED_EXECUTED_849284_YPLUS_PASSED",
+            )
+            self.assertFalse(manifest["automatic_quality_limits"]["ai_decision_allowed"])
+            self.assertTrue((output / "engineering_judgements.json").is_file())
+
     def test_source_bundle_has_exact_23_zone_and_two_region_contract(self) -> None:
         config = load_config(BASELINE)
         with tempfile.TemporaryDirectory() as directory:
@@ -427,6 +464,25 @@ class ProductionMeshTests(unittest.TestCase):
                 output / "profiles" / "steady" / "system" / "batterySolid" / "fvSolution"
             ).read_text()
             self.assertIn("h 0.5;", steady_solid_solution)
+            steady_source = (
+                output
+                / "profiles"
+                / "steady"
+                / "constant"
+                / "batterySolid"
+                / "fvOptions"
+            ).read_text()
+            transient_source = (
+                output
+                / "profiles"
+                / "frozen_flow"
+                / "constant"
+                / "batterySolid"
+                / "fvOptions"
+            ).read_text()
+            self.assertIn("h            (16325 0);", steady_source)
+            self.assertNotIn("explicit table", steady_source)
+            self.assertIn("h            (16325 0);", transient_source)
             self.assertEqual(
                 manifest["solver_source"]["battery_temperature_function_objects"],
                 115,
@@ -511,6 +567,14 @@ class ProductionMeshTests(unittest.TestCase):
                 / "coolant"
                 / "fvSolution"
             ).read_text()
+            transient_solid_solution = (
+                output
+                / "profiles"
+                / "frozen_flow"
+                / "system"
+                / "batterySolid"
+                / "fvSolution"
+            ).read_text()
             half_control = (
                 output
                 / "profiles"
@@ -549,7 +613,12 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("writeInterval 1800;", frozen_control)
             self.assertIn("frozenFlow yes;", frozen_solution)
             self.assertIn("momentumPredictor no;", frozen_solution)
+            self.assertIn("h 0.3;", frozen_solution)
+            self.assertIn("h 0.3;", transient_solid_solution)
             self.assertIn("nOuterCorrectors 3;", transient_root)
+            self.assertIn("iterations 20;", transient_root)
+            self.assertIn('"h" 1e-6;', transient_root)
+            self.assertNotIn("maxIter 1;", transient_root)
             self.assertIn("frozenFlow no;", full_solution)
             self.assertIn("momentumPredictor yes;", full_solution)
             self.assertIn("maxCo 5;", half_control)
@@ -580,6 +649,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("COLD_FLOW_VALIDATION_PASSED", frozen_script)
             self.assertIn("STEADY_CHT_VALIDATION_PASSED", frozen_script)
             self.assertIn("validate_frozen_flow.py", frozen_script)
+            self.assertIn("--qvol-samples", frozen_script)
             self.assertIn("--field-interval 1", frozen_script)
             self.assertIn("extract_transient_residuals.py", full_actual_script)
             self.assertIn("transient_residuals.csv", full_actual_script)
@@ -612,6 +682,41 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertEqual(cold_control.count("type surfaceFieldValue;"), 6)
             self.assertNotIn("type volFieldValue;", cold_control)
             self.assertIn("type fieldMinMax;", cold_control)
+
+    def test_time_dependent_udf_is_constant_in_steady_and_table_in_transient(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "peneklioglu_udf_provisional.yaml",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "production"
+            write_production_mesh_source_bundle(
+                config,
+                _fake_cad(config, root),
+                output,
+                mesh_level="production_800k",
+            )
+            steady_source = (
+                output
+                / "profiles"
+                / "steady"
+                / "constant"
+                / "batterySolid"
+                / "fvOptions"
+            ).read_text()
+            transient_source = (
+                output
+                / "profiles"
+                / "frozen_flow"
+                / "constant"
+                / "batterySolid"
+                / "fvOptions"
+            ).read_text()
+            self.assertIn("h            (71877.2976185 0);", steady_source)
+            self.assertNotIn("explicit table", steady_source)
+            self.assertIn("explicit table", transient_source)
+            self.assertIn("(1800 115445.866039)", transient_source)
 
     def test_aggregate_production_gate_requires_every_exact_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

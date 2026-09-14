@@ -13,6 +13,7 @@ node_modules/
 build/
 dist/
 tmp/
+output/
 
 # Local configuration and generated logs
 .env

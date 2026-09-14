@@ -6,11 +6,30 @@ import unittest
 from pathlib import Path
 
 from cfd_twin.openfoam_cold_flow_validation import validate_cold_flow
-from cfd_twin.openfoam_frozen_flow_validation import validate_frozen_flow
+from cfd_twin.openfoam_frozen_flow_validation import (
+    _qvol_at_time,
+    _read_qvol_samples,
+    validate_frozen_flow,
+)
 from cfd_twin.openfoam_steady_cht_validation import validate_steady_cht
 
 
 class ColdFlowValidationTests(unittest.TestCase):
+    def test_dynamic_heat_source_samples_are_interpolated_in_physical_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            samples = Path(directory) / "heat_source_samples.csv"
+            samples.write_text(
+                "time_s,SOC,q_cell_W,qvol_W_m3\n"
+                "0,1,1,100\n"
+                "10,0.9,2,200\n",
+                encoding="utf-8",
+            )
+            table = _read_qvol_samples(samples)
+            self.assertEqual(_qvol_at_time(-1, table, 50), 100)
+            self.assertEqual(_qvol_at_time(5, table, 50), 150)
+            self.assertEqual(_qvol_at_time(11, table, 50), 200)
+            self.assertEqual(_qvol_at_time(5, [], 50), 50)
+
     def test_compound_gate_requires_residual_mass_pressure_field_and_yplus(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -220,6 +239,49 @@ class ColdFlowValidationTests(unittest.TestCase):
             self.assertEqual(report["time_contract"]["processor_count"], 2)
             self.assertEqual(
                 report["time_contract"]["decomposed_field_frame_count"], 5
+            )
+
+            samples = root / "dynamic_heat_source.csv"
+            samples.write_text(
+                "time_s,qvol_W_m3\n0,1\n10,2\n20,2\n",
+                encoding="utf-8",
+            )
+            dynamic_report = validate_frozen_flow(
+                log,
+                run_dir=run,
+                steady_report_path=steady,
+                mesh_integral_report_path=mesh,
+                qvol_w_m3=1.0,
+                qvol_samples_path=samples,
+                coolant_cp_j_kgk=2.0,
+                initial_temperature_k=300.0,
+                end_time_s=20.0,
+                telemetry_interval_s=1.0,
+                field_interval_s=5.0,
+                final_window_s=10.0,
+            )
+            self.assertEqual(
+                dynamic_report["source"]["steady_reference_semantics"],
+                "instantaneous_upper_bound_while_source_is_ramping",
+            )
+            self.assertIn(
+                "storage",
+                dynamic_report["source"]["transient_energy_gap_semantics"],
+            )
+            self.assertTrue(
+                dynamic_report["final_summary"][
+                    "energy_gap_includes_transient_storage"
+                ]
+            )
+            self.assertTrue(
+                dynamic_report["checks"][
+                    "dynamic_final_tavg_below_instantaneous_steady_upper_bound"
+                ]
+            )
+            self.assertTrue(
+                dynamic_report["checks"][
+                    "dynamic_final_tmax_below_instantaneous_steady_upper_bound"
+                ]
             )
 
 

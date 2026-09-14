@@ -16,12 +16,14 @@ from pathlib import Path
 try:
     from .openfoam_cold_flow_validation import (
         DEFAULT_RESIDUAL_FLOORS,
+        STRICT_RESIDUAL_TARGET,
         _residual_maxima,
         parse_cold_flow_log,
     )
 except ImportError:  # Standalone copy inside a generated OpenFOAM case.
     from validate_cold_flow import (
         DEFAULT_RESIDUAL_FLOORS,
+        STRICT_RESIDUAL_TARGET,
         _residual_maxima,
         parse_cold_flow_log,
     )
@@ -66,6 +68,10 @@ def validate_steady_cht(
     residual_checks = {
         name: name in final_residuals and final_residuals[name] <= limit
         for name, limit in floors.items()
+    }
+    strict_residual_checks = {
+        name: value <= STRICT_RESIDUAL_TARGET
+        for name, value in final_residuals.items()
     }
 
     monitor_rows = []
@@ -191,6 +197,13 @@ def validate_steady_cht(
         "residual_floors": floors,
         "final_initial_residual_maxima": final_residuals,
         "residual_checks": residual_checks,
+        "strict_residual_audit": {
+            "target": STRICT_RESIDUAL_TARGET,
+            "all_reported_equations_at_or_below_target": bool(strict_residual_checks)
+            and all(strict_residual_checks.values()),
+            "checks": strict_residual_checks,
+            "policy": "record exactly; compound physics gates remain separately visible",
+        },
         "monitor_summary": {
             "sample_count": len(monitor_rows),
             "maximum_mass_imbalance_fraction": mass_max,

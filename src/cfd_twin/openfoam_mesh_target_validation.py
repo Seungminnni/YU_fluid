@@ -46,6 +46,14 @@ def validate_mesh_target(
     component_tolerance_fraction: float = 0.20,
     minimum_hexahedron_fraction: float = 0.80,
 ) -> dict[str, object]:
+    if target_total_cells <= 0:
+        raise ValueError("target total cells must be positive")
+    if not 0 <= total_tolerance_fraction < 1:
+        raise ValueError("total tolerance fraction must be in [0, 1)")
+    if not 0 <= component_tolerance_fraction < 1:
+        raise ValueError("component tolerance fraction must be in [0, 1)")
+    if not 0 < minimum_hexahedron_fraction <= 1:
+        raise ValueError("minimum hexahedron fraction must be in (0, 1]")
     zone_report = json.loads(Path(zone_report_path).read_text(encoding="utf-8"))
     if zone_report.get("status") != "CELLZONE_VALIDATION_PASSED":
         raise ValueError("cell-zone report has not passed")
@@ -78,19 +86,19 @@ def validate_mesh_target(
         "points": target_points,
     }
     checks = {
-        "total_cell_count_within_10_percent": _within(
+        "total_cell_count_within_configured_tolerance": _within(
             total_cells, target_total_cells, total_tolerance_fraction
         ),
-        "solid_cell_count_within_20_percent_if_targeted": _within(
+        "solid_cell_count_within_configured_tolerance_if_targeted": _within(
             solid_cells, target_solid_cells, component_tolerance_fraction
         ),
-        "fluid_cell_count_within_20_percent_if_targeted": _within(
+        "fluid_cell_count_within_configured_tolerance_if_targeted": _within(
             fluid_cells, target_fluid_cells, component_tolerance_fraction
         ),
-        "point_count_within_20_percent_if_targeted": _within(
+        "point_count_within_configured_tolerance_if_targeted": _within(
             topology["points"], target_points, component_tolerance_fraction
         ),
-        "hexahedron_fraction_at_least_80_percent": (
+        "hexahedron_fraction_at_least_configured_minimum": (
             hexahedron_fraction >= minimum_hexahedron_fraction
         ),
     }
@@ -127,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-solid-cells", type=int)
     parser.add_argument("--target-fluid-cells", type=int)
     parser.add_argument("--target-points", type=int)
+    parser.add_argument("--total-tolerance-fraction", type=float, default=0.10)
+    parser.add_argument("--component-tolerance-fraction", type=float, default=0.20)
+    parser.add_argument("--minimum-hexahedron-fraction", type=float, default=0.80)
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     try:
@@ -137,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
             target_solid_cells=args.target_solid_cells,
             target_fluid_cells=args.target_fluid_cells,
             target_points=args.target_points,
+            total_tolerance_fraction=args.total_tolerance_fraction,
+            component_tolerance_fraction=args.component_tolerance_fraction,
+            minimum_hexahedron_fraction=args.minimum_hexahedron_fraction,
         )
     except (OSError, UnicodeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         report = {

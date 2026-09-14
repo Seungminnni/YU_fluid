@@ -2,12 +2,15 @@
 
 유동장은 검증된 정상 U/p/k/omega를 유지하지만 유체·고체 에너지는 매 시간
 계면에서 결합된다. 1초 telemetry, 온도장 저장, 질량·에너지수지, 단조 가열,
-정상 CHT 종점 일치를 모두 확인한 뒤에만 UI 생성을 허용한다.
+상수 열원은 정상 CHT 종점 일치를 확인한다. 계속 증가하는 시간 의존 열원은
+그 순간의 정상해에 도달하는 것이 물리적으로 불가능하므로, 정상해를 온도
+상한으로만 사용하고 질량·에너지수지와 단조 과도응답을 확인한다.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -17,6 +20,44 @@ try:
     from .openfoam_cold_flow_validation import parse_cold_flow_log
 except ImportError:  # Standalone copy inside a generated OpenFOAM case.
     from validate_cold_flow import parse_cold_flow_log
+
+
+def _read_qvol_samples(path: str | Path | None) -> list[tuple[float, float]]:
+    """Read the same physical-time heat-source table consumed by fvOptions."""
+
+    if path is None:
+        return []
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        rows = [
+            (float(row["time_s"]), float(row["qvol_W_m3"]))
+            for row in csv.DictReader(handle)
+        ]
+    if not rows or any(not all(math.isfinite(value) for value in row) for row in rows):
+        raise ValueError("heat-source samples must contain finite time_s and qvol_W_m3")
+    rows.sort()
+    if any(right[0] <= left[0] for left, right in zip(rows, rows[1:])):
+        raise ValueError("heat-source sample times must be strictly increasing")
+    if any(qvol <= 0 for _, qvol in rows):
+        raise ValueError("heat-source qvol samples must be positive")
+    return rows
+
+
+def _qvol_at_time(
+    time_s: float, samples: list[tuple[float, float]], fallback_qvol: float
+) -> float:
+    if not samples:
+        return fallback_qvol
+    if time_s <= samples[0][0]:
+        return samples[0][1]
+    if time_s >= samples[-1][0]:
+        return samples[-1][1]
+    for (left_time, left_qvol), (right_time, right_qvol) in zip(
+        samples, samples[1:]
+    ):
+        if time_s <= right_time:
+            fraction = (time_s - left_time) / (right_time - left_time)
+            return left_qvol + fraction * (right_qvol - left_qvol)
+    raise AssertionError("unreachable heat-source interpolation branch")
 
 
 def _numeric_time_directories(run_dir: Path) -> dict[float, Path]:
@@ -107,6 +148,7 @@ def validate_frozen_flow(
     steady_report_path: str | Path,
     mesh_integral_report_path: str | Path,
     qvol_w_m3: float,
+    qvol_samples_path: str | Path | None = None,
     coolant_cp_j_kgk: float,
     initial_temperature_k: float,
     steady_initial_temperature_k: float | None = None,
@@ -128,8 +170,9 @@ def validate_frozen_flow(
         Path(mesh_integral_report_path).read_text(encoding="utf-8")
     )
     battery_volume = float(mesh_report["actual"]["battery_total_volume_m3"])
+    qvol_samples = _read_qvol_samples(qvol_samples_path)
     # 정상 CHT와 동일하게 목표 CAD 체적이 아닌 실제 메시 고체체적을 사용한다.
-    heat_power = qvol_w_m3 * battery_volume
+    steady_heat_power = qvol_w_m3 * battery_volume
 
     telemetry_rows = []
     for time in times:
@@ -157,13 +200,20 @@ def validate_frozen_flow(
             * through_flow
             * (temperatures["outlet"] - temperatures["inlet"])
         )
+        current_qvol = _qvol_at_time(time, qvol_samples, qvol_w_m3)
+        current_heat_power = current_qvol * battery_volume
         telemetry_rows.append(
             {
                 "time_s": time,
                 "mass_imbalance_fraction": mass_imbalance,
                 "coolant_net_enthalpy_out_w": enthalpy_out,
-                "energy_imbalance_fraction": abs(enthalpy_out - heat_power)
-                / heat_power,
+                "qvol_w_m3": current_qvol,
+                "mesh_integrated_heat_power_w": current_heat_power,
+                # In a transient run q_source - Q_out also contains dE_stored/dt.
+                # Retain the legacy key for the viewer/result contract, but state
+                # its semantics explicitly in the report below.
+                "energy_imbalance_fraction": abs(enthalpy_out - current_heat_power)
+                / current_heat_power,
                 "battery_tavg_k": sum(
                     item["average"] for item in batteries.values()
                 )
@@ -211,19 +261,33 @@ def validate_frozen_flow(
     steady_summary = steady_report.get("monitor_summary", {})
     steady_tavg = steady_summary.get("final_battery_tavg_k")
     steady_tmax = steady_summary.get("final_battery_tmax_k")
+    final_qvol = (
+        _qvol_at_time(final_time, qvol_samples, qvol_w_m3)
+        if final_time is not None
+        else qvol_w_m3
+    )
+    source_ratio = final_qvol / qvol_w_m3
+    source_is_time_varying = bool(qvol_samples) and any(
+        abs(sample_qvol - qvol_samples[0][1]) > 1e-12
+        for _, sample_qvol in qvol_samples[1:]
+    )
+    # With the configured constant properties and zero gravity, the steady
+    # temperature rise is linear in source power.  Scale the t=0 steady
+    # reference to the final table value instead of comparing a dynamic-source
+    # run against the wrong t=0 power.
     expected_tavg = (
         None
         if steady_tavg is None
-        else float(steady_tavg)
-        - float(steady_initial_temperature_k)
-        + initial_temperature_k
+        else initial_temperature_k
+        + (float(steady_tavg) - float(steady_initial_temperature_k))
+        * source_ratio
     )
     expected_tmax = (
         None
         if steady_tmax is None
-        else float(steady_tmax)
-        - float(steady_initial_temperature_k)
-        + initial_temperature_k
+        else initial_temperature_k
+        + (float(steady_tmax) - float(steady_initial_temperature_k))
+        * source_ratio
     )
     final_tavg = tavg_series[-1] if tavg_series else None
     final_tmax = tmax_series[-1] if tmax_series else None
@@ -232,7 +296,30 @@ def validate_frozen_flow(
         if len(tavg_series) >= 2
         else None
     )
-    # 최종온도가 정상 CHT와 0.01 K 이내여야 1,800 s가 열평형에 도달했다고 본다.
+    # A constant-source transient should reach its matching steady solution.
+    # A monotonically increasing source cannot be at the *instantaneous* final
+    # steady solution while the source is still ramping.  In that case the
+    # scaled steady result is a causal upper bound, not an equality target.
+    steady_match_tolerance_k = 0.01
+    steady_upper_bound_roundoff_k = 0.001
+    tavg_steady_check = (
+        final_tavg is not None
+        and expected_tavg is not None
+        and (
+            final_tavg <= expected_tavg + steady_upper_bound_roundoff_k
+            if source_is_time_varying
+            else abs(final_tavg - expected_tavg) < steady_match_tolerance_k
+        )
+    )
+    tmax_steady_check = (
+        final_tmax is not None
+        and expected_tmax is not None
+        and (
+            final_tmax <= expected_tmax + steady_upper_bound_roundoff_k
+            if source_is_time_varying
+            else abs(final_tmax - expected_tmax) < steady_match_tolerance_k
+        )
+    )
     checks = {
         "solver_clean_end": parsed["clean_end"] and not parsed["fatal_error"],
         "steady_cht_compound_gate_passed": steady_report.get("status")
@@ -254,12 +341,16 @@ def validate_frozen_flow(
         and minimum_tavg_step >= -1e-6,
         "battery_temperature_rises_above_initial": final_tmax is not None
         and final_tmax > initial_temperature_k,
-        "final_tavg_matches_steady_within_0p01_k": final_tavg is not None
-        and expected_tavg is not None
-        and abs(final_tavg - expected_tavg) < 0.01,
-        "final_tmax_matches_steady_within_0p01_k": final_tmax is not None
-        and expected_tmax is not None
-        and abs(final_tmax - expected_tmax) < 0.01,
+        (
+            "dynamic_final_tavg_below_instantaneous_steady_upper_bound"
+            if source_is_time_varying
+            else "constant_source_final_tavg_matches_steady_within_0p01_k"
+        ): tavg_steady_check,
+        (
+            "dynamic_final_tmax_below_instantaneous_steady_upper_bound"
+            if source_is_time_varying
+            else "constant_source_final_tmax_matches_steady_within_0p01_k"
+        ): tmax_steady_check,
         "final_fields_finite": finite_fields,
         "final_turbulence_fields_nonnegative": nonnegative_turbulence,
     }
@@ -275,13 +366,31 @@ def validate_frozen_flow(
         "publication_results_authorized": False,
         "runnable_figure_generation_pilot": passed,
         "source": {
-            "qvol_w_m3": qvol_w_m3,
+            "time_varying": source_is_time_varying,
+            "steady_qvol_w_m3": qvol_w_m3,
+            "final_qvol_w_m3": final_qvol,
+            "final_to_steady_source_ratio": source_ratio,
+            "qvol_samples_path": (
+                None
+                if qvol_samples_path is None
+                else str(Path(qvol_samples_path).resolve())
+            ),
             "mesh_integrated_battery_volume_m3": battery_volume,
-            "mesh_integrated_heat_power_w": heat_power,
+            "steady_mesh_integrated_heat_power_w": steady_heat_power,
+            "final_mesh_integrated_heat_power_w": final_qvol * battery_volume,
             "coolant_cp_j_kgk": coolant_cp_j_kgk,
             "initial_temperature_k": initial_temperature_k,
             "steady_initial_temperature_k": steady_initial_temperature_k,
             "steady_report": str(Path(steady_report_path).resolve()),
+            "steady_reference_semantics": (
+                "instantaneous_upper_bound_while_source_is_ramping"
+                if source_is_time_varying
+                else "constant_source_equilibrium_target"
+            ),
+            "transient_energy_gap_semantics": (
+                "abs(Q_source-Q_coolant_out)/Q_source; includes fluid/solid "
+                "storage and is not a pure numerical conservation residual"
+            ),
         },
         "time_contract": {
             "end_time_s": end_time_s,
@@ -324,6 +433,7 @@ def validate_frozen_flow(
                 sum(energy) / len(energy) if energy else None
             ),
             "maximum_energy_imbalance_fraction": max(energy) if energy else None,
+            "energy_gap_includes_transient_storage": True,
         },
         "final_window_rows": final_rows,
         "final_field_bounds": latest_bounds,
@@ -337,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--steady-report", required=True)
     parser.add_argument("--mesh-integral-report", required=True)
     parser.add_argument("--qvol", required=True, type=float)
+    parser.add_argument("--qvol-samples")
     parser.add_argument("--coolant-cp", required=True, type=float)
     parser.add_argument("--initial-temperature", required=True, type=float)
     parser.add_argument("--steady-initial-temperature", type=float)
@@ -350,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
             steady_report_path=args.steady_report,
             mesh_integral_report_path=args.mesh_integral_report,
             qvol_w_m3=args.qvol,
+            qvol_samples_path=args.qvol_samples,
             coolant_cp_j_kgk=args.coolant_cp,
             initial_temperature_k=args.initial_temperature,
             steady_initial_temperature_k=args.steady_initial_temperature,

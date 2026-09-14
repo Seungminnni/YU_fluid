@@ -10,6 +10,7 @@ from cfd_twin.heat_source import (
     ConstantVolumetricSource,
     ElectricalJouleSource,
     LinearSeries,
+    PenekliogluExpandedFirstOrderSource,
     TableVolumetricSource,
     render_fluent_udf,
     render_openfoam_fvoptions,
@@ -74,6 +75,42 @@ class HeatSourceTests(unittest.TestCase):
         self.assertEqual(source.mode, "electrical_joule")
         self.assertGreater(source.qvol(0.0), 0.0)
         self.assertEqual(source.manifest()["paper_equivalence"], "joule_surrogate_not_original_udf")
+
+    def test_published_first_order_correlation_is_explicitly_provisional(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "peneklioglu_udf_provisional.yaml",),
+        )
+        source = source_from_config(config)
+        self.assertIsInstance(source, PenekliogluExpandedFirstOrderSource)
+        self.assertAlmostEqual(source.qcell(0.0), 1.385791, places=6)
+        self.assertAlmostEqual(source.qcell(1800.0), 2.225791, places=6)
+        self.assertAlmostEqual(source.soc(900.0), 0.5)
+        self.assertAlmostEqual(
+            config.derived.cell_heat_w,
+            source.qcell(0.0),
+        )
+        self.assertEqual(
+            source.manifest()["final_fourth_order_udf_status"],
+            "BLOCKED_FULL_PRECISION_COEFFICIENTS_OR_ORIGINAL_UDF_REQUIRED",
+        )
+
+    def test_provisional_bundle_records_formula_samples_and_judgements(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "peneklioglu_udf_provisional.yaml",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            manifest = write_heat_source_bundle(config, output)
+            self.assertEqual(manifest["status"], "PROVISIONAL_OPT_IN")
+            self.assertFalse(manifest["final_fourth_order_udf_applied"])
+            self.assertTrue((output / "heat_source_samples.csv").is_file())
+            self.assertTrue((output / "engineering_judgements.json").is_file())
+            self.assertIn(
+                "PROFILE_COUNT 2",
+                (output / "Fluent" / "battery_heat_source.c").read_text(),
+            )
 
 
 if __name__ == "__main__":

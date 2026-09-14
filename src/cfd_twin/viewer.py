@@ -3530,10 +3530,6 @@ function paintConvergenceChart(context,width,height){
     context.fillStyle="#91a8bc";context.textAlign="right";context.fillText(`1e${exponent}`,left-10,y+4);
   }
   for(const line of series){
-    if(Number.isFinite(line.configured_gate)&&line.configured_gate>0){
-      const y=top+(logHigh-Math.log10(line.configured_gate))/logSpan*plotHeight;
-      if(y>=top&&y<=top+plotHeight){context.save();context.setLineDash([4,5]);context.globalAlpha=.32;context.strokeStyle=line.colour;context.beginPath();context.moveTo(left,y);context.lineTo(left+plotWidth,y);context.stroke();context.restore();}
-    }
     context.strokeStyle=line.colour;context.lineWidth=1.45;context.globalAlpha=.9;context.beginPath();
     line.points.forEach((point,index)=>{
       const x=left+(point[0]-first)/span*plotWidth,y=top+(logHigh-Math.log10(Math.max(point[1],Number.MIN_VALUE)))/logSpan*plotHeight;

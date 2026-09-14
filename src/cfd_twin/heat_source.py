@@ -1,8 +1,9 @@
 """배터리 체적발열 q'''(t)를 정의하고 OpenFOAM/Fluent 입력으로 변환한다.
 
-현재 기준 계산은 MDPI baseline의 상수 16,325 W/m^3를 사용한다. 시간표와
-I(t)^2 R(t)/Vcell 모드는 확장용 대체모델이며 공개되지 않은 논문 원본 UDF로
-간주하지 않는다.
+현재 기준 계산은 기존 baseline의 상수 16,325 W/m^3를 사용한다. 시간표와
+I(t)^2 R(t)/Vcell 모드는 확장용 대체모델이다. 보유 논문에 숫자로 명시된
+1차 상관식은 opt-in provisional UDF로 만들 수 있지만, 공개되지 않은 최종
+4차 UDF와 같다고 간주하지 않는다.
 """
 
 from __future__ import annotations
@@ -16,7 +17,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
 
+from .battery_correlation import (
+    PENEKLIOGLU_FIRST_ORDER_COEFFICIENTS,
+    PENEKLIOGLU_TRAINING_OUTPUT_MINIMUM_W,
+    discharge_soc,
+    peneklioglu_expanded_first_order_q_w,
+)
 from .config import ResolvedConfig
+from .engineering_judgement import write_engineering_judgements
 from .errors import ProfileError
 
 
@@ -189,6 +197,92 @@ class ElectricalJouleSource:
         }
 
 
+@dataclass(frozen=True)
+class PenekliogluExpandedFirstOrderSource:
+    """보유 논문 식 (4.1)을 시간/SOC 발열원으로 변환한 임시 모델이다.
+
+    ``q = 1.086 D - 0.84 S - 0.01486 T + 4.41`` [W/cell]과
+    ``S=S0-Dt/3600``을 사용한다. 여기의 T는 명시적으로 고정한 기준온도이며
+    국부 셀 온도의 되먹임이 아니다.
+    """
+
+    c_rate: float
+    initial_soc: float
+    reference_temperature_k: float
+    cell_volume_m3: float
+    outside_policy: str = "error"
+    mode: str = "peneklioglu_expanded_first_order"
+
+    def __post_init__(self) -> None:
+        if self.cell_volume_m3 <= 0 or not math.isfinite(self.cell_volume_m3):
+            raise ProfileError("cell volume must be finite and positive")
+        if self.outside_policy not in {"hold", "error"}:
+            raise ProfileError("outside_policy must be hold or error")
+        # Pure functions perform all paper-domain checks. Both endpoints must
+        # also remain inside the q>0.5 W subset used to fit equation (4.1).
+        endpoint_heat = (
+            peneklioglu_expanded_first_order_q_w(
+                self.c_rate, self.initial_soc, self.reference_temperature_k
+            ),
+            peneklioglu_expanded_first_order_q_w(
+                self.c_rate, 0.0, self.reference_temperature_k
+            ),
+        )
+        if min(endpoint_heat) < PENEKLIOGLU_TRAINING_OUTPUT_MINIMUM_W:
+            raise ProfileError(
+                "equation (4.1) may only be used where predicted q is at least 0.5 W/cell"
+            )
+
+    @property
+    def discharge_end_s(self) -> float:
+        return self.initial_soc * 3600.0 / self.c_rate
+
+    def soc(self, time_s: float) -> float:
+        return discharge_soc(
+            time_s,
+            c_rate=self.c_rate,
+            initial_soc=self.initial_soc,
+            outside_policy=self.outside_policy,
+        )
+
+    def qcell(self, time_s: float) -> float:
+        return peneklioglu_expanded_first_order_q_w(
+            self.c_rate, self.soc(time_s), self.reference_temperature_k
+        )
+
+    def qvol(self, time_s: float) -> float:
+        return self.qcell(time_s) / self.cell_volume_m3
+
+    def breakpoints(self) -> tuple[float, ...]:
+        # q is linear in SOC and SOC is linear in time. Two endpoints therefore
+        # reproduce the published first-order equation exactly between them.
+        return (0.0, self.discharge_end_s)
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "status": "PROVISIONAL_OPT_IN",
+            "formula_W_per_cell": "q=1.086*D-0.84*SOC-0.01486*T_ref+4.41",
+            "soc_formula": "SOC(t)=SOC0-D*t/3600",
+            "coefficients": PENEKLIOGLU_FIRST_ORDER_COEFFICIENTS,
+            "c_rate": self.c_rate,
+            "initial_soc": self.initial_soc,
+            "reference_temperature_K": self.reference_temperature_k,
+            "temperature_semantics": "fixed_reference_not_local_cell_feedback",
+            "discharge_end_s": self.discharge_end_s,
+            "q_cell_W": {
+                "at_0_s": self.qcell(0.0),
+                "at_discharge_end": self.qcell(self.discharge_end_s),
+            },
+            "qvol_W_m3": {
+                "at_0_s": self.qvol(0.0),
+                "at_discharge_end": self.qvol(self.discharge_end_s),
+            },
+            "paper_equivalence": "published_equation_4_1_only_not_final_fourth_order_udf",
+            "final_fourth_order_udf_status": "BLOCKED_FULL_PRECISION_COEFFICIENTS_OR_ORIGINAL_UDF_REQUIRED",
+        }
+
+
 def _resolve_profile(config: ResolvedConfig, value: str) -> Path:
     candidate = Path(value)
     if not candidate.is_absolute():
@@ -211,6 +305,16 @@ def source_from_config(config: ResolvedConfig) -> HeatSource:
                 value_column="qvol_W_m3",
                 outside_policy=spec.outside_policy,
             )
+        )
+    if spec.mode == "peneklioglu_expanded_first_order":
+        assert spec.initial_soc is not None
+        assert spec.reference_temperature_k is not None
+        return PenekliogluExpandedFirstOrderSource(
+            c_rate=config.battery.electrical.discharge_rate_c,
+            initial_soc=spec.initial_soc,
+            reference_temperature_k=spec.reference_temperature_k,
+            cell_volume_m3=config.derived.cell_volume_m3,
+            outside_policy=spec.outside_policy,
         )
     assert spec.current_profile_path is not None
     assert spec.resistance_profile_path is not None
@@ -264,7 +368,7 @@ def render_openfoam_fvoptions(source: HeatSource, energy_field: str) -> str:
 }}
 
 // Generated by cfd-twin. qvol units are W/m3.
-// Dynamic modes are user-supplied surrogates, not the unpublished paper UDF.
+// Dynamic modes are explicit generated models, not the unpublished final paper UDF.
 batteryHeatSource
 {{
     type            scalarSemiImplicitSource;
@@ -350,6 +454,7 @@ def write_heat_source_bundle(
         "equivalent_resistance_Ohm": config.derived.equivalent_resistance_ohm,
         "equivalent_resistance_status": "derived_not_measured",
         "original_paper_udf_available": False,
+        "final_fourth_order_udf_applied": False,
     }
     _atomic_write(
         output / "heat_source_manifest.json",
@@ -360,4 +465,22 @@ def write_heat_source_bundle(
         render_openfoam_fvoptions(source, config.solver.energy_field),
     )
     _atomic_write(output / "Fluent" / "battery_heat_source.c", render_fluent_udf(source))
+    write_engineering_judgements(output / "engineering_judgements.json")
+    if isinstance(source, PenekliogluExpandedFirstOrderSource):
+        sample_times = sorted(
+            set(
+                [0.0, source.discharge_end_s]
+                + [
+                    float(time_s)
+                    for time_s in range(0, int(source.discharge_end_s) + 1, 60)
+                ]
+            )
+        )
+        rows = ["time_s,SOC,q_cell_W,qvol_W_m3"]
+        rows.extend(
+            f"{time_s:.12g},{source.soc(time_s):.12g},"
+            f"{source.qcell(time_s):.12g},{source.qvol(time_s):.12g}"
+            for time_s in sample_times
+        )
+        _atomic_write(output / "heat_source_samples.csv", "\n".join(rows) + "\n")
     return manifest

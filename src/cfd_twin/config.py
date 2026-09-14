@@ -16,6 +16,12 @@ from typing import Any
 
 import yaml
 
+from .battery_correlation import (
+    PENEKLIOGLU_C_RATE_RANGE,
+    PENEKLIOGLU_SOC_RANGE,
+    PENEKLIOGLU_TEMPERATURE_RANGE_K,
+    peneklioglu_expanded_first_order_q_w,
+)
 from .errors import ConfigError
 from .units import positive, quantity
 
@@ -125,6 +131,9 @@ class HeatSourceSpec:
     current_profile_path: str | None
     resistance_profile_path: str | None
     outside_policy: str
+    initial_soc: float | None
+    reference_temperature_k: float | None
+    correlation: str | None
 
 
 @dataclass(frozen=True)
@@ -229,13 +238,21 @@ class ResolvedConfig:
 
 def _parse_heat_source(data: dict[str, Any]) -> HeatSourceSpec:
     mode = str(_required(data, "mode", "battery.heat_source"))
-    allowed = {"constant_qvol", "table_qvol", "electrical_joule"}
+    allowed = {
+        "constant_qvol",
+        "table_qvol",
+        "electrical_joule",
+        "peneklioglu_expanded_first_order",
+    }
     if mode not in allowed:
         raise ConfigError(f"battery.heat_source.mode: expected one of {sorted(allowed)}")
     qvol = None
     table_path = None
     current_path = None
     resistance_path = None
+    initial_soc = None
+    reference_temperature_k = None
+    correlation = None
     outside = str(data.get("outside_policy", "hold"))
     if outside not in {"hold", "error"}:
         raise ConfigError("battery.heat_source.outside_policy: expected hold or error")
@@ -246,10 +263,47 @@ def _parse_heat_source(data: dict[str, Any]) -> HeatSourceSpec:
         )
     elif mode == "table_qvol":
         table_path = str(_required(data, "table_path", "battery.heat_source"))
-    else:
+    elif mode == "electrical_joule":
         current_path = str(_required(data, "current_profile_path", "battery.heat_source"))
         resistance_path = str(_required(data, "resistance_profile_path", "battery.heat_source"))
-    return HeatSourceSpec(mode, qvol, table_path, current_path, resistance_path, outside)
+    else:
+        correlation = str(_required(data, "correlation", "battery.heat_source"))
+        if correlation != "expanded_first_order_q_gt_0p5":
+            raise ConfigError(
+                "battery.heat_source.correlation: only "
+                "expanded_first_order_q_gt_0p5 is reproducible from the supplied PDF"
+            )
+        initial_soc = float(_required(data, "initial_soc", "battery.heat_source"))
+        reference_temperature_k = positive(
+            quantity(
+                _required(data, "reference_temperature", "battery.heat_source"),
+                "temperature",
+                "battery.heat_source.reference_temperature",
+            ),
+            "battery.heat_source.reference_temperature",
+        )
+        if not PENEKLIOGLU_SOC_RANGE[0] <= initial_soc <= PENEKLIOGLU_SOC_RANGE[1]:
+            raise ConfigError("battery.heat_source.initial_soc: expected value in [0, 1]")
+        if not (
+            PENEKLIOGLU_TEMPERATURE_RANGE_K[0]
+            <= reference_temperature_k
+            <= PENEKLIOGLU_TEMPERATURE_RANGE_K[1]
+        ):
+            raise ConfigError(
+                "battery.heat_source.reference_temperature: paper range is "
+                "293.15 to 303.15 K"
+            )
+    return HeatSourceSpec(
+        mode,
+        qvol,
+        table_path,
+        current_path,
+        resistance_path,
+        outside,
+        initial_soc,
+        reference_temperature_k,
+        correlation,
+    )
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:
@@ -443,6 +497,16 @@ def load_config(
         capacity_ah=positive(quantity(_required(electrical_raw, "capacity", "battery.electrical_metadata"), "capacity", "battery.electrical_metadata.capacity"), "battery.electrical_metadata.capacity"),
         discharge_rate_c=positive(float(_required(electrical_raw, "discharge_rate_c", "battery.electrical_metadata")), "battery.electrical_metadata.discharge_rate_c"),
     )
+    if (
+        str(_mapping(_required(battery_raw, "heat_source", "battery"), "battery.heat_source").get("mode"))
+        == "peneklioglu_expanded_first_order"
+        and not PENEKLIOGLU_C_RATE_RANGE[0]
+        <= electrical.discharge_rate_c
+        <= PENEKLIOGLU_C_RATE_RANGE[1]
+    ):
+        raise ConfigError(
+            "battery.electrical_metadata.discharge_rate_c: paper correlation range is [0.5, 2.0]"
+        )
     battery = Battery(
         density_kg_m3=positive(quantity(_required(battery_raw, "density", "battery"), "density", "battery.density"), "battery.density"),
         specific_heat_j_kgk=positive(quantity(_required(battery_raw, "specific_heat", "battery"), "specific_heat", "battery.specific_heat"), "battery.specific_heat"),
@@ -497,7 +561,21 @@ def load_config(
     # 난류 입구값은 I=난류강도와 길이척도 l=0.07D에서 k와 omega를 만든다.
     radius = cells.diameter_m / 2
     cell_volume = math.pi * radius**2 * cells.length_m
-    qvol = battery.heat_source.qvol_w_m3 if battery.heat_source.qvol_w_m3 is not None else 16325.0
+    if battery.heat_source.mode == "peneklioglu_expanded_first_order":
+        assert battery.heat_source.initial_soc is not None
+        assert battery.heat_source.reference_temperature_k is not None
+        qcell = peneklioglu_expanded_first_order_q_w(
+            electrical.discharge_rate_c,
+            battery.heat_source.initial_soc,
+            battery.heat_source.reference_temperature_k,
+        )
+        qvol = qcell / cell_volume
+    else:
+        qvol = (
+            battery.heat_source.qvol_w_m3
+            if battery.heat_source.qvol_w_m3 is not None
+            else 16325.0
+        )
     cell_heat = qvol * cell_volume
     inlet_area = math.pi * ports.inlet_diameter_m**2 / 4
     volume_flow = inlet_area * boundary.inlet_velocity_m_s

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ResolvedConfig
+from .engineering_judgement import write_engineering_judgements
 from .errors import CfdTwinError
 from .geometry import cell_placements
 from .openfoam_case import write_openfoam_solver_bundle
@@ -27,7 +28,7 @@ EXPECTED_BATTERY_FILES = tuple(
     f"battery_C{index:02d}.stl" for index in range(1, 24)
 )
 DEFAULT_MESH_PROFILE = "single"
-SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE,)
+SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE, "production_800k")
 DEFAULT_MPI_RANKS = 10
 DEFAULT_MESH_MPI_RANKS = 1
 # 10은 요청 layer 수다. snappyHexMesh가 품질을 위해 국부적으로 층을
@@ -61,6 +62,13 @@ class MeshPreset:
     target_solid_cells: int | None = None
     target_fluid_cells: int | None = None
     target_points: int | None = None
+    total_tolerance_fraction: float = 0.10
+    component_tolerance_fraction: float = 0.20
+    minimum_hexahedron_fraction: float = 0.80
+    maximum_non_orthogonality: float = 75.0
+    maximum_skewness: float = 20.0
+    generation_max_non_orthogonality: float | None = None
+    calibration_status: str = "CALIBRATED"
 
 
 MESH_PRESETS = {
@@ -69,15 +77,32 @@ MESH_PRESETS = {
     # retain the solid resolution in the supplied 207,390-cell reference.  The
     # mesh must still pass the generated count/composition gate after execution.
     "single": MeshPreset(
-        SINGLE_MESH_TARGET_COUNTS["total_cells"],
-        0.0050,
-        0,
-        1,
-        1,
-        14e-6,
-        SINGLE_MESH_TARGET_COUNTS["solid_cells"],
-        SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
-        SINGLE_MESH_TARGET_COUNTS["points"],
+        target_cells=SINGLE_MESH_TARGET_COUNTS["total_cells"],
+        background_cell_m=0.0050,
+        surface_min_level=0,
+        surface_max_level=1,
+        battery_inside_level=1,
+        first_layer_thickness_m=14e-6,
+        target_solid_cells=SINGLE_MESH_TARGET_COUNTS["solid_cells"],
+        target_fluid_cells=SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
+        target_points=SINGLE_MESH_TARGET_COUNTS["points"],
+    ),
+    # Professor-requested ~800k mesh. The fourth 2.90 mm / 12 um attempt passed
+    # count, topology, quality and cold-flow gates with 849,284 cells, 90.223%
+    # hexahedra and 96.218% of battery area below y+=1. Runtime acceptance still
+    # comes from generated reports, never from this label or AI image review.
+    "production_800k": MeshPreset(
+        target_cells=800_000,
+        background_cell_m=0.00290,
+        surface_min_level=0,
+        surface_max_level=1,
+        battery_inside_level=1,
+        first_layer_thickness_m=12e-6,
+        minimum_hexahedron_fraction=0.90,
+        maximum_non_orthogonality=70.0,
+        maximum_skewness=5.0,
+        generation_max_non_orthogonality=69.5,
+        calibration_status="CALIBRATED_EXECUTED_849284_YPLUS_PASSED",
     ),
 }
 
@@ -111,15 +136,15 @@ roots ();
 '''
 
 
-def _mesh_quality_dict() -> str:
-    return _foam_header("meshQualityDict") + '''#includeEtc "caseDicts/meshQualityDict"
+def _mesh_quality_dict(preset: MeshPreset) -> str:
+    return _foam_header("meshQualityDict") + f'''#includeEtc "caseDicts/meshQualityDict"
 
 // These are the same acceptance limits used during snappy layer insertion.
 // In particular, a split CHT interface is a boundary face and is therefore
 // governed by maxBoundarySkewness, not the generic checkMesh warning at 4.
-maxNonOrtho 75;
-maxBoundarySkewness 20;
-maxInternalSkewness 4;
+maxNonOrtho {preset.maximum_non_orthogonality:.12g};
+maxBoundarySkewness {preset.maximum_skewness:.12g};
+maxInternalSkewness {min(4.0, preset.maximum_skewness):.12g};
 minVol 1e-20;
 minTetQuality -1e30;
 minDeterminant 0.0001;
@@ -429,9 +454,9 @@ meshQualityControls
     // otherwise valid layers to be removed.  Keep positive-volume and
     // determinant guards active, use interface-compatible insertion limits,
     // then apply the full checkMesh gate again after region splitting.
-    maxNonOrtho 75;
-    maxBoundarySkewness 20;
-    maxInternalSkewness 4;
+    maxNonOrtho {(preset.generation_max_non_orthogonality or preset.maximum_non_orthogonality):.12g};
+    maxBoundarySkewness {preset.maximum_skewness:.12g};
+    maxInternalSkewness {min(4.0, preset.maximum_skewness):.12g};
     minVol 1e-20;
     minTetQuality -1e30;
     minDeterminant 0.0001;
@@ -441,7 +466,7 @@ meshQualityControls
     errorReduction 0.75;
     relaxed
     {{
-        maxNonOrtho 75;
+        maxNonOrtho {(preset.generation_max_non_orthogonality or preset.maximum_non_orthogonality):.12g};
     }}
 }}
 
@@ -913,6 +938,8 @@ checkMesh -case "$case_dir" -constant -allRegions -meshQuality \
 python3 "$case_dir/tools/parse_checkmesh.py" \
     --log "$log_dir/checkMesh_all_regions.log" \
     --expected-mesh-ok-count 2 \
+    --max-non-orthogonality {preset.maximum_non_orthogonality:.12g} \
+    --max-skewness {preset.maximum_skewness:.12g} \
     --output "$report_dir/checkMesh_all_regions.json" || check_status=$?
 if [ "$check_status" -ne 0 ]; then
     echo "all-region checkMesh gate failed" >&2
@@ -922,6 +949,9 @@ python3 "$case_dir/tools/validate_mesh_target.py" \
     --zone-report "$report_dir/cellZones_pre_split.json" \
     --checkmesh-log "$log_dir/checkMesh_pre_split_diagnostic.log" \
     --target-total-cells {preset.target_cells}{component_targets} \
+    --total-tolerance-fraction {preset.total_tolerance_fraction:.12g} \
+    --component-tolerance-fraction {preset.component_tolerance_fraction:.12g} \
+    --minimum-hexahedron-fraction {preset.minimum_hexahedron_fraction:.12g} \
     --output "$report_dir/mesh_target_composition.json"
 # Record OpenFOAM's optional exhaustive diagnostics as an engineering audit.
 # Thin wall-resolved prisms and the intentionally disconnected 23 bodies make
@@ -1335,7 +1365,7 @@ def write_production_mesh_source_bundle(
     _atomic_write(output / "system" / "controlDict.mesh-only", _control_dict())
     _atomic_write(output / "system" / "fvSchemes", _mesh_fv_schemes())
     _atomic_write(output / "system" / "decomposeParDict", _decompose_par_dict())
-    _atomic_write(output / "system" / "meshQualityDict", _mesh_quality_dict())
+    _atomic_write(output / "system" / "meshQualityDict", _mesh_quality_dict(preset))
 
     solver_source = write_openfoam_solver_bundle(config, output)
     for region in ("coolant", "batterySolid"):
@@ -1345,7 +1375,7 @@ def write_production_mesh_source_bundle(
         )
         _atomic_write(
             output / "system" / region / "meshQualityDict",
-            _mesh_quality_dict(),
+            _mesh_quality_dict(preset),
         )
 
     validator_destination = output / "tools" / "validate_cell_zones.py"
@@ -1476,6 +1506,7 @@ def write_production_mesh_source_bundle(
         if name.endswith(".sh"):
             (output / name).chmod(0o755)
     _atomic_write(output / "README.md", _readme(mesh_level))
+    write_engineering_judgements(output / "engineering_judgements.json")
 
     lower, upper = _bounds(config)
     generated_hashes = {}
@@ -1485,7 +1516,13 @@ def write_production_mesh_source_bundle(
         relative = path.relative_to(output)
         # This manifest fingerprints reproducible source inputs only.  A bundle
         # refresh must not absorb large solver/mesh outputs from an earlier run.
-        if relative.parts[0] in {"runs", "logs", "reports", "postProcessing"}:
+        if relative.parts[0] in {
+            "runs",
+            "logs",
+            "reports",
+            "postProcessing",
+            "calibration_history",
+        }:
             continue
         if relative.parts[0].startswith("processor"):
             continue
@@ -1524,6 +1561,7 @@ def write_production_mesh_source_bundle(
         "default_single_run_profile": mesh_level == DEFAULT_MESH_PROFILE,
         "target_cell_count": preset.target_cells,
         "target_is_calibration_goal_not_exact_gate": True,
+        "calibration_status": preset.calibration_status,
         "target_composition": {
             "total_cells": preset.target_cells,
             "solid_cells": preset.target_solid_cells,
@@ -1534,8 +1572,24 @@ def write_production_mesh_source_bundle(
             "requested": "hexahedral-based",
             "implemented": "hexa-dominant body-fitted",
             "all_hexa_claimed": False,
-            "minimum_hexahedron_fraction": 0.80,
+            "minimum_hexahedron_fraction": preset.minimum_hexahedron_fraction,
             "reason": "curved snapped boundaries and prism wall layers create non-hexa cells",
+        },
+        "automatic_quality_limits": {
+            "maximum_non_orthogonality": preset.maximum_non_orthogonality,
+            "maximum_skewness": preset.maximum_skewness,
+            "total_cell_tolerance_fraction": preset.total_tolerance_fraction,
+            "component_tolerance_fraction": preset.component_tolerance_fraction,
+            "visual_quality_status": "MANUAL_REVIEW_REQUIRED",
+            "ai_decision_allowed": False,
+        },
+        "mesh_generation_quality_controls": {
+            "maximum_non_orthogonality": (
+                preset.generation_max_non_orthogonality
+                or preset.maximum_non_orthogonality
+            ),
+            "maximum_boundary_skewness": preset.maximum_skewness,
+            "note": "generation may be stricter than final acceptance to absorb repatch/split changes",
         },
         "background_bounds_m": {"min": list(lower), "max": list(upper)},
         "background_divisions": list(block_counts),

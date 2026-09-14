@@ -27,6 +27,7 @@ DEFAULT_RESIDUAL_FLOORS = {
     "coolant.omega": 2.0e-6,
     "batterySolid.h": 5.0e-4,
 }
+STRICT_RESIDUAL_TARGET = 1.0e-6
 
 
 def _finite(value: float | None) -> bool:
@@ -220,6 +221,10 @@ def validate_cold_flow(
         name: name in final_residuals and final_residuals[name] <= limit
         for name, limit in floors.items()
     }
+    strict_residual_checks = {
+        name: value <= STRICT_RESIDUAL_TARGET
+        for name, value in final_residuals.items()
+    }
 
     monitor_rows = []
     for time, values in window_records:
@@ -328,6 +333,13 @@ def validate_cold_flow(
         "residual_floors": floors,
         "final_initial_residual_maxima": final_residuals,
         "residual_checks": residual_checks,
+        "strict_residual_audit": {
+            "target": STRICT_RESIDUAL_TARGET,
+            "all_reported_equations_at_or_below_target": bool(strict_residual_checks)
+            and all(strict_residual_checks.values()),
+            "checks": strict_residual_checks,
+            "policy": "record exactly; do not relabel a miss as converged to 1e-6",
+        },
         "monitor_summary": {
             "sample_count": len(monitor_rows),
             "maximum_mass_imbalance_fraction": maximum_mass_imbalance,

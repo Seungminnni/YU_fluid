@@ -11,7 +11,7 @@ from .config import load_config
 from .errors import CfdTwinError
 from .geometry import write_geometry_bundle
 from .heat_source import source_from_config, write_heat_source_bundle
-from .production_mesh import write_production_mesh_source_bundle
+from .production_mesh import SUPPORTED_LEVELS, write_production_mesh_source_bundle
 from .animation_validation import validate_animations
 from .viewer import write_viewer_bundle
 
@@ -189,9 +189,12 @@ def build_parser() -> argparse.ArgumentParser:
     production_mesh.add_argument("--output", required=True)
     production_mesh.add_argument(
         "--profile",
-        choices=("single",),
+        choices=SUPPORTED_LEVELS,
         default="single",
-        help="single hexa-dominant profile targeting 207,390 cells",
+        help=(
+            "single=validated 207,390-cell contract; "
+            "production_800k=calibrated ~800,000-cell high-quality profile"
+        ),
     )
     production_mesh.set_defaults(func=_build_production_mesh_source)
 
