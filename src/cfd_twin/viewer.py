@@ -416,11 +416,26 @@ def _convergence_payload(case: Path) -> dict[str, object]:
     def _steady_history(
         *, run_name: str, history_id: str, label: str, scope_text: str,
         validation_name: str,
+        included_keys: tuple[str, ...] | None = None,
     ) -> dict[str, object] | None:
-        run_path = case / f"production/single/runs/{run_name}"
-        log_path = run_path / f"logs/solver/{run_name}.log"
-        if not log_path.is_file():
+        # The active production result may live under L3 (the adopted 800k
+        # profile) rather than the historical ``single`` profile.  Search the
+        # executed precision path first so saved cold-flow/steady-CHT logs are
+        # not accidentally hidden from the UI.
+        run_path = next(
+            (
+                candidate
+                for profile in ("L3", "single", "L0")
+                if (
+                    candidate := case
+                    / f"production/{profile}/runs/{run_name}"
+                ).joinpath(f"logs/solver/{run_name}.log").is_file()
+            ),
+            None,
+        )
+        if run_path is None:
             return None
+        log_path = run_path / f"logs/solver/{run_name}.log"
         parsed = parse_cold_flow_log(log_path)
         if not parsed["records"]:
             return None
@@ -457,7 +472,10 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         history_floors = history_validation.get("residual_floors", {})
         history_series = []
         history_iterations: set[int] = set()
+        selected_keys = set(included_keys) if included_keys is not None else None
         for key in labels:
+            if selected_keys is not None and key not in selected_keys:
+                continue
             points = sorted(history_grouped.get(key, {}).items())
             if not points:
                 continue
@@ -482,12 +500,20 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         if not history_series or not history_iterations:
             return None
         history_checks = history_validation.get("residual_checks", {})
+        relative_parts = run_path.relative_to(case).parts
+        profile = relative_parts[1]
+        resolved_scope = (
+            scope_text
+            if profile == "single"
+            else scope_text.replace("새 표준 결과", "80만급/정밀 결과")
+        )
         return {
             "available": True,
             "id": history_id,
             "label": label,
             "source": "actual OpenFOAM solver log",
-            "scope": scope_text,
+            "scope": resolved_scope,
+            "production_profile": profile,
             "source_files": history_sources,
             "series": history_series,
             "axis_mode": "openfoam_outer_iteration",
@@ -523,6 +549,15 @@ def _convergence_payload(case: Path) -> dict[str, object]:
             label="유동 초기화 · U/p/k/ω",
             scope_text="새 표준 결과 · 유동 초기화",
             validation_name="cold_flow_validation.json",
+            included_keys=(
+                "continuity.global",
+                "coolant.p_rgh",
+                "coolant.Ux",
+                "coolant.Uy",
+                "coolant.Uz",
+                "coolant.k",
+                "coolant.omega",
+            ),
         ),
         _steady_history(
             run_name="steady_cht",

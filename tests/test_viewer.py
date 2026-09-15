@@ -158,6 +158,54 @@ class ViewerTests(unittest.TestCase):
             self.assertEqual(payload["linear_iteration_total"], 6)
             self.assertEqual(payload["series"][0]["points"][-1][0], 3)
 
+    def test_convergence_payload_discovers_800k_l3_steady_histories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            case = Path(directory)
+            transient_dir = (
+                case
+                / "production/L3/runs/frozen_flow_actual_1s/reports/solver"
+            )
+            transient_dir.mkdir(parents=True)
+            (transient_dir / "transient_residuals.csv").write_text(
+                "global_iteration,time_s,time_step_index,outer_corrector,region,field,initial_residual,final_residual,linear_iterations,residual_definition\n"
+                "1,1,1,1,batterySolid,h,0.1,0.01,2,OpenFOAM raw\n",
+                encoding="utf-8",
+            )
+            solver_log = "\n".join(
+                (
+                    "Time = 1",
+                    "Solving for fluid region coolant",
+                    "smoothSolver: Solving for Ux, Initial residual = 0.2, Final residual = 0.02, No Iterations 3",
+                    "smoothSolver: Solving for k, Initial residual = 0.1, Final residual = 0.01, No Iterations 2",
+                    "Solving for solid region batterySolid",
+                    "smoothSolver: Solving for h, Initial residual = 0.3, Final residual = 0.03, No Iterations 4",
+                    "End",
+                )
+            )
+            for run_name in ("steady_cold_flow", "steady_cht"):
+                log_dir = case / f"production/L3/runs/{run_name}/logs/solver"
+                log_dir.mkdir(parents=True)
+                (log_dir / f"{run_name}.log").write_text(
+                    solver_log, encoding="utf-8"
+                )
+
+            payload = _convergence_payload(case)
+
+            histories = {history["id"]: history for history in payload["histories"]}
+            self.assertEqual(
+                set(histories), {"cold_flow", "steady_cht", "transient_energy"}
+            )
+            self.assertEqual(histories["cold_flow"]["production_profile"], "L3")
+            self.assertIn("80만급/정밀 결과", histories["cold_flow"]["scope"])
+            self.assertEqual(
+                {series["key"] for series in histories["cold_flow"]["series"]},
+                {"coolant.Ux", "coolant.k"},
+            )
+            self.assertEqual(
+                {series["key"] for series in histories["steady_cht"]["series"]},
+                {"coolant.Ux", "coolant.k", "batterySolid.h"},
+            )
+
     def test_dependency_free_viewer_is_truthfully_labelled(self) -> None:
         config = load_config(BASELINE)
         with tempfile.TemporaryDirectory() as directory:

@@ -615,6 +615,13 @@ polyhedron 68,530개(8.069%)이며 pyramid와 tetrahedron은 0개다.
 - `U`, `T`, `p`, `k`, `ω`가 유한하며 최종 난류장이 음수가 아님
 - 23개 배터리 표면의 실제 y+ gate 통과
 
+UI의 수렴 모니터는 이 단계의 실제 OpenFOAM 로그에서 외부 반복 횟수를
+X축으로, raw initial residual을 로그 Y축으로 표시한다. 냉간 유동 그래프에는
+`Ux`, `Uy`, `Uz`, `p_rgh`, `k`, `ω`와 global continuity만 넣고, 열원이 꺼진
+이 단계의 유체·고체 `h`는 정상 CHT 그래프와 혼동하지 않도록 제외한다.
+정상 CHT와 PPT UDF 과도 에너지 이력은 같은 화면의 `계산 단계` 선택에서
+별도로 전환한다.
+
 질량 불균형은
 
 $$
