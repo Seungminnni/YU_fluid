@@ -255,6 +255,7 @@ class ColdFlowValidationTests(unittest.TestCase):
                 qvol_samples_path=samples,
                 coolant_cp_j_kgk=2.0,
                 initial_temperature_k=300.0,
+                steady_initial_temperature_k=299.0,
                 end_time_s=20.0,
                 telemetry_interval_s=1.0,
                 field_interval_s=5.0,
@@ -282,6 +283,15 @@ class ColdFlowValidationTests(unittest.TestCase):
                 dynamic_report["checks"][
                     "dynamic_final_tmax_below_instantaneous_steady_upper_bound"
                 ]
+            )
+            self.assertTrue(
+                dynamic_report["checks"][
+                    "battery_average_temperature_trend_matches_source_contract"
+                ]
+            )
+            self.assertEqual(
+                dynamic_report["source"]["steady_reference_temperature_k"],
+                299.0,
             )
 
 

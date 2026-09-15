@@ -103,6 +103,9 @@ class ConfigTests(unittest.TestCase):
             config.battery.heat_source.mode,
             "peneklioglu_bernardi_2c_293p15",
         )
+        self.assertAlmostEqual(config.boundary.inlet_temperature_k, 293.0)
+        self.assertAlmostEqual(config.boundary.initial_fluid_temperature_k, 293.0)
+        self.assertAlmostEqual(config.boundary.initial_solid_temperature_k, 293.15)
         self.assertAlmostEqual(config.derived.cell_heat_w, 1.5173195359225133)
         for override, message in (
             ("battery.electrical_metadata.discharge_rate_c=1.0", "restricted to 2C"),

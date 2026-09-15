@@ -159,6 +159,10 @@ def validate_frozen_flow(
 ) -> dict[str, object]:
     """과도 로그·원본 필드·정상 CHT 기준을 결합해 최종 열결과를 판정한다."""
 
+    # This legacy argument is the steady solution's zero-source datum. For a
+    # forced-flow CHT case it must be the fixed inlet temperature, not the
+    # battery's transient initial temperature. Keep the public name for
+    # compatibility with already generated cases.
     if steady_initial_temperature_k is None:
         steady_initial_temperature_k = initial_temperature_k
     parsed = parse_cold_flow_log(log_path)
@@ -297,9 +301,10 @@ def validate_frozen_flow(
         else None
     )
     # A constant-source transient should reach its matching steady solution.
-    # A monotonically increasing source cannot be at the *instantaneous* final
-    # steady solution while the source is still ramping.  In that case the
-    # scaled steady result is a causal upper bound, not an equality target.
+    # A time-varying source cannot generally be at the *instantaneous* final
+    # steady solution while the source is still changing.  In the present
+    # profile the final source is also the largest source, so the scaled final
+    # steady result is a causal upper bound, not an equality target.
     steady_match_tolerance_k = 0.01
     steady_upper_bound_roundoff_k = 0.001
     tavg_steady_check = (
@@ -337,8 +342,14 @@ def validate_frozen_flow(
         and sum(energy) / len(energy) < 0.02,
         "maximum_final_energy_imbalance_below_5_percent": bool(energy)
         and max(energy) < 0.05,
-        "battery_average_temperature_is_monotonic": minimum_tavg_step is not None
-        and minimum_tavg_step >= -1e-6,
+        # Monotonic heating is a valid gate only for a constant positive heat
+        # source.  The Peneklioglu source decreases first and rises later, so a
+        # real thermal maximum followed by a temporary decline is expected and
+        # must not be reported as numerical failure.
+        "battery_average_temperature_trend_matches_source_contract": (
+            minimum_tavg_step is not None
+            and (source_is_time_varying or minimum_tavg_step >= -1e-6)
+        ),
         "battery_temperature_rises_above_initial": final_tmax is not None
         and final_tmax > initial_temperature_k,
         (
@@ -380,7 +391,7 @@ def validate_frozen_flow(
             "final_mesh_integrated_heat_power_w": final_qvol * battery_volume,
             "coolant_cp_j_kgk": coolant_cp_j_kgk,
             "initial_temperature_k": initial_temperature_k,
-            "steady_initial_temperature_k": steady_initial_temperature_k,
+            "steady_reference_temperature_k": steady_initial_temperature_k,
             "steady_report": str(Path(steady_report_path).resolve()),
             "steady_reference_semantics": (
                 "instantaneous_upper_bound_while_source_is_ramping"

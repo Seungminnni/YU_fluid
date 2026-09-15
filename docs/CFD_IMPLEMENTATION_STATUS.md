@@ -402,3 +402,36 @@ measurement; this estimate is not itself a pass.
   error of `7.744851e-6 K`.  The portable viewer includes the actual final field,
   fixed cold-flow streamlines, temperature graphs, residual history, and the new
   energy-balance graph with its warning state.
+
+## 2026-09-15 Fluent-aligned thermal rerun
+
+- The prior thermal result above is superseded because its coolant and battery
+  fields both started at 293.15 K. The supplied Fluent setup instead starts the
+  coolant and inlet at 293 K and every battery at 293.15 K.
+- The 849,284-cell mesh and only the temperature-independent momentum/turbulence
+  fields are retained. Both temperature fields, steady CHT and the 0--1,800 s
+  transient thermal history are regenerated.
+- The deliverable Fluent source exposes only the dynamic Peneklioglu source. The
+  16,325 W/m3 constant baseline cannot be hooked accidentally from that file.
+- The frozen-flow production profile now uses 100 energy-coupling
+  iterations with 0.5 fluid/solid enthalpy relaxation. This is the measured
+  combination that reduced the one-step complete balance error to 1.065433%.
+- The one-second physical step is retained as the practical production default.
+  `TRANSIENT_DELTA_T` is recorded and can explicitly select 0.01 s for a Fluent
+  time-step sensitivity or long run; the two discretisations must not be labelled
+  as the same calculation.
+- The browser packer stores separate t=0 values for coolant sections (293 K) and
+  battery-surface samples (293.15 K), and validates both after uint16 decoding.
+- The 1,800 s rerun completed cleanly and passed every frozen-flow validation
+  gate after the instantaneous steady upper bound was referenced to the 293 K
+  inlet datum. Final battery volume-average/mesh-maximum temperatures are
+  293.643676707/294.134288096 K and outlet mass-weighted temperature is
+  293.116331217 K.
+- At 1,800 s the mesh-integrated source, coolant removal and fluid-plus-solid
+  storage are 55.582837409, 54.988763500 and 0.477714770 W. The complete
+  final-60-second imbalance mean/max are 0.216397%/0.223259%, so the 2% gate
+  passes. The prior 3.899551% result is superseded and is not packaged.
+- The initial global maximum-temperature peak occurs at 92 s and the following
+  trough at 607 s. At 1,220 s the OpenFOAM battery mesh maximum is 293.734537 K,
+  about 0.015 K above the supplied Fluent plot, subject to confirming the same
+  Fluent report region and maximum definition.

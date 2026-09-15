@@ -14,8 +14,10 @@ battery:
     capacity: "2 Ah"
     discharge_rate_c: 2.0
 
-# PPT 피팅 온도와 열해석 초기·입구 온도를 일치시킨다.
+# Fluent 비교조건: 냉각수는 293 K, 배터리는 293.15 K에서 시작한다.
+# 발열 상관식의 기준온도 293.15 K는 USE_LOCAL_CELL_T=0 의미와 동일하며,
+# 유체 초기·입구 온도와는 별개의 입력이다.
 boundary:
-  inlet_temperature: "293.15 K"
-  initial_fluid_temperature: "293.15 K"
+  inlet_temperature: "293 K"
+  initial_fluid_temperature: "293 K"
   initial_solid_temperature: "293.15 K"

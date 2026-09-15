@@ -31,6 +31,15 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class HeatSourceTests(unittest.TestCase):
+    def test_delivered_fluent_udf_exposes_only_dynamic_source(self) -> None:
+        source = (ROOT / "peneklioglu_2C_293K_heat_source.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(source.count("DEFINE_SOURCE("), 1)
+        self.assertIn("DEFINE_SOURCE(peneklioglu_dynamic_heat_source", source)
+        self.assertIn("#define USE_LOCAL_CELL_T     0", source)
+        self.assertNotIn("DEFINE_SOURCE(aydin_constant_heat_source", source)
+
     def test_linear_table_interpolation_and_hold_policy(self) -> None:
         series = LinearSeries((0.0, 10.0), (100.0, 300.0), "qvol_W_m3", "memory")
         source = TableVolumetricSource(series)
@@ -173,7 +182,12 @@ class HeatSourceTests(unittest.TestCase):
             self.assertIn("(900 65018.2340691)", openfoam)
             self.assertIn("(1800 125668.88145)", openfoam)
             fluent = (output / "Fluent" / "battery_heat_source.c").read_text()
+            self.assertEqual(fluent.count("DEFINE_SOURCE("), 1)
+            self.assertIn(
+                "DEFINE_SOURCE(peneklioglu_dynamic_heat_source", fluent
+            )
             self.assertIn("q_reversible = -CURRENT_A", fluent)
+            self.assertIn("if (CURRENT_TIME > DISCHARGE_TIME_S)", fluent)
             self.assertIn("return battery_qvol(CURRENT_TIME);", fluent)
             self.assertNotIn("PROFILE_COUNT", fluent)
 

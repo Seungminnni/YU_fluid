@@ -566,6 +566,13 @@ class ProductionMeshTests(unittest.TestCase):
             transient_root = (
                 output / "profiles" / "frozen_flow" / "system" / "fvSolution"
             ).read_text()
+            full_transient_root = (
+                output
+                / "profiles"
+                / "full_transient_actual_1s"
+                / "system"
+                / "fvSolution"
+            ).read_text()
             full_solution = (
                 output
                 / "profiles"
@@ -578,6 +585,14 @@ class ProductionMeshTests(unittest.TestCase):
                 output
                 / "profiles"
                 / "frozen_flow"
+                / "system"
+                / "batterySolid"
+                / "fvSolution"
+            ).read_text()
+            full_transient_solid_solution = (
+                output
+                / "profiles"
+                / "full_transient_actual_1s"
                 / "system"
                 / "batterySolid"
                 / "fvSolution"
@@ -623,10 +638,13 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("writeInterval 1800;", frozen_control)
             self.assertIn("frozenFlow yes;", frozen_solution)
             self.assertIn("momentumPredictor no;", frozen_solution)
-            self.assertIn("h 0.3;", frozen_solution)
-            self.assertIn("h 0.3;", transient_solid_solution)
+            self.assertIn("h 0.5;", frozen_solution)
+            self.assertIn("h 0.5;", transient_solid_solution)
+            self.assertIn("h 0.3;", full_solution)
+            self.assertIn("h 0.3;", full_transient_solid_solution)
             self.assertIn("nOuterCorrectors 3;", transient_root)
-            self.assertIn("iterations 20;", transient_root)
+            self.assertIn("iterations 100;", transient_root)
+            self.assertIn("iterations 20;", full_transient_root)
             self.assertIn('"h" 1e-6;', transient_root)
             self.assertNotIn("maxIter 1;", transient_root)
             self.assertIn("frozenFlow no;", full_solution)
@@ -665,6 +683,13 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("--qvol-samples", frozen_script)
             self.assertIn("--field-interval 1", frozen_script)
             self.assertIn("build_energy_balance.py", frozen_script)
+            self.assertIn("--initial-fluid-temperature", frozen_script)
+            self.assertIn("--initial-solid-temperature", frozen_script)
+            self.assertIn("TRANSIENT_DELTA_T", frozen_script)
+            self.assertIn("ENERGY_COUPLING_ITERATIONS", frozen_script)
+            self.assertIn("PIMPLE.energyCoupling.iterations", frozen_script)
+            self.assertIn("runtime_configuration.txt", frozen_script)
+            self.assertNotIn("TRANSIENT_DELTA_T", full_actual_script)
             self.assertTrue((output / "tools/build_energy_balance.py").is_file())
             self.assertIn("extract_transient_residuals.py", full_actual_script)
             self.assertIn("transient_residuals.csv", full_actual_script)
@@ -701,6 +726,38 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertEqual(cold_control.count("type surfaceFieldValue;"), 6)
             self.assertNotIn("type volFieldValue;", cold_control)
             self.assertIn("type fieldMinMax;", cold_control)
+
+    def test_transient_keeps_distinct_fluid_and_solid_initial_temperatures(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "ppt_bernardi_udf.yaml",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "production"
+            write_production_mesh_source_bundle(
+                config,
+                _fake_cad(config, root),
+                output,
+                mesh_level="production_800k",
+            )
+            script = (output / "AllrunFrozenFlowThermalActual1s").read_text()
+            self.assertIn("coolant T was not reset to 293 K", script)
+            self.assertIn("batterySolid T was not reset to 293.15 K", script)
+            self.assertIn("--initial-fluid-temperature 293", script)
+            self.assertIn("--initial-solid-temperature 293.15", script)
+            self.assertIn(
+                'FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-293', script
+            )
+            compose = (output / "compose.yaml").read_text(encoding="utf-8")
+            self.assertIn(
+                'FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-293}', compose
+            )
+            self.assertNotIn(
+                'FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-293.15}', compose
+            )
+            self.assertIn("TRANSIENT_DELTA_T", script)
+            self.assertIn("ENERGY_COUPLING_ITERATIONS", script)
 
     def test_time_dependent_udf_is_constant_in_steady_and_table_in_transient(self) -> None:
         config = load_config(

@@ -153,6 +153,7 @@ def build_actual_one_second_bundle(
     output_dir: str | Path,
     *,
     initial_temperature_k: float = 293.15,
+    initial_fluid_temperature_k: float | None = None,
     end_time_s: int = 1800,
 ) -> dict[str, object]:
     """11개 직접 probe 데이터셋을 총 1,801개의 uint16 프레임으로 만든다."""
@@ -162,10 +163,21 @@ def build_actual_one_second_bundle(
     output.mkdir(parents=True, exist_ok=True)
     mesh_level, mesh_cell_count = _mesh_identity(run)
     specs = _probe_specs(run)
+    initial_solid_temperature_k = initial_temperature_k
+    if initial_fluid_temperature_k is None:
+        initial_fluid_temperature_k = initial_solid_temperature_k
+
+    def dataset_initial_temperature(name: str) -> float:
+        return (
+            initial_solid_temperature_k
+            if name == "cell_surface"
+            else initial_fluid_temperature_k
+        )
+
     probes: dict[str, ProbeFile] = {}
     dataset_ranges: dict[str, tuple[float, float]] = {}
-    low = initial_temperature_k
-    high = initial_temperature_k
+    low = min(initial_fluid_temperature_k, initial_solid_temperature_k)
+    high = max(initial_fluid_temperature_k, initial_solid_temperature_k)
     expected_times = list(range(1, end_time_s + 1))
     for name, spec in specs.items():
         probe = read_probe_header(spec["path"])
@@ -175,8 +187,9 @@ def build_actual_one_second_bundle(
             raise ValueError(f"{name}: probe grid dimensions do not match point count")
         times: list[int] = []
         valid = np.asarray(probe.valid_indices, dtype=int)
-        dataset_low = initial_temperature_k
-        dataset_high = initial_temperature_k
+        dataset_initial_k = dataset_initial_temperature(name)
+        dataset_low = dataset_initial_k
+        dataset_high = dataset_initial_k
         for time_s, values in iter_probe_rows(probe):
             times.append(time_s)
             selected = values[valid]
@@ -203,7 +216,8 @@ def build_actual_one_second_bundle(
         probe = probes[name]
         valid = np.asarray(probe.valid_indices, dtype=int)
         destination = output / f"{name}.u16"
-        initial = np.full(len(valid), initial_temperature_k)
+        dataset_initial_k = dataset_initial_temperature(name)
+        initial = np.full(len(valid), dataset_initial_k)
         with destination.open("wb") as stream:
             stream.write(np.rint((initial - low) / quantum_k).astype("<u2").tobytes())
             for _, values in iter_probe_rows(probe):
@@ -233,6 +247,7 @@ def build_actual_one_second_bundle(
                     dataset_ranges[name][0] - 273.15,
                     dataset_ranges[name][1] - 273.15,
                 ],
+                "initial_temperature_k": dataset_initial_k,
             }
         )
         datasets[name] = metadata
@@ -242,8 +257,12 @@ def build_actual_one_second_bundle(
         "status": "ACTUAL_ONE_SECOND_SAMPLES_READY",
         "mesh_level": mesh_level,
         "mesh_cell_count": mesh_cell_count,
-        "initial_temperature_k": initial_temperature_k,
-        "initial_temperature_c": initial_temperature_k - 273.15,
+        # Keep the legacy key as the solid initial temperature because all
+        # per-cell histories use it. New consumers must use the regional keys.
+        "initial_temperature_k": initial_solid_temperature_k,
+        "initial_temperature_c": initial_solid_temperature_k - 273.15,
+        "initial_fluid_temperature_k": initial_fluid_temperature_k,
+        "initial_solid_temperature_k": initial_solid_temperature_k,
         "times_s": {"start": 0, "end": end_time_s, "step": 1},
         "temperature_encoding": {
             "dtype": "uint16-little-endian",
@@ -298,7 +317,14 @@ def validate_actual_one_second_bundle(
         times: list[int] = []
         if size_matches:
             frames = encoded.reshape(int(specification["frame_count"]), len(valid))
-            initial = np.full(len(valid), float(manifest["initial_temperature_k"]))
+            initial = np.full(
+                len(valid),
+                float(
+                    specification.get(
+                        "initial_temperature_k", manifest["initial_temperature_k"]
+                    )
+                ),
+            )
             maximum_error = float(np.max(np.abs(low + frames[0] * quantum - initial)))
             for frame, (time_s, values) in enumerate(iter_probe_rows(probe), start=1):
                 times.append(time_s)
@@ -350,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--initial-temperature", type=float, default=293.15)
+    parser.add_argument("--initial-fluid-temperature", type=float)
     parser.add_argument("--end-time", type=int, default=1800)
     parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args(argv)
@@ -358,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
             args.run_dir,
             args.output,
             initial_temperature_k=args.initial_temperature,
+            initial_fluid_temperature_k=args.initial_fluid_temperature,
             end_time_s=args.end_time,
         )
     report = validate_actual_one_second_bundle(args.run_dir, args.output)

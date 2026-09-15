@@ -82,7 +82,8 @@ class OpenFoamEnergyBalanceTests(unittest.TestCase):
                 fluid_cp_j_kgk=1.0,
                 solid_density_kg_m3=1.0,
                 solid_cp_j_kgk=1.0,
-                initial_temperature_k=10.0,
+                initial_fluid_temperature_k=9.8,
+                initial_solid_temperature_k=10.2,
             )
 
             with output_csv.open(encoding="utf-8", newline="") as stream:
@@ -93,6 +94,8 @@ class OpenFoamEnergyBalanceTests(unittest.TestCase):
                 report["energy_balance_gate"]["maximum_fraction"], 0.02
             )
             self.assertEqual(report["sample_count"], 2)
+            self.assertAlmostEqual(report["initial_fluid_temperature_K"], 9.8)
+            self.assertAlmostEqual(report["initial_solid_temperature_K"], 10.2)
             self.assertAlmostEqual(float(rows[0]["generated_W"]), 2.0)
             self.assertAlmostEqual(float(rows[0]["removed_W"]), 1.4)
             self.assertAlmostEqual(float(rows[0]["stored_W"]), 0.5)

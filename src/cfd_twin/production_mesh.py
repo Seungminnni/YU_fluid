@@ -1054,6 +1054,8 @@ def _compose_yaml() -> str:
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
+      TRANSIENT_DELTA_T: "${{TRANSIENT_DELTA_T:-1}}"
+      ENERGY_COUPLING_ITERATIONS: "${{ENERGY_COUPLING_ITERATIONS:-100}}"
     volumes:
       - .:/case
     command: ["/bin/sh", "/case/AllrunFrozenFlowThermalPilot"]
@@ -1065,7 +1067,9 @@ def _compose_yaml() -> str:
     working_dir: /case
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
-      FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K: "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-293.15}}"
+      FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K: "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-293}}"
+      TRANSIENT_DELTA_T: "${{TRANSIENT_DELTA_T:-1}}"
+      ENERGY_COUPLING_ITERATIONS: "${{ENERGY_COUPLING_ITERATIONS:-100}}"
     volumes:
       - .:/case
     command: ["/bin/sh", "/case/AllrunFrozenFlowThermalActual1s"]

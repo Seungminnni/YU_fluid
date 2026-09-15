@@ -70,7 +70,11 @@ class ActualOneSecondTests(unittest.TestCase):
                 ),
             ):
                 manifest = build_actual_one_second_bundle(
-                    root, root / "output", initial_temperature_k=293.15, end_time_s=2
+                    root,
+                    root / "output",
+                    initial_temperature_k=293.15,
+                    initial_fluid_temperature_k=293.0,
+                    end_time_s=2,
                 )
             self.assertEqual(manifest["mesh_level"], "single")
             self.assertEqual(manifest["mesh_cell_count"], 216_577)
@@ -80,7 +84,14 @@ class ActualOneSecondTests(unittest.TestCase):
             dataset = manifest["datasets"]["xy"]
             self.assertEqual(dataset["valid_indices"], [0, 2])
             self.assertEqual(dataset["frame_count"], 3)
-            self.assertEqual(dataset["temperature_range_k"], [293.15, 293.1505])
+            self.assertEqual(dataset["temperature_range_k"], [293.0, 293.1505])
+            self.assertEqual(dataset["initial_temperature_k"], 293.0)
+            self.assertEqual(
+                manifest["datasets"]["cell_surface"]["initial_temperature_k"],
+                293.15,
+            )
+            self.assertEqual(manifest["initial_fluid_temperature_k"], 293.0)
+            self.assertEqual(manifest["initial_solid_temperature_k"], 293.15)
             self.assertEqual((root / "output" / "xy.u16").stat().st_size, 3 * 2 * 2)
             with patch("cfd_twin.actual_one_second._probe_specs", return_value=specs):
                 report = validate_actual_one_second_bundle(root, root / "output")

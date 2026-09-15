@@ -61,7 +61,9 @@ def build_energy_balance(
     fluid_cp_j_kgk: float,
     solid_density_kg_m3: float,
     solid_cp_j_kgk: float,
-    initial_temperature_k: float,
+    initial_fluid_temperature_k: float | None = None,
+    initial_solid_temperature_k: float | None = None,
+    initial_temperature_k: float | None = None,
     maximum_final_window_imbalance_fraction: float = 0.02,
 ) -> dict[str, object]:
     """Resolve Qsource = Qout + dE/dt + residual at every integer second."""
@@ -71,6 +73,21 @@ def build_energy_balance(
         or maximum_final_window_imbalance_fraction < 0.0
     ):
         raise ValueError("maximum final-window imbalance must be finite and nonnegative")
+    # ``initial_temperature_k`` remains as a compatibility fallback for older
+    # generated cases. New cases record fluid and solid initial energy from
+    # their independent temperatures.
+    if initial_fluid_temperature_k is None:
+        initial_fluid_temperature_k = initial_temperature_k
+    if initial_solid_temperature_k is None:
+        initial_solid_temperature_k = initial_temperature_k
+    if initial_fluid_temperature_k is None or initial_solid_temperature_k is None:
+        raise ValueError("both fluid and solid initial temperatures are required")
+    for name, value in (
+        ("initial fluid temperature", initial_fluid_temperature_k),
+        ("initial solid temperature", initial_solid_temperature_k),
+    ):
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
 
     run = Path(run_dir).resolve()
     mesh = json.loads(Path(mesh_integral_report).read_text(encoding="utf-8"))
@@ -133,9 +150,15 @@ def build_energy_balance(
         if missing:
             raise ValueError(f"{name}: missing integer-second rows, first={missing[0]}")
 
-    previous_energy_j = initial_temperature_k * (
-        fluid_density_kg_m3 * fluid_cp_j_kgk * fluid_volume_m3
-        + solid_density_kg_m3 * solid_cp_j_kgk * solid_volume_m3
+    previous_energy_j = (
+        initial_fluid_temperature_k
+        * fluid_density_kg_m3
+        * fluid_cp_j_kgk
+        * fluid_volume_m3
+        + initial_solid_temperature_k
+        * solid_density_kg_m3
+        * solid_cp_j_kgk
+        * solid_volume_m3
     )
     rows: list[dict[str, float]] = []
     for time_s in range(1, end_time_s + 1):
@@ -209,6 +232,8 @@ def build_energy_balance(
         "last_time_s": rows[-1]["time_s"],
         "fluid_volume_m3": fluid_volume_m3,
         "solid_volume_m3": solid_volume_m3,
+        "initial_fluid_temperature_K": initial_fluid_temperature_k,
+        "initial_solid_temperature_K": initial_solid_temperature_k,
         "final": rows[-1],
         "final_window_sample_count": len(final_window),
         "final_60s_mean_imbalance_fraction": final_window_mean,
@@ -238,7 +263,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fluid-cp", required=True, type=float)
     parser.add_argument("--solid-density", required=True, type=float)
     parser.add_argument("--solid-cp", required=True, type=float)
-    parser.add_argument("--initial-temperature", required=True, type=float)
+    parser.add_argument(
+        "--initial-temperature",
+        type=float,
+        help="legacy common initial temperature fallback",
+    )
+    parser.add_argument("--initial-fluid-temperature", type=float)
+    parser.add_argument("--initial-solid-temperature", type=float)
     parser.add_argument(
         "--maximum-final-window-imbalance",
         type=float,
@@ -258,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
         fluid_cp_j_kgk=args.fluid_cp,
         solid_density_kg_m3=args.solid_density,
         solid_cp_j_kgk=args.solid_cp,
+        initial_fluid_temperature_k=args.initial_fluid_temperature,
+        initial_solid_temperature_k=args.initial_solid_temperature,
         initial_temperature_k=args.initial_temperature,
         maximum_final_window_imbalance_fraction=args.maximum_final_window_imbalance,
     )

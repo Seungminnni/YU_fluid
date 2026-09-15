@@ -13,6 +13,7 @@ from cfd_twin.viewer import (
     _energy_balance_payload,
     _mesh_runs_payload,
     _portable_dataset_javascript,
+    _regional_initial_conditions_match,
     write_viewer_bundle,
 )
 
@@ -22,6 +23,28 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class ViewerTests(unittest.TestCase):
+    def test_archived_result_with_different_regional_initials_is_excluded(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "ppt_bernardi_udf.yaml",),
+        )
+        self.assertTrue(
+            _regional_initial_conditions_match(
+                config,
+                {
+                    "initial_temperature_k": 293.15,
+                    "initial_fluid_temperature_k": 293.0,
+                    "initial_solid_temperature_k": 293.15,
+                },
+            )
+        )
+        self.assertFalse(
+            _regional_initial_conditions_match(
+                config,
+                {"initial_temperature_k": 293.15},
+            )
+        )
+
     def test_precision_mesh_card_uses_executed_800k_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             case = Path(directory)
@@ -516,6 +539,9 @@ class ViewerTests(unittest.TestCase):
         self.assertAlmostEqual(heat["cell_heat_start_w"], 1.5173195359225133)
         self.assertAlmostEqual(heat["cell_heat_end_w"], 2.4228902680554714)
         self.assertAlmostEqual(heat["total_heat_end_w"], 55.72647616527584)
+        self.assertAlmostEqual(model["inputs"]["inlet_temperature_K"], 293.0)
+        self.assertAlmostEqual(model["inputs"]["initial_fluid_temperature_K"], 293.0)
+        self.assertAlmostEqual(model["inputs"]["initial_solid_temperature_K"], 293.15)
 
     def test_portable_dataset_script_round_trips_binary_values(self) -> None:
         raw = bytes(range(256)) * 7

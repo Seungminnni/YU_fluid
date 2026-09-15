@@ -511,13 +511,17 @@ relaxationFactors
     )
 
 
-def _transient_fluid_solution(*, frozen_flow: bool) -> str:
+def _transient_fluid_solution(
+    *, frozen_flow: bool, enthalpy_relaxation: float = 0.3
+) -> str:
     """과도 PIMPLE 설정을 만들고 현재 열해석에서는 수렴 유동장을 고정한다.
 
     frozen_flow=True이면 U/p/k/omega를 다시 풀지 않고 에너지장만 시간 적분한다.
     상수 물성과 g=0 조건에서는 온도가 운동량에 되먹임되지 않기 때문이다.
     """
 
+    if not 0.0 < enthalpy_relaxation <= 1.0:
+        raise ValueError("enthalpy_relaxation must be in (0, 1]")
     frozen = "yes" if frozen_flow else "no"
     momentum_predictor = "no" if frozen_flow else "yes"
     return _header("fvSolution") + f'''solvers
@@ -579,7 +583,7 @@ relaxationFactors
     equations
     {{
         // Stabilise the partitioned fluid/solid interface fixed-point loop.
-        h 0.3;
+        h {enthalpy_relaxation:.12g};
     }}
 }}
 '''
@@ -619,60 +623,66 @@ relaxationFactors
     return content.replace("__ENTHALPY_RELAXATION__", str(relaxation))
 
 
-def _transient_solid_solution() -> str:
+def _transient_solid_solution(*, enthalpy_relaxation: float = 0.3) -> str:
     """과도 고체 엔탈피 h 방정식의 PCG/DIC 해법을 정의한다."""
 
-    return _header("fvSolution") + '''solvers
-{
+    if not 0.0 < enthalpy_relaxation <= 1.0:
+        raise ValueError("enthalpy_relaxation must be in (0, 1]")
+    return _header("fvSolution") + f'''solvers
+{{
     h
-    {
+    {{
         solver PCG;
         preconditioner DIC;
         tolerance 1e-9;
         relTol 0.01;
-    }
+    }}
     hFinal
-    {
+    {{
         solver PCG;
         preconditioner DIC;
         tolerance 1e-9;
         relTol 0;
-    }
-}
+    }}
+}}
 PIMPLE
-{
+{{
     nNonOrthogonalCorrectors 1;
-}
+}}
 relaxationFactors
-{
+{{
     equations
-    {
+    {{
         // Match the fluid-side damping across the CHT interface.
-        h 0.3;
-    }
-}
+        h {enthalpy_relaxation:.12g};
+    }}
+}}
 '''
 
 
-def _root_solution(*, transient: bool) -> str:
+def _root_solution(
+    *, transient: bool, energy_coupling_iterations: int = 20
+) -> str:
     """두 영역 사이 PIMPLE outer correction과 에너지 결합 횟수를 정의한다."""
 
     if transient:
-        return _header("fvSolution") + '''solvers {}
+        if energy_coupling_iterations < 1:
+            raise ValueError("energy_coupling_iterations must be at least 1")
+        return _header("fvSolution") + f'''solvers {{}}
 PIMPLE
-{
+{{
     nOuterCorrectors 3;
     energyCoupling
-    {
+    {{
         // loopControl uses `iterations`; `maxIter` is a linear-solver key and
         // does not activate the additional fluid/solid energy loop.
-        iterations 20;
+        iterations {energy_coupling_iterations};
         convergence
-        {
+        {{
             "h" 1e-6;
-        }
-    }
-}
+        }}
+    }}
+}}
 '''
     return _header("fvSolution") + '''solvers {}
 SIMPLE {}
@@ -1429,13 +1439,37 @@ def _transient_pilot_script(
         if frozen_flow
         else "full-transient result" if result_run else "full-transient validation"
     )
-    initial_temperature = config.boundary.initial_solid_temperature_k
+    initial_fluid_temperature = config.boundary.initial_fluid_temperature_k
+    initial_solid_temperature = config.boundary.initial_solid_temperature_k
+    steady_reference_temperature = config.boundary.inlet_temperature_k
     reconstruct_scope = (
         "-latestTime"
         if reconstruct_latest_only or (not frozen_flow and not result_run)
         else ""
     )
     required_python = " python3"
+    runtime_configuration = ""
+    if frozen_flow:
+        runtime_configuration = '''
+transient_delta_t=${TRANSIENT_DELTA_T:-1}
+energy_coupling_iterations=${ENERGY_COUPLING_ITERATIONS:-100}
+python3 -c 'import sys; value=float(sys.argv[1]); assert value > 0.0' \
+    "$transient_delta_t" || { echo "TRANSIENT_DELTA_T must be positive" >&2; exit 2; }
+case "$energy_coupling_iterations" in
+    ''|*[!0-9]*) echo "ENERGY_COUPLING_ITERATIONS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$energy_coupling_iterations" -ge 1 ] || { echo "ENERGY_COUPLING_ITERATIONS must be at least 1" >&2; exit 2; }
+foamDictionary "$run_dir/system/controlDict" \
+    -entry deltaT -set "$transient_delta_t" \
+    >"$run_dir/logs/solver/foamDictionary_runtime.log" 2>&1
+foamDictionary "$run_dir/system/fvSolution" \
+    -entry PIMPLE.energyCoupling.iterations -set "$energy_coupling_iterations" \
+    >>"$run_dir/logs/solver/foamDictionary_runtime.log" 2>&1
+{
+    echo "TRANSIENT_DELTA_T=$transient_delta_t"
+    echo "ENERGY_COUPLING_ITERATIONS=$energy_coupling_iterations"
+} >"$run_dir/reports/solver/runtime_configuration.txt"
+'''
     post_validation = f'''
 python3 "$case_dir/tools/extract_transient_residuals.py" \
     --log "$run_dir/logs/solver/{run_name}.log" \
@@ -1452,8 +1486,8 @@ python3 "$case_dir/tools/validate_frozen_flow.py" \
     --qvol {_steady_qvol(config):.12g} \
     --qvol-samples "$case_dir/heat_source_reference/heat_source_samples.csv" \
     --coolant-cp {config.fluid.specific_heat_j_kgk:.12g} \
-    --initial-temperature {initial_temperature:.12g} \
-    --steady-initial-temperature "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-{initial_temperature:.12g}}}" \
+    --initial-temperature {initial_solid_temperature:.12g} \
+    --steady-initial-temperature "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-{steady_reference_temperature:.12g}}}" \
     --field-interval {field_interval_s:.12g} \
     --output "$run_dir/reports/solver/frozen_flow_validation.json"
 
@@ -1465,7 +1499,8 @@ python3 "$case_dir/tools/build_energy_balance.py" \
     --fluid-cp {config.fluid.specific_heat_j_kgk:.12g} \
     --solid-density {config.battery.density_kg_m3:.12g} \
     --solid-cp {config.battery.specific_heat_j_kgk:.12g} \
-    --initial-temperature {initial_temperature:.12g} \
+    --initial-fluid-temperature {initial_fluid_temperature:.12g} \
+    --initial-solid-temperature {initial_solid_temperature:.12g} \
     --maximum-final-window-imbalance 0.02 \
     --output-csv "$run_dir/reports/solver/energy_balance.csv" \
     --output-report "$run_dir/reports/solver/energy_balance.json"
@@ -1543,14 +1578,15 @@ for field in U p p_rgh k omega nut alphat phi; do
     cp "$source_field" "$run_dir/0/coolant/$field"
 done
 
-grep -Eq 'internalField[[:space:]]+uniform[[:space:]]+{initial_temperature:.12g};' \
-    "$run_dir/0/coolant/T" || {{ echo "coolant T was not reset to {initial_temperature:.12g} K" >&2; exit 2; }}
-grep -Eq 'internalField[[:space:]]+uniform[[:space:]]+{initial_temperature:.12g};' \
-    "$run_dir/0/batterySolid/T" || {{ echo "batterySolid T was not reset to {initial_temperature:.12g} K" >&2; exit 2; }}
+grep -Eq 'internalField[[:space:]]+uniform[[:space:]]+{initial_fluid_temperature:.12g};' \
+    "$run_dir/0/coolant/T" || {{ echo "coolant T was not reset to {initial_fluid_temperature:.12g} K" >&2; exit 2; }}
+grep -Eq 'internalField[[:space:]]+uniform[[:space:]]+{initial_solid_temperature:.12g};' \
+    "$run_dir/0/batterySolid/T" || {{ echo "batterySolid T was not reset to {initial_solid_temperature:.12g} K" >&2; exit 2; }}
 
 mkdir -p "$run_dir/logs/solver" "$run_dir/reports/solver"
 : >"$run_dir/{run_name}.foam"
 echo "$latest_time" >"$run_dir/reports/solver/source_cold_flow_time.txt"
+{runtime_configuration}
 mpi_ranks=${{OPENFOAM_MPI_RANKS:-{DEFAULT_SOLVER_MPI_RANKS}}}
 case "$mpi_ranks" in
     ''|*[!0-9]*) echo "OPENFOAM_MPI_RANKS must be a positive integer" >&2; exit 2 ;;
@@ -1593,6 +1629,8 @@ def _solver_profile_files(
     field_write_interval_s: float = 15.0,
     actual_one_second_sampling: bool = False,
     temperature_field_write_interval_s: float | None = None,
+    energy_coupling_iterations: int = 20,
+    transient_enthalpy_relaxation: float = 0.3,
 ) -> dict[str, str]:
     transient = delta_t is not None
     if not transient:
@@ -1622,13 +1660,19 @@ def _solver_profile_files(
             actual_one_second_sampling=actual_one_second_sampling,
             temperature_field_write_interval_s=temperature_field_write_interval_s,
         ),
-        "system/fvSolution": _root_solution(transient=True),
+        "system/fvSolution": _root_solution(
+            transient=True,
+            energy_coupling_iterations=energy_coupling_iterations,
+        ),
         "system/coolant/fvSchemes": _fluid_schemes(transient=True),
         "system/coolant/fvSolution": _transient_fluid_solution(
-            frozen_flow=frozen_flow
+            frozen_flow=frozen_flow,
+            enthalpy_relaxation=transient_enthalpy_relaxation,
         ),
         "system/batterySolid/fvSchemes": _solid_schemes(transient=True),
-        "system/batterySolid/fvSolution": _transient_solid_solution(),
+        "system/batterySolid/fvSolution": _transient_solid_solution(
+            enthalpy_relaxation=transient_enthalpy_relaxation
+        ),
         "0/coolant/T": _fluid_fields(config)["T"],
         "0/batterySolid/T": _solid_temperature(config),
     }
@@ -1675,7 +1719,13 @@ def write_openfoam_solver_bundle(
             "constant/batterySolid/fvOptions": steady_heat_source_dict,
         },
         "frozen_flow": {
-            **_solver_profile_files(config, delta_t=1.0, frozen_flow=True),
+            **_solver_profile_files(
+                config,
+                delta_t=1.0,
+                frozen_flow=True,
+                energy_coupling_iterations=100,
+                transient_enthalpy_relaxation=0.5,
+            ),
             "constant/batterySolid/fvOptions": heat_source_dict,
         },
         "frozen_flow_actual_1s": {
@@ -1686,6 +1736,8 @@ def write_openfoam_solver_bundle(
                 field_write_interval_s=1800.0,
                 actual_one_second_sampling=True,
                 temperature_field_write_interval_s=1.0,
+                energy_coupling_iterations=100,
+                transient_enthalpy_relaxation=0.5,
             ),
             "constant/batterySolid/fvOptions": heat_source_dict,
         },
@@ -1823,6 +1875,12 @@ def write_openfoam_solver_bundle(
                 "transient": True,
                 "frozenFlow": True,
                 "deltaT_s": 1.0,
+                "energy_coupling_iterations": 100,
+                "enthalpy_relaxation": 0.5,
+                "runtime_overrides": {
+                    "deltaT_s": "TRANSIENT_DELTA_T",
+                    "energy_coupling_iterations": "ENERGY_COUPLING_ITERATIONS",
+                },
                 "endTime_s": 1800,
                 "telemetry_interval_s": 1.0,
                 "field_write_interval_s": 15.0,
@@ -1831,6 +1889,12 @@ def write_openfoam_solver_bundle(
                 "transient": True,
                 "frozenFlow": True,
                 "deltaT_s": 1.0,
+                "energy_coupling_iterations": 100,
+                "enthalpy_relaxation": 0.5,
+                "runtime_overrides": {
+                    "deltaT_s": "TRANSIENT_DELTA_T",
+                    "energy_coupling_iterations": "ENERGY_COUPLING_ITERATIONS",
+                },
                 "endTime_s": 1800,
                 "telemetry_interval_s": 1.0,
                 "direct_cell_probe_interval_s": 1.0,
@@ -1893,7 +1957,8 @@ def write_openfoam_solver_bundle(
         "steady_residual_target": STRICT_STEADY_RESIDUAL_TARGET,
         "steady_maximum_iterations": 5000,
         "strict_target_is_audited_not_silently_relaxed": True,
-        "initial_temperature_K": config.boundary.initial_solid_temperature_k,
+        "initial_fluid_temperature_K": config.boundary.initial_fluid_temperature_k,
+        "initial_solid_temperature_K": config.boundary.initial_solid_temperature_k,
         "solver_pilot_ready": False,
         "publication_results_authorized": False,
         "pending_gates": [

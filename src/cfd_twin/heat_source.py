@@ -582,6 +582,7 @@ def _render_fluent_bernardi_udf(
 #define TEMPERATURE_K {PENEKLIOGLU_BERNARDI_TEMPERATURE_K:.17g}
 #define FARADAY_C_MOL {PENEKLIOGLU_FARADAY_C_MOL:.17g}
 #define CELL_VOLUME_M3 {source.cell_volume_m3:.17g}
+#define DISCHARGE_TIME_S 1800.0
 
 static real battery_qvol(real time)
 {{
@@ -600,9 +601,11 @@ static real battery_qvol(real time)
     return (q_irreversible + q_reversible) / CELL_VOLUME_M3;
 }}
 
-DEFINE_SOURCE(battery_heat_source, cell, thread, dS, eqn)
+DEFINE_SOURCE(peneklioglu_dynamic_heat_source, cell, thread, dS, eqn)
 {{
     dS[eqn] = 0.0;
+    if (CURRENT_TIME > DISCHARGE_TIME_S)
+        return 0.0;
     return battery_qvol(CURRENT_TIME);
 }}
 '''

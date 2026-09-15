@@ -1120,6 +1120,31 @@ def _interactive_legacy_cfd_payload(
     }
 
 
+def _regional_initial_conditions_match(
+    config: ResolvedConfig, manifest: dict[str, object]
+) -> bool:
+    """Return true only when persisted thermal initials match current inputs."""
+
+    try:
+        solid = float(
+            manifest.get("initial_solid_temperature_k", manifest["initial_temperature_k"])
+        )
+        fluid = float(manifest.get("initial_fluid_temperature_k", solid))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return math.isclose(
+        solid,
+        config.boundary.initial_solid_temperature_k,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ) and math.isclose(
+        fluid,
+        config.boundary.initial_fluid_temperature_k,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+
+
 def _interactive_actual_cfd_payload(
     config: ResolvedConfig,
     case: Path,
@@ -1155,6 +1180,12 @@ def _interactive_actual_cfd_payload(
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    if not _regional_initial_conditions_match(config, manifest):
+        # Never compare or expose an archived thermal run under a new input
+        # label.  In particular, the old standard result started both regions
+        # at 293.15 K whereas the current Fluent-aligned case uses coolant
+        # 293 K and batteries 293.15 K.
+        return None
     if (
         manifest.get("status") != "ACTUAL_ONE_SECOND_SAMPLES_READY"
         or validation.get("status")
@@ -1162,7 +1193,12 @@ def _interactive_actual_cfd_payload(
     ):
         return None
     expected_times = list(range(0, 1801))
-    initial_temperature_k = float(manifest["initial_temperature_k"])
+    initial_solid_temperature_k = float(
+        manifest.get("initial_solid_temperature_k", manifest["initial_temperature_k"])
+    )
+    initial_fluid_temperature_k = float(
+        manifest.get("initial_fluid_temperature_k", initial_solid_temperature_k)
+    )
 
     def exact_series(path: Path, initial_k: float) -> list[float]:
         values = {0: initial_k}
@@ -1199,13 +1235,13 @@ def _interactive_actual_cfd_payload(
         internal_path = solid_root / f"battery_{cell_id}_Tavg/0/volFieldValue.dat"
         maximum_path = solid_root / f"battery_{cell_id}_Tmax/0/volFieldValue.dat"
         cell_temperature[cell_id] = exact_series(
-            surface_path, initial_temperature_k
+            surface_path, initial_solid_temperature_k
         )
         cell_internal_temperature[cell_id] = exact_series(
-            internal_path, initial_temperature_k
+            internal_path, initial_solid_temperature_k
         )
         cell_mesh_maximum_temperature[cell_id] = exact_series(
-            maximum_path, initial_temperature_k
+            maximum_path, initial_solid_temperature_k
         )
         cell_surface_areas_m2[cell_id] = header_measure(surface_path, "Area")
         cell_volumes_m3[cell_id] = header_measure(internal_path, "Volume")
@@ -1240,12 +1276,12 @@ def _interactive_actual_cfd_payload(
         "IN": exact_series(
             run
             / "postProcessing/coolant/coolant_inlet_mass_weighted_temperature/0/surfaceFieldValue.dat",
-            initial_temperature_k,
+            initial_fluid_temperature_k,
         ),
         "OUT": exact_series(
             run
             / "postProcessing/coolant/coolant_outlet_mass_weighted_temperature/0/surfaceFieldValue.dat",
-            initial_temperature_k,
+            initial_fluid_temperature_k,
         ),
     }
 
@@ -1523,6 +1559,8 @@ def _interactive_actual_cfd_payload(
             "validation_status": validation["status"],
             "mesh_cell_count": manifest["mesh_cell_count"],
             "initial_temperature_k": manifest["initial_temperature_k"],
+            "initial_fluid_temperature_k": initial_fluid_temperature_k,
+            "initial_solid_temperature_k": initial_solid_temperature_k,
             "times_s": manifest["times_s"],
             "temperature_encoding": manifest["temperature_encoding"],
             "temporal_interpolation": False,
@@ -2600,7 +2638,7 @@ function drawPortCallout(anchor,id,metrics,accent,w,h){
   ctx.strokeStyle=accent;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(anchor.x,anchor.y);ctx.lineTo(targetX,targetY);ctx.stroke();
   ctx.fillStyle="rgba(5,14,24,.92)";ctx.fillRect(left,top,boxWidth,boxHeight);
   ctx.strokeStyle=accent;ctx.lineWidth=1;ctx.strokeRect(left+.5,top+.5,boxWidth-1,boxHeight-1);
-  const temperatureLabel=actualOneSecond?"RAW T (293.15 K)":`T CAL +${flow.temperature_display_offset_c.toFixed(3)} K`;
+  const temperatureLabel=actualOneSecond?"RAW T":`T CAL +${flow.temperature_display_offset_c.toFixed(3)} K`;
   ctx.fillStyle=accent;ctx.font="800 10px system-ui";ctx.fillText(`${id==="IN"?"INLET":"OUTLET"} · ${temperatureLabel}`,left+8,top+15);
   ctx.fillStyle="rgba(239,247,252,.98)";ctx.font="700 10px ui-monospace,monospace";
   ctx.fillText(`T   ${metrics.temperatureC.toFixed(3)} °C`,left+8,top+32);
@@ -4140,7 +4178,7 @@ def write_viewer_bundle(
         actual_one_second = interactive_cfd.get("actual_one_second")
         if actual_one_second:
             status = "PRECISION_ONE_SECOND_RESULTS_READY"
-            status_label = "CFD 결과 · 1 s 실제 셀값 · 20.000 °C 원본 · 보간/패딩 없음"
+            status_label = "CFD 결과 · 1 s 실제값 · 영역별 초기온도 · 보간/패딩 없음"
             calculation_summary = (
                 "<strong>CFD 계산 완료</strong> — 선택된 80만급 메시 결과를 "
                 "t=0–1800 s를 1 s 간격으로 직접 저장했습니다."
@@ -4151,8 +4189,9 @@ def write_viewer_bundle(
                 ]
             )
             calculation_note = (
-                "Figure 1 온도는 293.15 K 원본에서 273.15만 뺀 값이며 "
-                "시간/공간 보간과 무효점 패딩을 하지 않습니다. "
+                "Figure 1은 셀 293.15 K와 냉각수 293 K 초기장을 구분하고, "
+                "각 원본 K 값에서 273.15만 뺍니다. 시간/공간 보간과 "
+                "무효점 패딩을 하지 않습니다. "
                 f"브라우저 저장 양자화 최대오차 {quantization_error:.3e} K."
             )
             if quality_warning:
@@ -4346,10 +4385,12 @@ def write_viewer_bundle(
         },
         "inputs": {
             "inlet_velocity_m_s": config.boundary.inlet_velocity_m_s,
-            "inlet_temperature_K": (
-                float(actual_one_second["initial_temperature_k"])
-                if actual_one_second
-                else config.boundary.inlet_temperature_k
+            "inlet_temperature_K": config.boundary.inlet_temperature_k,
+            "initial_fluid_temperature_K": (
+                config.boundary.initial_fluid_temperature_k
+            ),
+            "initial_solid_temperature_K": (
+                config.boundary.initial_solid_temperature_k
             ),
             "fluid_density_kg_m3": config.fluid.density_kg_m3,
             "dynamic_viscosity_Pa_s": config.fluid.dynamic_viscosity_pa_s,
@@ -4402,7 +4443,7 @@ def write_viewer_bundle(
         "해당 위치에서 잘린 셀에 저장된 셀 온도만 표시합니다.\n"
         + (
             "주의: 계산은 1,800초까지 완료됐지만 최종 60초 완전 에너지 수지 "
-            "평균이 3.8996%로 2% 목표를 넘어서 품질 경고 상태입니다.\n"
+            f"평균이 {balance_label}로 2% 목표를 넘어서 품질 경고 상태입니다.\n"
             if quality_warning
             else ""
         )
