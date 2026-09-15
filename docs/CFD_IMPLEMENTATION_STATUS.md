@@ -39,8 +39,11 @@ measurement; this estimate is not itself a pass.
   temperature, k and omega.
 - Cold-flow profiles omit 115 battery-temperature monitors while retaining
   mass-flow, pressure, field-bound and y+ diagnostics.
-- Docker defaults to 10 MPI ranks.  The measured solver utilization was about
-  1007--1011% CPU on the 10-CPU Docker allocation.
+- The current Docker solver default is 4 MPI ranks.  On the Apple M4 Mac mini,
+  the same 849,284-cell, 60-iteration benchmark took 39 s with four performance
+  cores and 61 s with all ten performance/efficiency cores.  The earlier
+  10-rank result records below remain historical provenance rather than the
+  current default.
 
 ## 2026-09-06 clean L0 production mesh and cold-flow result
 
@@ -368,3 +371,34 @@ measurement; this estimate is not itself a pass.
   `processor9`, duplicate viewer ZIPs and reconstructible caches. The aborted
   full-transient pilot is intentionally retained as performance/Courant
   evidence.
+
+## 2026-09-15 PPT Bernardi 849,284-cell production run
+
+- The opt-in `peneklioglu_bernardi_2c_293p15` source evaluates the PPT-provided
+  `Ri(SOC)` and `DeltaS(SOC)` fits in `q=I^2 Ri-I T DeltaS/F`.  It is restricted
+  to 2 Ah, 2C, 293.15 K and is not presented as the unavailable final expanded
+  fourth-order UDF.
+- The existing 849,284-cell mesh and converged cold-flow fields were reused only
+  after configuration hashes and recursive file comparisons passed.  Steady CHT
+  and frozen-flow transient energy stages were recomputed with the new source.
+- The steady CHT stage passed its configured thermal stability, mass and energy
+  gates.  The additional all-equations-below-1e-6 diagnostic remains false for
+  coolant `k` and `p_rgh`; this diagnostic is not relabelled as a pass.
+- The frozen-flow solver reached 1,800 s cleanly in 2,790.78 s execution time
+  using four MPI ranks.  Final battery volume-average and maximum temperatures
+  are 293.768607 K and 294.214099 K.  Maximum mass imbalance is
+  `1.999469e-9`.
+- A complete transient balance now separates generated heat, coolant removal and
+  fluid/solid storage.  At 1,800 s these are 55.582837 W, 52.986738 W and
+  0.487183 W.  The final-60-second complete imbalance mean/max are
+  3.899551%/4.001272%, above the 2% target but below 5%.
+- The run is therefore retained as
+  `COMPLETED_WITH_ENERGY_BALANCE_WARNING`, not validation PASS.  A one-second
+  continuation diagnostic with 100 energy-coupling iterations and h relaxation
+  0.5 reduced imbalance to 1.065433%; this identifies the next rerun setting but
+  is not spliced into the completed history.
+- All 1,801 integer-second browser frames passed direct-source validation with no
+  interpolation or padding.  Shared uint16 encoding has a maximum temperature
+  error of `7.744851e-6 K`.  The portable viewer includes the actual final field,
+  fixed cold-flow streamlines, temperature graphs, residual history, and the new
+  energy-balance graph with its warning state.

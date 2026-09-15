@@ -1,0 +1,21 @@
+# ``UDF 설명_20260910 (2).pptx``의 2C·293.15 K 발열식을 선택한다.
+# Ri(SOC): Peneklioglu 학위논문 Figure 4.2, Group 7
+# ΔS(SOC): Peneklioglu 학위논문 Figure 4.6, 293.15 K
+# qcell = I^2 Ri - I T ΔS/F, I=2 Ah*2C=4 A
+battery:
+  initial_temperature: "293.15 K"
+  heat_source:
+    mode: peneklioglu_bernardi_2c_293p15
+    correlation: bernardi_ri_entropy_component_fits
+    initial_soc: 1.0
+    reference_temperature: "293.15 K"
+    outside_policy: error
+  electrical_metadata:
+    capacity: "2 Ah"
+    discharge_rate_c: 2.0
+
+# PPT 피팅 온도와 열해석 초기·입구 온도를 일치시킨다.
+boundary:
+  inlet_temperature: "293.15 K"
+  initial_fluid_temperature: "293.15 K"
+  initial_solid_temperature: "293.15 K"

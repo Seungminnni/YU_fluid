@@ -203,7 +203,7 @@ $$
 
 이다. 따라서 결과에서 출구 평균온도가 입구보다 약 0.015 K 높은 것은 발열이 없어서가 아니라, 약 7.2 W의 열을 0.113 kg/s의 물이 운반하기 때문에 예상되는 크기다.
 
-### 4.2 지원하는 네 가지 발열 모드
+### 4.2 지원하는 다섯 가지 발열 모드
 
 | 모드 | 식 | 용도 |
 | --- | --- | --- |
@@ -211,6 +211,7 @@ $$
 | `table_qvol` | CSV의 `time_s, qvol_W_m3`를 구간별 선형 보간 | 사용자가 측정·정의한 시간 발열 |
 | `electrical_joule` | `q'''(t)=I(t)²R(t)/Vcell` | 전류·저항 기반 Joule 대체모델 |
 | `peneklioglu_expanded_first_order` | `q=1.086D-0.84SOC-0.01486Tref+4.41` W/cell | 논문 식 (4.1)의 명시적 provisional 구현 |
+| `peneklioglu_bernardi_2c_293p15` | `q=I²Ri(SOC)-ITΔS(SOC)/F` W/cell | PPT가 지정한 2 Ah·2C·293.15 K 구성식 |
 
 시간표 범위 밖의 값은 `outside_policy=hold`이면 끝값을 유지하고, `error`이면 계산 준비를 실패시킨다. OpenFOAM용 `fvOptions`와 Fluent용 `DEFINE_SOURCE` UDF를 같은 소스 정의에서 만들 수 있지만, 이것이 참고 논문의 공개되지 않은 원본 UDF를 복원했다는 뜻은 아니다.
 
@@ -246,6 +247,43 @@ PDF에는 원본 Fluent UDF가 없고 표의 반올림 계수만으로 raw Kelvi
 최종 4차 UDF 상태는 `BLOCKED_EXTERNAL_INPUT_REQUIRED`다. 이 결정과 메시
 품질의 사람 판단 경계는 `docs/ENGINEERING_JUDGEMENTS.md` 및 생성 묶음의
 `engineering_judgements.json`에 기록한다.
+
+### 4.4 PPT 기준 Bernardi 구성식
+
+`configs/ppt_bernardi_udf.yaml`은 사용자 제공 `UDF 설명_20260910 (2).pptx`의
+식을 선택한다. 내부저항은 학위논문 Figure 4.2의 Group 7, 엔트로피 계수는
+Figure 4.6의 293.15 K 피팅식이다.
+
+$$
+R_i(S)=0.0994-0.145S+0.246S^2-0.126S^3\quad[\Omega]
+$$
+
+$$
+\Delta S(S)=-68.5+22.2S+449.1S^2-568.3S^3+138.6S^4
+\quad[\mathrm{J/(mol\,K)}]
+$$
+
+2 Ah 셀의 2C 방전전류는 4 A이고, `T=293.15 K`,
+`F=96485.33212 C/mol`을 사용한다.
+
+$$
+q_\mathrm{cell}=I^2R_i-\frac{IT\Delta S}{F},\qquad
+q'''=\frac{q_\mathrm{cell}}{\pi D^2L/4}
+$$
+
+`D=0.019 m`, `L=0.068 m`, `SOC(t)=1-t/1800`으로 계산하면 체적발열은
+0초 78,699.333 W/m³, 900초 65,018.234 W/m³, 1,800초
+125,668.881 W/m³다. 비선형 곡선을 논문의 1초 시간간격으로 평가한 1,801개
+값을 OpenFOAM `fvOptions`에 기록하며, Fluent 파일은 같은 다항식을
+`DEFINE_SOURCE` 안에서 직접 평가한다. 23개 셀에는 각각 같은 체적발열을
+적용한다. CAD 명목 전체발열은 `23*qcell`이고, CFD 에너지수지는 격자로
+잘린 실제 `batterySolid` 체적에 `q'''`를 적분한 값을 사용한다. 따라서
+메시 체적오차만큼 두 합계가 미세하게 다를 수 있다.
+
+이 모드는 공개된 구성 피팅식을 재현한 것이며 논문의 최종 CFD에 사용됐다고
+서술된 4차 expanded correlation 원본 UDF와 동일하다고 주장하지 않는다.
+또한 계수의 근거 범위를 지키기 위해 2 Ah, 2C, 293.15 K가 아닌 설정은
+입력검증에서 거부한다. 온도는 고정 피팅조건이므로 국부 셀 온도 피드백도 없다.
 
 ---
 
@@ -328,36 +366,42 @@ $$
 
 즉 “frozen-flow”는 온도를 고정한다는 뜻이 아니라 유동만 고정하고 온도장은 계속 시간 적분한다는 뜻이다. 이는 단방향 열–유동 결합이지만, 유체와 고체의 에너지는 매 시간마다 계면에서 양방향으로 결합되는 CHT다.
 
-### 6.1 현재 800k 임시 UDF 실행 결과
+### 6.1 현재 800k PPT Bernardi 실행 결과
 
-849,284셀 메시에서 논문 식 (4.1)의 opt-in 임시 발열을 0–1,800초까지 실제
-계산했다. `nOuterCorrectors 3`, `energyCoupling.iterations 20`, 유체·고체
-엔탈피 완화계수 0.3을 사용했다. 처음에는 `energyCoupling.maxIter`라는 잘못된
-키 때문에 추가 결합 반복이 실행되지 않았고, 키를 고친 뒤에도 완화하지 않은
-계산은 열적으로 진동했다. 두 실패 실행은 삭제하지 않고 판단 이력에 보존했다.
-60초 안정성 시험을 통과한 현재 설정으로 전체 계산을 수행한 결과는 다음과
-같다.
+현재 UI의 권위 있는 결과는 849,284셀 메시에서 PPT Bernardi 구성식을
+0–1,800초까지 실제 계산한 것이다. 메시와 냉간 유동장은 열원이 꺼진 단계라서
+기존 확정본과 바이트 단위로 일치함을 검사한 뒤 재사용했고, 정상 CHT와 과도
+에너지 단계는 새 발열 이력으로 다시 계산했다. 과도 단계는
+`nOuterCorrectors 3`, `energyCoupling.iterations 20`, 유체·고체 엔탈피
+완화계수 0.3을 사용했다.
 
 | 항목 | 1,800초 결과 |
 | --- | ---: |
-| 임시 UDF 체적발열 | 115,445.866 W/m³ |
-| 실제 메시 고체체적 적분 발열 | 51.061239 W |
-| 냉각수 출구 엔탈피 증가 | 50.242218 W |
-| 최종 60초 평균 / 최대 발열–냉각수 제거열 차이 | 1.6142% / 1.6244% |
-| 23셀 평균온도 | 293.736984 K (20.586984 °C) |
-| 최고 셀 온도 | 294.180071 K (21.030071 °C) |
-| 냉각수 온도장 범위 | 293.149989–294.119391 K |
+| PPT Bernardi 체적발열 | 125,668.881 W/m³ |
+| 실제 메시 고체체적 적분 발열 | 55.582837 W |
+| 냉각수 반출열 | 52.986738 W |
+| 유체·고체 축열률 | 0.487183 W |
+| 순간 완전 에너지 수지 불균형 | 3.7942% |
+| 최종 60초 평균 / 최대 완전 에너지 수지 불균형 | 3.8996% / 4.0013% |
+| 23셀 내부 체적평균온도 | 293.768607 K (20.618607 °C) |
+| 배터리 메시 최고온도 | 294.214099 K (21.064099 °C) |
+| 냉각수 온도장 범위 | 293.149989–294.153741 K |
 | 최대 질량 불균형 | 1.9995×10⁻⁹ |
-| 저장 결과 | 1초 telemetry 1,800개, 온도장 121개 |
+| 저장 결과 | 1초 직접값 1,801프레임, 최종 1,800초 전체장 |
 
-모든 현재 frozen-flow pilot gate는 통과했다. 하지만 이는 293.15 K
-기준온도를 고정한 1차 임시식의 프레임워크 검증 결과다. 국부 배터리 온도를
-되먹임하는 최종 4차 UDF 결과나 실험 검증을 마친 공개용 결과로 승격하지
-않는다. 또한 위 1.6%는 과도상태의 `|Q_source-Q_coolant,out|/Q_source`로,
-유체·고체에 저장되는 열까지 포함한다. 순수 수치 에너지 불균형으로 해석하면
-안 된다. 완전한 과도 에너지수지는 다음 실행부터 두 영역의 내부에너지
-변화율을 함께 적분해 `Q_source=Q_coolant,out+dE_fluid/dt+dE_solid/dt`로
-검사한다.
+계산은 fatal error 없이 1,800초에 도달했고 질량·필드·시간 표본 검사는
+통과했다. 그러나 마지막 60초 완전 에너지 수지 평균은 목표 2%보다 큰
+3.8996%다. 그러므로 결과 파일과 UI는 보존하되 `PASS`가 아니라
+`COMPLETED_WITH_ENERGY_BALANCE_WARNING`으로 분류한다. 1,800→1,801초 진단에서
+결합반복 100회와 엔탈피 완화 0.5를 쓰면 불균형이 1.0654%로 줄었으므로,
+다음 최종 재계산의 후보 설정은 확인됐다. 다만 이 설정으로 전체 1,800초를
+다시 계산하면 현재 Mac mini에서 약 4.5시간이 예상되어 이번 결과에는
+사후적으로 섞지 않았다.
+
+또한 PPT 식은 `SOC(t)`와 293.15 K 고정 피팅온도를 사용하므로 국부 배터리
+온도를 다시 열원에 넣는 온도 피드백 UDF는 아니다. 계산된 온도장은 실제
+CHT 결과지만, 공개되지 않은 논문 최종 4차 expanded UDF와 동일하다고
+주장하지 않는다.
 
 ### full-transient가 반드시 필요한 경우
 
@@ -398,7 +442,7 @@ for t = 1, 2, ..., 1800 s:                  # UI 저장 프레임과 물리시�
 
 | 발열모델 | 발열 갱신 시점 | 같은 1초 안에서 값이 바뀌는가 |
 | --- | --- | --- |
-| 현재 임시 식 `q'''=f(SOC(t),T_ref)` | 물리 시간단계 시작 | 아니오 |
+| 1차 임시식 또는 PPT 구성식 `q'''=f(SOC(t),T_ref)` | 물리 시간단계 시작 | 아니오 |
 | 최종 온도연동 UDF `q'''=f(SOC(t),T_cell)` | 각 PIMPLE 외부 보정 | 예 |
 | 전류·전압까지 연성한 모델 | 전기 상태와 열 상태를 갱신한 각 외부 보정 | 예 |
 
@@ -430,7 +474,7 @@ for t = 1, 2, ..., 1800 s:                  # UI 저장 프레임과 물리시�
 | 시간항 | `steadyState` | 1차 Euler, `Δt=1 s` | 1차 Euler, adaptive `Δt≤0.1 s` |
 | 유동 재계산 | 수행 | 수행하지 않음 | 매 내부 단계 수행 |
 | 비직교 보정 | 유체 2회, 고체 1회 | 1회 | 1회 |
-| 병렬 분할 | Scotch, 기본 10 MPI rank | Scotch, 기본 10 MPI rank | Scotch, 기본 10 MPI rank |
+| 병렬 분할 | Scotch, 기본 4 MPI rank | Scotch, 기본 4 MPI rank | Scotch, 기본 4 MPI rank |
 
 공간 이산화는 유한체적법이다. `grad(U)`는 `cellLimited Gauss linear 1`, 대류항 `div(phi,U)`, `div(phi,h)`, `div(phi,k)`, `div(phi,omega)`는 bounded Gauss upwind를 사용한다. 확산항은 `Gauss linear corrected`, 면 보간은 `linear`, 법선구배는 `corrected`다. 곡면 적합 혼합 메시에서 안정성을 우선한 1차 대류 스킴이므로, 더 높은 차수 스킴을 사용한 결과와 같다고 가정해서는 안 된다.
 
@@ -467,7 +511,7 @@ STEP은 형상 확인용으로, 미터 단위의 개별 STL 27개는 생산 메�
 9. `splitMeshRegions -cellZonesOnly -addZones -useFaceZones`가 계산영역을 `coolant`와 `batterySolid` 두 region으로 나누고 23쌍의 mapped CHT 계면을 만든다.
 10. 두 region의 최종 `checkMesh`, 체적·면적·zone·계면·prism 검증을 모두 통과해야 솔버 실행 스크립트가 허용된다.
 
-메시는 기본적으로 직렬로 만든다. 이 거친 곡면 형상에서는 `snappyHexMesh`의 prism 종료 위치가 MPI 분할에 따라 달라질 수 있기 때문이다. 필요하면 `OPENFOAM_MESH_MPI_RANKS`로 병렬 메시를 명시할 수 있지만, 계산 솔버는 별도로 기본 10 rank를 사용한다.
+메시는 기본적으로 직렬로 만든다. 이 거친 곡면 형상에서는 `snappyHexMesh`의 prism 종료 위치가 MPI 분할에 따라 달라질 수 있기 때문이다. 필요하면 `OPENFOAM_MESH_MPI_RANKS`로 병렬 메시를 명시할 수 있다. 계산 솔버의 현재 기본값은 Apple M4 Mac mini 실측에 따라 4 MPI rank다. 같은 849,284셀·60회 반복에서 4 rank는 39초, 성능·효율 코어를 모두 쓰는 10 rank는 61초였으므로, 이 컴퓨터에서는 성능 코어 4개만 쓰는 편이 빨랐다. `OPENFOAM_MPI_RANKS`로 다른 컴퓨터의 최적값을 명시할 수 있다.
 
 ### 8.3 왜 전부 육면체가 아닌가
 
@@ -620,7 +664,14 @@ $$
 
 ## 10. 현재 계산 결과
 
-두 결과 모두 각자의 메시에서 직접 계산되었다. 아래 온도 평균은 UI가 사용하는 정의에 맞춰 출구는 질량유량 가중, 배터리 표면은 계면 면적가중, 내부는 cellZone 체적가중이다.
+웹앱의 기본 선택은 849,284셀 PPT Bernardi 결과이며, 1초 단위 온도·단면·유선과
+에너지 수지 그래프가 여기에 연결된다. 계산 완료와 검증 PASS를 구분하기 위해
+에너지 수지 2% gate 미달 경고를 화면에 함께 표시한다.
+
+아래 표는 이전 상수발열 기준의 표준/정밀 결과다. 두 결과 모두 각자의
+메시에서 직접 계산됐지만 현재 PPT Bernardi 결과와 발열식이 다르므로 같은
+곡선의 메시 비교값처럼 섞지 않는다. 온도 평균은 UI 정의에 맞춰 출구는
+질량유량 가중, 배터리 표면은 계면 면적가중, 내부는 cellZone 체적가중이다.
 
 | 1,800 s 항목 | 표준 216,577셀 | 정밀 1,316,854셀 |
 | --- | ---: | ---: |
@@ -646,6 +697,7 @@ $$
 과도 계산은 매 정수 초마다 function object로 다음 값을 기록한다.
 
 - 입구·출구 질량유량, 면적평균 압력, `phi` 가중 평균온도
+- 냉각수와 배터리 고체의 체적 온도 적분 `∫T dV`
 - C01–C23 각각의 내부 체적평균 `T`, 내부 `max(T)`
 - C01–C23 각각의 표면 최소·면적평균·최대 `T`
 - `U`, `T`, `p`, `k`, `ω`의 field bounds
@@ -657,6 +709,13 @@ XY 단면은 `z=15%, 32.5%, 50%, 67.5%, 85%`에 놓이며 각 평면은 114 × 1
 세로 방향을 반대로 볼 수 있도록 뷰어 제작 단계에서 `x=15%, 32.5%, 50%, 67.5%, 85%`의 YZ 단면도 추가한다. 이 YZ 냉각수·고체 공간장은 보존된 `1,800 s` 최종 `T` 필드에서 포함 계산셀 값을 직접 추출한다. 중간 시각의 YZ 냉각수 공간장은 원 계산에서 저장되지 않았으므로 새 값을 만들지 않고 비워 둔다. 대신 그 시각에 실제로 저장된 C01–C23 내부 체적평균과 표면 표본을 사용해, 해당 X 위치가 자르는 5개 또는 4개 셀 단면만 색칠한다.
 
 배터리 표면 표본은 셀 하나당 옆면 32방향 × 16높이와 위·아래 캡 각각 32점, 즉 576점이다. 23개 전체는 13,248점이다. 원통의 실제 경계면에서 0.35 mm 안쪽 고체셀 값을 읽어 “표면 근처의 직접 고체값”으로 사용한다.
+
+에너지 수지는 상수 물성 조건에서 두 영역의 저장 열에너지를
+`ρCp∫T dV`로 계산하고, 1초 후향차분으로 축열률을 구한다. 같은 시각의 실제
+메시 적분 발열과 냉각수 반출열을 사용해
+`Qgenerated = Qremoved + Qstored + residual`을 구성한다. 따라서 UI의 6번
+그래프는 단순히 발열과 출구열의 차이를 “오차”로 부르는 것이 아니라 과도
+축열을 별도 항으로 분리한다.
 
 OpenFOAM probe의 `interpolationScheme cell`은 후보점이 들어 있는 계산셀의 값을 그대로 반환한다. 계산영역 밖이거나 찾지 못한 점은 invalid로 남기고 저장에서 제외하며, 이 위치정보를 `valid_indices`로 보존한다. 이웃값으로 구멍을 채우지 않는다.
 
@@ -842,9 +901,11 @@ python3 -m http.server 8765 --directory build/reference_viewer
 | `src/cfd_twin/geometry.py` | 5–4–5–4–5 배치, 충돌·간격 검사 |
 | `src/cfd_twin/cad.py` | CadQuery solid, STEP/STL, CAD 체적·면적 검증 |
 | `src/cfd_twin/production_mesh.py` | blockMesh/snappyHexMesh/refineMesh/region 분리와 메시 gate |
-| `src/cfd_twin/heat_source.py` | 상수·table·Joule 발열과 fvOptions/UDF 생성 |
+| `src/cfd_twin/battery_correlation.py` | 논문 1차식과 PPT의 Ri·ΔS·Bernardi 발열 계산 |
+| `src/cfd_twin/heat_source.py` | 상수·table·Joule·논문 발열과 fvOptions/UDF 생성 |
 | `src/cfd_twin/openfoam_case.py` | CHT 물성, 경계조건, 수치스킴, 실행 프로파일 |
 | `src/cfd_twin/openfoam_*_validation.py` | mesh, y+, 잔차, 질량·에너지·온도 gate |
+| `src/cfd_twin/openfoam_energy_balance.py` | 매초 유체·고체 축열, 반출열, 수치 불균형 계산 |
 | `src/cfd_twin/actual_one_second.py` | 직접 probe를 1초 uint16 데이터로 포장·전수검증 |
 | `src/cfd_twin/openfoam_results.py` | VTK field, 표면, 유선 추출 |
 | `src/cfd_twin/viewer.py` | 검증 결과를 휴대형 HTML/CSS/JS UI로 구성 |

@@ -2,8 +2,8 @@
 
 현재 기준 계산은 기존 baseline의 상수 16,325 W/m^3를 사용한다. 시간표와
 I(t)^2 R(t)/Vcell 모드는 확장용 대체모델이다. 보유 논문에 숫자로 명시된
-1차 상관식은 opt-in provisional UDF로 만들 수 있지만, 공개되지 않은 최종
-4차 UDF와 같다고 간주하지 않는다.
+1차 상관식과 2C·293.15 K의 Bernardi 구성식은 opt-in으로 만들 수 있지만,
+둘 다 공개되지 않은 최종 4차 UDF와 같다고 간주하지 않는다.
 """
 
 from __future__ import annotations
@@ -18,9 +18,18 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 from .battery_correlation import (
+    PENEKLIOGLU_BERNARDI_CAPACITY_AH,
+    PENEKLIOGLU_BERNARDI_C_RATE,
+    PENEKLIOGLU_BERNARDI_TEMPERATURE_K,
+    PENEKLIOGLU_ENTROPY_COEFFICIENTS,
+    PENEKLIOGLU_FARADAY_C_MOL,
     PENEKLIOGLU_FIRST_ORDER_COEFFICIENTS,
+    PENEKLIOGLU_RESISTANCE_COEFFICIENTS,
     PENEKLIOGLU_TRAINING_OUTPUT_MINIMUM_W,
     discharge_soc,
+    peneklioglu_293p15_entropy_j_molk,
+    peneklioglu_2c_293p15_resistance_ohm,
+    peneklioglu_bernardi_2c_293p15_heat_terms_w,
     peneklioglu_expanded_first_order_q_w,
 )
 from .config import ResolvedConfig
@@ -283,6 +292,116 @@ class PenekliogluExpandedFirstOrderSource:
         }
 
 
+@dataclass(frozen=True)
+class PenekliogluBernardi2C293KSource:
+    """PPT에 적힌 2C·293.15 K Bernardi 구성식을 체적발열로 변환한다.
+
+    내부저항과 엔트로피 계수는 각각 학위논문 Figure 4.2와 Figure 4.6의
+    공개된 피팅식이다. 2 Ah 셀의 2C 방전전류 4 A, Faraday 상수와
+    ``q=I²Ri-I*T*ΔS/F``를 사용한다. 온도는 293.15 K로 고정되므로 이
+    모델은 국부 셀 온도 피드백을 포함하지 않는다.
+    """
+
+    initial_soc: float
+    cell_volume_m3: float
+    outside_policy: str = "error"
+    mode: str = "peneklioglu_bernardi_2c_293p15"
+
+    def __post_init__(self) -> None:
+        if self.cell_volume_m3 <= 0 or not math.isfinite(self.cell_volume_m3):
+            raise ProfileError("cell volume must be finite and positive")
+        if self.outside_policy not in {"hold", "error"}:
+            raise ProfileError("outside_policy must be hold or error")
+        # Validate the selected starting point immediately instead of failing
+        # after an expensive mesh/solver build.
+        self.heat_terms_w(0.0)
+
+    @property
+    def current_a(self) -> float:
+        return PENEKLIOGLU_BERNARDI_CAPACITY_AH * PENEKLIOGLU_BERNARDI_C_RATE
+
+    @property
+    def discharge_end_s(self) -> float:
+        return self.initial_soc * 3600.0 / PENEKLIOGLU_BERNARDI_C_RATE
+
+    def soc(self, time_s: float) -> float:
+        return discharge_soc(
+            time_s,
+            c_rate=PENEKLIOGLU_BERNARDI_C_RATE,
+            initial_soc=self.initial_soc,
+            outside_policy=self.outside_policy,
+        )
+
+    def resistance_ohm(self, time_s: float) -> float:
+        return peneklioglu_2c_293p15_resistance_ohm(self.soc(time_s))
+
+    def entropy_j_molk(self, time_s: float) -> float:
+        return peneklioglu_293p15_entropy_j_molk(self.soc(time_s))
+
+    def heat_terms_w(self, time_s: float) -> tuple[float, float, float]:
+        return peneklioglu_bernardi_2c_293p15_heat_terms_w(self.soc(time_s))
+
+    def qcell(self, time_s: float) -> float:
+        return self.heat_terms_w(time_s)[2]
+
+    def qvol(self, time_s: float) -> float:
+        return self.qcell(time_s) / self.cell_volume_m3
+
+    def breakpoints(self) -> tuple[float, ...]:
+        """논문의 1 s 시간간격에서 비선형 발열곡선을 표본화한다."""
+
+        whole_seconds = range(0, int(self.discharge_end_s) + 1)
+        times = [float(time_s) for time_s in whole_seconds]
+        if not times or not math.isclose(times[-1], self.discharge_end_s):
+            times.append(self.discharge_end_s)
+        return tuple(times)
+
+    def manifest(self) -> dict[str, object]:
+        q0 = self.heat_terms_w(0.0)
+        qend = self.heat_terms_w(self.discharge_end_s)
+        return {
+            "mode": self.mode,
+            "status": "PPT_BERNARDI_COMPONENT_FITS_IMPLEMENTED",
+            "formula_W_per_cell": "q=I^2*Ri(SOC)-I*T*DeltaS(SOC)/F",
+            "soc_formula": "SOC(t)=SOC0-2*t/3600",
+            "fixed_conditions": {
+                "capacity_Ah": PENEKLIOGLU_BERNARDI_CAPACITY_AH,
+                "c_rate": PENEKLIOGLU_BERNARDI_C_RATE,
+                "current_A": self.current_a,
+                "temperature_K": PENEKLIOGLU_BERNARDI_TEMPERATURE_K,
+                "faraday_C_mol": PENEKLIOGLU_FARADAY_C_MOL,
+            },
+            "resistance_formula_Ohm": "0.0994-0.145*S+0.246*S^2-0.126*S^3",
+            "resistance_coefficients": PENEKLIOGLU_RESISTANCE_COEFFICIENTS,
+            "resistance_source": "Peneklioglu thesis Figure 4.2, Group 7, 2C and 293.15 K",
+            "entropy_formula_J_molK": "-68.5+22.2*S+449.1*S^2-568.3*S^3+138.6*S^4",
+            "entropy_coefficients": PENEKLIOGLU_ENTROPY_COEFFICIENTS,
+            "entropy_source": "Peneklioglu thesis Figure 4.6, 293.15 K",
+            "initial_soc": self.initial_soc,
+            "discharge_end_s": self.discharge_end_s,
+            "sample_interval_s": 1.0,
+            "q_cell_W": {
+                "at_0_s": q0[2],
+                "at_discharge_end": qend[2],
+            },
+            "q_irreversible_W": {
+                "at_0_s": q0[0],
+                "at_discharge_end": qend[0],
+            },
+            "q_reversible_W": {
+                "at_0_s": q0[1],
+                "at_discharge_end": qend[1],
+            },
+            "qvol_W_m3": {
+                "at_0_s": q0[2] / self.cell_volume_m3,
+                "at_discharge_end": qend[2] / self.cell_volume_m3,
+            },
+            "temperature_semantics": "fixed_293p15K_fit_not_local_cell_feedback",
+            "paper_equivalence": "published_ri_entropy_component_fits_not_final_fourth_order_expanded_udf",
+            "final_fourth_order_udf_status": "NOT_APPLIED_SEPARATE_PUBLISHED_COMPONENT_FIT_PATH",
+        }
+
+
 def _resolve_profile(config: ResolvedConfig, value: str) -> Path:
     candidate = Path(value)
     if not candidate.is_absolute():
@@ -313,6 +432,13 @@ def source_from_config(config: ResolvedConfig) -> HeatSource:
             c_rate=config.battery.electrical.discharge_rate_c,
             initial_soc=spec.initial_soc,
             reference_temperature_k=spec.reference_temperature_k,
+            cell_volume_m3=config.derived.cell_volume_m3,
+            outside_policy=spec.outside_policy,
+        )
+    if spec.mode == "peneklioglu_bernardi_2c_293p15":
+        assert spec.initial_soc is not None
+        return PenekliogluBernardi2C293KSource(
+            initial_soc=spec.initial_soc,
             cell_volume_m3=config.derived.cell_volume_m3,
             outside_policy=spec.outside_policy,
         )
@@ -352,11 +478,14 @@ def render_openfoam_fvoptions(source: HeatSource, energy_field: str) -> str:
     if len(samples) == 1:
         source_entry = f"        {energy_field:<12} ({samples[0][1]:.12g} 0);"
     else:
-        rows = " ".join(f"({t:.12g} {q:.12g})" for t, q in samples)
+        rows = "\n".join(f"                ({t:.12g} {q:.12g})" for t, q in samples)
         source_entry = (
             f"        {energy_field}\n"
             "        {\n"
-            f"            explicit table ({rows});\n"
+            "            explicit table\n"
+            "            (\n"
+            f"{rows}\n"
+            "            );\n"
             "            implicit none;\n"
             "        }"
         )
@@ -388,6 +517,8 @@ def _c_array(values: Iterable[float]) -> str:
 
 
 def render_fluent_udf(source: HeatSource) -> str:
+    if isinstance(source, PenekliogluBernardi2C293KSource):
+        return _render_fluent_bernardi_udf(source)
     samples = _sample_source(source)
     if len(samples) == 1:
         body = f"    return {samples[0][1]:.17g};"
@@ -433,6 +564,50 @@ DEFINE_SOURCE(battery_heat_source, cell, thread, dS, eqn)
 '''
 
 
+def _render_fluent_bernardi_udf(
+    source: PenekliogluBernardi2C293KSource,
+) -> str:
+    """PPT 수식을 표 탐색 없이 직접 평가하는 Fluent DEFINE_SOURCE를 만든다."""
+
+    return f'''#include "udf.h"
+
+/* Generated from the published Peneklioglu component fits selected by the
+ * user-provided UDF presentation. Valid only for a 2 Ah cell at 2C and 293.15 K.
+ * This is not the unpublished fourth-order expanded-correlation UDF.
+ * Volumetric source unit: W/m^3.
+ */
+#define INITIAL_SOC {source.initial_soc:.17g}
+#define C_RATE {PENEKLIOGLU_BERNARDI_C_RATE:.17g}
+#define CURRENT_A {source.current_a:.17g}
+#define TEMPERATURE_K {PENEKLIOGLU_BERNARDI_TEMPERATURE_K:.17g}
+#define FARADAY_C_MOL {PENEKLIOGLU_FARADAY_C_MOL:.17g}
+#define CELL_VOLUME_M3 {source.cell_volume_m3:.17g}
+
+static real battery_qvol(real time)
+{{
+    real soc = INITIAL_SOC - C_RATE * time / 3600.0;
+    real resistance;
+    real entropy;
+    real q_irreversible;
+    real q_reversible;
+
+    if (soc < 0.0) soc = 0.0;
+    if (soc > 1.0) soc = 1.0;
+    resistance = ((-0.126 * soc + 0.246) * soc - 0.145) * soc + 0.0994;
+    entropy = ((((138.6 * soc - 568.3) * soc + 449.1) * soc + 22.2) * soc - 68.5);
+    q_irreversible = CURRENT_A * CURRENT_A * resistance;
+    q_reversible = -CURRENT_A * TEMPERATURE_K * entropy / FARADAY_C_MOL;
+    return (q_irreversible + q_reversible) / CELL_VOLUME_M3;
+}}
+
+DEFINE_SOURCE(battery_heat_source, cell, thread, dS, eqn)
+{{
+    dS[eqn] = 0.0;
+    return battery_qvol(CURRENT_TIME);
+}}
+'''
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -466,21 +641,40 @@ def write_heat_source_bundle(
     )
     _atomic_write(output / "Fluent" / "battery_heat_source.c", render_fluent_udf(source))
     write_engineering_judgements(output / "engineering_judgements.json")
-    if isinstance(source, PenekliogluExpandedFirstOrderSource):
-        sample_times = sorted(
-            set(
-                [0.0, source.discharge_end_s]
-                + [
-                    float(time_s)
-                    for time_s in range(0, int(source.discharge_end_s) + 1, 60)
-                ]
+    if isinstance(
+        source,
+        (PenekliogluExpandedFirstOrderSource, PenekliogluBernardi2C293KSource),
+    ):
+        if isinstance(source, PenekliogluBernardi2C293KSource):
+            sample_times = list(source.breakpoints())
+            rows = [
+                "time_s,SOC,Ri_Ohm,DeltaS_J_molK,"
+                "q_irreversible_W,q_reversible_W,q_cell_W,qvol_W_m3"
+            ]
+            for time_s in sample_times:
+                q_irreversible, q_reversible, q_cell = source.heat_terms_w(time_s)
+                rows.append(
+                    f"{time_s:.12g},{source.soc(time_s):.12g},"
+                    f"{source.resistance_ohm(time_s):.12g},"
+                    f"{source.entropy_j_molk(time_s):.12g},"
+                    f"{q_irreversible:.12g},{q_reversible:.12g},"
+                    f"{q_cell:.12g},{source.qvol(time_s):.12g}"
+                )
+        else:
+            sample_times = sorted(
+                set(
+                    [0.0, source.discharge_end_s]
+                    + [
+                        float(time_s)
+                        for time_s in range(0, int(source.discharge_end_s) + 1, 60)
+                    ]
+                )
             )
-        )
-        rows = ["time_s,SOC,q_cell_W,qvol_W_m3"]
-        rows.extend(
-            f"{time_s:.12g},{source.soc(time_s):.12g},"
-            f"{source.qcell(time_s):.12g},{source.qvol(time_s):.12g}"
-            for time_s in sample_times
-        )
+            rows = ["time_s,SOC,q_cell_W,qvol_W_m3"]
+            rows.extend(
+                f"{time_s:.12g},{source.soc(time_s):.12g},"
+                f"{source.qcell(time_s):.12g},{source.qvol(time_s):.12g}"
+                for time_s in sample_times
+            )
         _atomic_write(output / "heat_source_samples.csv", "\n".join(rows) + "\n")
     return manifest

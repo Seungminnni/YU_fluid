@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import ResolvedConfig
 from .geometry import cell_placements, geometry_report
+from .heat_source import source_from_config
 from .openfoam_cold_flow_validation import parse_cold_flow_log
 from .openfoam_results import (
     LEGACY_DISPLAY_TEMPERATURE_OFFSET_C,
@@ -92,6 +93,23 @@ def _mesh_runs_payload(
     """서로 다른 메시의 필드를 바꿔치기하지 않고 선택 가능한 결과를 설명한다."""
 
     precision = dict(CURRENT_PRECISION_MESH)
+    precision_target_report = (
+        case / "production/L3/reports/production_mesh/mesh_target_composition.json"
+    )
+    if precision_target_report.is_file():
+        target = json.loads(precision_target_report.read_text(encoding="utf-8"))
+        actual = target.get("actual", {})
+        for name in (
+            "total_cells",
+            "fluid_cells",
+            "solid_cells",
+            "points",
+            "hexahedron_fraction",
+        ):
+            if name in actual:
+                precision[name] = actual[name]
+        if "cell_types" in actual:
+            precision["cell_types"] = actual["cell_types"]
     precision_zone_report = (
         case / "production/L3/reports/production_mesh/cellZones_pre_split.json"
     )
@@ -105,6 +123,11 @@ def _mesh_runs_payload(
             for name, value in zone_counts.items()
             if str(name).startswith("battery_C")
         )
+    precision_kind = (
+        "80만급 생산 결과"
+        if 700_000 <= int(precision["total_cells"]) < 1_000_000
+        else "정밀 결과"
+    )
 
     target_report_path = (
         case / "production/single/reports/production_mesh/mesh_target_composition.json"
@@ -118,13 +141,16 @@ def _mesh_runs_payload(
     return [
         {
             "id": "precision",
-            "label": "정밀 결과 · 1,316,854셀",
+            "label": f"{precision_kind} · {int(precision['total_cells']):,}셀",
             "state_label": "계산 완료",
             "mesh_ready": True,
             "data_ready": precision_data_ready,
             "counts": precision,
-            "element_family": "hexa-dominant body-fitted",
-            "note": "0–1800 s 직접 결과가 연결된 현재 정밀 메시입니다.",
+            "element_family": (
+                "hexa-dominant body-fitted "
+                f"({100 * float(precision['hexahedron_fraction']):.3f}% hexahedra)"
+            ),
+            "note": f"0–1800 s 직접 결과가 연결된 현재 {precision_kind}입니다.",
         },
         {
             "id": "single",
@@ -166,6 +192,10 @@ def _convergence_payload(case: Path) -> dict[str, object]:
     """OpenFOAM 로그의 raw initial residual을 수렴 그래프용으로 추출한다."""
 
     transient_candidates = (
+        case
+        / "production/L3/runs/frozen_flow_actual_1s_xy5/reports/solver/transient_residuals.csv",
+        case
+        / "production/L3/runs/frozen_flow_actual_1s/reports/solver/transient_residuals.csv",
         case
         / "production/single/runs/frozen_flow_actual_1s/reports/solver/transient_residuals.csv",
         case
@@ -219,11 +249,17 @@ def _convergence_payload(case: Path) -> dict[str, object]:
             if "frozen_flow_actual_1s" in transient_residual_path.parts
             else "cumulative_pimple_outer_iteration"
         )
-        scope = (
-            "새 표준 결과 · 전체 과도 CHT 계산"
+        result_kind = (
+            "새 표준 결과"
             if "single" in transient_residual_path.parts
-            else "정밀 결과 · 전체 과도 CHT 계산"
+            else "80만급/정밀 결과"
         )
+        calculation_kind = (
+            "고정 유동 과도 에너지 계산"
+            if "frozen_flow_actual_1s" in transient_residual_path.parts
+            else "전체 과도 CHT 계산"
+        )
+        scope = f"{result_kind} · {calculation_kind}"
     elif run_dir is not None:
         if "single" in run_dir.parts:
             scope = "새 표준 결과 · 정상상태 CHT 초기화"
@@ -1890,6 +1926,8 @@ aside { min-width:0; overflow:visible; padding-right:3px; }
 .result-badge::before { content:""; width:6px; height:6px; border-radius:50%; background:#8ba0aa; }
 .validated .result-badge { color:#126a57; background:#e7f6f0; }
 .validated .result-badge::before { background:var(--success); box-shadow:0 0 7px #16846855; }
+.quality-warning .result-badge { color:#955300; background:#fff1d8; }
+.quality-warning .result-badge::before { background:#e59318; box-shadow:0 0 7px #e5931855; }
 .kpi-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
 .kpi-grid article { min-width:0; padding:10px; border:1px solid #dce6eb; border-radius:5px; background:#f7fafb; }
 .kpi-grid span,.kpi-grid small { display:block; overflow:hidden; color:#71838d; font-size:9px; white-space:nowrap; text-overflow:ellipsis; }
@@ -3254,13 +3292,15 @@ function renderActiveMeshRun(){
   });
   meshRunNote.textContent=run.note;
   const waiting=run.data_ready===false;
-  document.getElementById("status").textContent=waiting?`${run.label} · ${run.state_label}`:(actualOneSecond?`계산 완료 · ${run.label} · 1초 단위`:model.status_label);
-  document.getElementById("result-badge").textContent=waiting?run.state_label:(model.actual_solver_data?"계산 완료":"준비 중");
+  const qualityWarning=Boolean(model.quality_warning)&&!waiting;
+  document.getElementById("status").textContent=waiting?`${run.label} · ${run.state_label}`:(qualityWarning?`계산 완료 · 에너지 수지 경고 · ${run.label} · 1초 단위`:(actualOneSecond?`계산 완료 · ${run.label} · 1초 단위`:model.status_label));
+  document.getElementById("result-badge").textContent=waiting?run.state_label:(qualityWarning?"계산 완료 · 경고":(model.actual_solver_data?"계산 완료":"준비 중"));
   document.getElementById("calculation-summary").innerHTML=waiting
     ?`<strong>${run.label}</strong> · 자체 CFD 결과 없음`
-    :`<strong>${run.label}</strong> · ${(actualOneSecond?.mesh_cell_count||counts.total_cells).toLocaleString()} cells · 0–1800 s`;
+    :(qualityWarning?model.calculation_summary:`<strong>${run.label}</strong> · ${(actualOneSecond?.mesh_cell_count||counts.total_cells).toLocaleString()} cells · 0–1800 s`);
   document.getElementById("calculation-note").textContent=waiting?run.note:model.calculation_note;
-  document.getElementById("calculation-card").classList.toggle("validated",model.actual_solver_data&&!waiting);
+  document.getElementById("calculation-card").classList.toggle("validated",model.actual_solver_data&&!waiting&&!qualityWarning);
+  document.getElementById("calculation-card").classList.toggle("quality-warning",qualityWarning);
   flowPlay.disabled=waiting||!flow.enabled;flowSeek.disabled=waiting||!flow.enabled;
   draw();
 }
@@ -3274,10 +3314,17 @@ if(meshRuns.length){
   });
 }else{document.querySelector(".mesh-run-card").hidden=true;}
 rows(document.getElementById("geometry"),{"해석 영역":`${box.x} × ${box.y} × ${box.z} mm`,"배터리":`${model.cells.length}개 · Ø${model.cell_diameter_mm} × ${model.cell_length_mm} mm`,"입·출구":`각 Ø${model.port_diameter_mm} mm`,"셀 배열":"5–4–5–4–5 교차 배열"});
+const heat=model.heat_source||null;
+const heatRange=(start,end,digits,unit)=>Math.abs(Number(start)-Number(end))<1e-12
+  ?`${Number(start).toFixed(digits)} ${unit}`
+  :`${Number(start).toFixed(digits)} → ${Number(end).toFixed(digits)} ${unit}`;
 rows(document.getElementById("derived"),{
   "계산 격자":actualOneSecond?.mesh_cell_count?`${actualOneSecond.mesh_cell_count.toLocaleString()} cells`:"—",
   "Reynolds 수":model.derived.reynolds.toLocaleString(undefined,{maximumFractionDigits:1}),
-  "총 발열":`${model.derived.total_heat_w.toFixed(3)} W`,
+  "발열 모델":heat?.label||model.derived.heat_source_mode,
+  "셀 발열 (0 → 1800 s)":heat?heatRange(heat.cell_heat_start_w,heat.cell_heat_end_w,6,"W"):`${model.derived.cell_heat_w.toFixed(6)} W`,
+  "23셀 명목 발열 (0 → 1800 s)":heat?heatRange(heat.total_heat_start_w,heat.total_heat_end_w,6,"W"):`${model.derived.total_heat_w.toFixed(6)} W`,
+  "체적발열 (0 → 1800 s)":heat?heatRange(heat.qvol_start_w_m3,heat.qvol_end_w_m3,2,"W/m³"):`${model.derived.qvol_w_m3.toFixed(2)} W/m³`,
   "냉각수 밀도":`${model.inputs.fluid_density_kg_m3} kg/m³`,
   "비열 Cp":`${model.inputs.fluid_cp_J_kgK} J/(kg·K)`,
   "점도 μ":`${model.inputs.dynamic_viscosity_Pa_s} Pa·s`,
@@ -3842,14 +3889,15 @@ function showCellNotification(cellId){
 }
 cellGrid.querySelectorAll("[data-cell-id]").forEach(button=>button.addEventListener("click",()=>showCellNotification(button.dataset.cellId)));
 const meshCellCount=actualOneSecond?.mesh_cell_count;
-document.getElementById("status").textContent=actualOneSecond?"계산 완료 · 정밀 결과 · 1초 단위":model.status_label;
-document.getElementById("result-badge").textContent=model.actual_solver_data?"계산 완료":"준비 중";
+document.getElementById("status").textContent=model.quality_warning?"계산 완료 · 에너지 수지 경고 · 1초 단위":(actualOneSecond?"계산 완료 · 정밀 결과 · 1초 단위":model.status_label);
+document.getElementById("result-badge").textContent=model.quality_warning?"계산 완료 · 경고":(model.actual_solver_data?"계산 완료":"준비 중");
 document.getElementById("calculation-summary").innerHTML=model.actual_solver_data
   ?`<strong>정밀 CFD 결과</strong> · ${meshCellCount?meshCellCount.toLocaleString()+" cells · ":""}0–1800 s`
   :model.calculation_summary;
 document.getElementById("calculation-note").textContent=model.calculation_note;
-document.getElementById("calculation-card").classList.toggle("validated",model.actual_solver_data);
-document.getElementById("provenance").textContent=model.actual_solver_data?"검증된 CFD 결과 뷰어":"형상 미리보기";
+document.getElementById("calculation-card").classList.toggle("validated",model.actual_solver_data&&!model.quality_warning);
+document.getElementById("calculation-card").classList.toggle("quality-warning",Boolean(model.quality_warning));
+document.getElementById("provenance").textContent=model.quality_warning?"실제 CFD 결과 · 품질 경고":(model.actual_solver_data?"검증된 CFD 결과 뷰어":"형상 미리보기");
 renderActiveMeshRun();
 let stageResizeFrame=0;
 if(typeof ResizeObserver==="function"){
@@ -3904,6 +3952,20 @@ def write_viewer_bundle(
     output = Path(output_dir).resolve()
     report = geometry_report(config)
     placements = cell_placements(config)
+    heat_source = source_from_config(config)
+    heat_source_manifest = heat_source.manifest()
+    heat_source_end_time_s = 1800.0
+    qvol_start_w_m3 = heat_source.qvol(0.0)
+    qvol_end_w_m3 = heat_source.qvol(heat_source_end_time_s)
+    cell_heat_start_w = qvol_start_w_m3 * config.derived.cell_volume_m3
+    cell_heat_end_w = qvol_end_w_m3 * config.derived.cell_volume_m3
+    heat_source_labels = {
+        "constant_qvol": "상수 체적발열",
+        "table_qvol": "시간표 체적발열",
+        "electrical_joule": "Joule 발열",
+        "peneklioglu_expanded_first_order": "Peneklioglu 1차 상관식",
+        "peneklioglu_bernardi_2c_293p15": "PPT Bernardi · 2C · 293.15 K",
+    }
     figures = figure_catalog()
     result_manifest: dict[str, object] | None = None
     mesh_independence: dict[str, object] = {}
@@ -3941,6 +4003,19 @@ def write_viewer_bundle(
         and result_manifest.get("data_status") == "L0_CFD_RESULTS_READY"
         and result_manifest.get("actual_solver_data") is True
     )
+    quality_status = str(
+        result_manifest.get("quality_status", "") if result_manifest else ""
+    )
+    validation_status = str(
+        result_manifest.get("validation_status", "") if result_manifest else ""
+    )
+    validation_warnings = list(
+        result_manifest.get("validation_warnings", []) if result_manifest else []
+    )
+    quality_warning = bool(
+        actual_solver_data
+        and ("WARNING" in quality_status or validation_status.endswith("_FAILED"))
+    )
     if actual_solver_data:
         summary = result_manifest.get("final_summary", {})
         final_tmax_k = float(summary.get("battery_tmax_k", float("nan")))
@@ -3968,6 +4043,24 @@ def write_viewer_bundle(
             calculation_note = (
                 f"최종 체적 Tmax {final_tmax_k:.6f} K · Figure 3의 "
                 "격자 독립성 완료 전에는 논문 최종값으로 사용하지 않습니다."
+            )
+        if quality_warning:
+            balance_fraction = float(
+                summary.get("complete_energy_balance_mean_fraction", float("nan"))
+            )
+            balance_label = (
+                f"{100.0 * balance_fraction:.4f}%"
+                if math.isfinite(balance_fraction)
+                else "기준 초과"
+            )
+            status = "RESULT_READY_WITH_QUALITY_WARNING"
+            status_label = "CFD 결과 · 에너지 수지 경고"
+            calculation_summary = (
+                "<strong>계산 완료 · 품질 경고</strong> — 마지막 60초 "
+                f"에너지 수지 불균형 평균 {balance_label} (목표 2% 이하)."
+            )
+            calculation_note += (
+                " 결과값은 보존하되 최종 검증 PASS로 분류하지 않습니다."
             )
     else:
         status = "GEOMETRY_PREVIEW_CFD_NOT_RUN"
@@ -4014,7 +4107,7 @@ def write_viewer_bundle(
             status = "PRECISION_ONE_SECOND_RESULTS_READY"
             status_label = "CFD 결과 · 1 s 실제 셀값 · 20.000 °C 원본 · 보간/패딩 없음"
             calculation_summary = (
-                "<strong>CFD 계산 완료</strong> — 정밀/표준 메시 결과를 "
+                "<strong>CFD 계산 완료</strong> — 선택된 80만급 메시 결과를 "
                 "t=0–1800 s를 1 s 간격으로 직접 저장했습니다."
             )
             quantization_error = float(
@@ -4027,6 +4120,28 @@ def write_viewer_bundle(
                 "시간/공간 보간과 무효점 패딩을 하지 않습니다. "
                 f"브라우저 저장 양자화 최대오차 {quantization_error:.3e} K."
             )
+            if quality_warning:
+                final_summary = result_manifest.get("final_summary", {})
+                balance_fraction = float(
+                    final_summary.get(
+                        "complete_energy_balance_mean_fraction", float("nan")
+                    )
+                )
+                balance_label = (
+                    f"{100.0 * balance_fraction:.4f}%"
+                    if math.isfinite(balance_fraction)
+                    else "기준 초과"
+                )
+                status = "ONE_SECOND_RESULTS_READY_WITH_QUALITY_WARNING"
+                status_label = "CFD 결과 · 에너지 수지 경고 · 1 s 실제값"
+                calculation_summary = (
+                    "<strong>계산 완료 · 품질 경고</strong> — 849,284셀, "
+                    f"0–1800 s. 마지막 60초 에너지 수지 불균형 평균 {balance_label} "
+                    "(목표 2% 이하)."
+                )
+                calculation_note += (
+                    " 결과값은 보존하되 최종 검증 PASS로 분류하지 않습니다."
+                )
         else:
             status_label += " · 화면온도 +0.150 K"
             calculation_note += (
@@ -4105,6 +4220,10 @@ def write_viewer_bundle(
         "status": status,
         "status_label": status_label,
         "actual_solver_data": actual_solver_data,
+        "quality_status": quality_status,
+        "validation_status": validation_status,
+        "quality_warning": quality_warning,
+        "validation_warnings": validation_warnings,
         "interactive_cfd": interactive_cfd,
         "interactive_cfd_by_mesh": interactive_cfd_by_mesh,
         "mesh_runs": mesh_runs,
@@ -4169,9 +4288,26 @@ def write_viewer_bundle(
         "derived": {
             "reynolds": config.derived.reynolds_table4,
             "paper_reynolds": config.derived.paper_reynolds,
-            "cell_heat_w": config.derived.cell_heat_w,
-            "total_heat_w": config.derived.total_heat_w,
-            "qvol_w_m3": config.battery.heat_source.qvol_w_m3 or 16325.0,
+            "cell_heat_w": cell_heat_start_w,
+            "total_heat_w": cell_heat_start_w * config.cells.count,
+            "qvol_w_m3": qvol_start_w_m3,
+            "heat_source_mode": heat_source.mode,
+        },
+        "heat_source": {
+            "mode": heat_source.mode,
+            "label": heat_source_labels.get(heat_source.mode, heat_source.mode),
+            "time_start_s": 0,
+            "time_end_s": heat_source_end_time_s,
+            "qvol_start_w_m3": qvol_start_w_m3,
+            "qvol_end_w_m3": qvol_end_w_m3,
+            "cell_heat_start_w": cell_heat_start_w,
+            "cell_heat_end_w": cell_heat_end_w,
+            "total_heat_start_w": cell_heat_start_w * config.cells.count,
+            "total_heat_end_w": cell_heat_end_w * config.cells.count,
+            "time_varying": not math.isclose(
+                qvol_start_w_m3, qvol_end_w_m3, rel_tol=1e-12, abs_tol=1e-12
+            ),
+            "manifest": heat_source_manifest,
         },
         "inputs": {
             "inlet_velocity_m_s": config.boundary.inlet_velocity_m_s,
@@ -4229,6 +4365,13 @@ def write_viewer_bundle(
         "1,800초에는 보존된 냉각수와 batterySolid 공간장을 직접 표시합니다.\n"
         "중간 시각의 YZ 냉각수 공간장은 저장되지 않았으므로 표시하지 않고,\n"
         "해당 위치에서 잘린 셀에 저장된 셀 온도만 표시합니다.\n"
+        + (
+            "주의: 계산은 1,800초까지 완료됐지만 최종 60초 완전 에너지 수지 "
+            "평균이 3.8996%로 2% 목표를 넘어서 품질 경고 상태입니다.\n"
+            if quality_warning
+            else ""
+        )
+        +
         "로컬 file:// 재생에는 data 폴더와 해시가 붙은 JS/CSS/model 파일이 필요하므로\n"
         "index.html만 따로 복사하지 마십시오. 최신 Chrome, Edge 또는 Safari를 권장합니다.\n",
     )

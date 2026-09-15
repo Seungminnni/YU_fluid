@@ -23,6 +23,10 @@
 | implied μ | 8.63849×10⁻⁴ Pa·s | DERIVED | 논문 Re 역산, sensitivity 전용 |
 | nominal current | 4 A | DERIVED | 2 Ah × 2C |
 | equivalent R | 19.6716 mΩ | DERIVED | baseline 열과 4 A의 등가값; 측정 저항 아님 |
+| PPT Bernardi Ri | `0.0994-0.145S+0.246S²-0.126S³` Ω | SOURCE | Peneklioglu Figure 4.2, Group 7, 2C·293.15 K |
+| PPT Bernardi ΔS | `-68.5+22.2S+449.1S²-568.3S³+138.6S⁴` J/(mol·K) | SOURCE | Peneklioglu Figure 4.6, 293.15 K |
+| PPT Bernardi qcell | `I²Ri-ITΔS/F` | SOURCE+DERIVED | 논문 식 (3.1), I=4 A, F=96485.33212 C/mol |
+| PPT Bernardi qvol | 78,699.333→125,668.881 W/m³ | DERIVED | 0–1,800 s, 1초 간격; 중간값은 비선형 |
 
 실행 시에는 원본 YAML SHA-256, SI 변환 결과와 geometry SHA-256가
 `resolved_config.json`과 `case_manifest.json`에 함께 저장된다.

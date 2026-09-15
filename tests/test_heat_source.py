@@ -6,10 +6,16 @@ from pathlib import Path
 
 from cfd_twin.config import load_config
 from cfd_twin.errors import ProfileError
+from cfd_twin.battery_correlation import (
+    peneklioglu_293p15_entropy_j_molk,
+    peneklioglu_2c_293p15_resistance_ohm,
+    peneklioglu_bernardi_2c_293p15_heat_terms_w,
+)
 from cfd_twin.heat_source import (
     ConstantVolumetricSource,
     ElectricalJouleSource,
     LinearSeries,
+    PenekliogluBernardi2C293KSource,
     PenekliogluExpandedFirstOrderSource,
     TableVolumetricSource,
     render_fluent_udf,
@@ -17,6 +23,7 @@ from cfd_twin.heat_source import (
     source_from_config,
     write_heat_source_bundle,
 )
+from cfd_twin.openfoam_case import write_openfoam_solver_bundle
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +118,93 @@ class HeatSourceTests(unittest.TestCase):
                 "PROFILE_COUNT 2",
                 (output / "Fluent" / "battery_heat_source.c").read_text(),
             )
+
+    def test_ppt_bernardi_component_fits_match_reference_points(self) -> None:
+        self.assertAlmostEqual(peneklioglu_2c_293p15_resistance_ohm(1.0), 0.0744)
+        self.assertAlmostEqual(peneklioglu_2c_293p15_resistance_ohm(0.5), 0.07265)
+        self.assertAlmostEqual(peneklioglu_2c_293p15_resistance_ohm(0.0), 0.0994)
+        self.assertAlmostEqual(peneklioglu_293p15_entropy_j_molk(1.0), -26.9)
+        self.assertAlmostEqual(peneklioglu_293p15_entropy_j_molk(0.5), -7.5)
+        self.assertAlmostEqual(peneklioglu_293p15_entropy_j_molk(0.0), -68.5)
+        q_irreversible, q_reversible, q_total = (
+            peneklioglu_bernardi_2c_293p15_heat_terms_w(1.0)
+        )
+        self.assertAlmostEqual(q_irreversible, 1.1904)
+        self.assertAlmostEqual(q_reversible, 0.326919535922513)
+        self.assertAlmostEqual(q_total, 1.5173195359225133)
+
+    def test_ppt_bernardi_source_uses_one_second_nonlinear_profile(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "ppt_bernardi_udf.yaml",),
+        )
+        source = source_from_config(config)
+        self.assertIsInstance(source, PenekliogluBernardi2C293KSource)
+        self.assertEqual(len(source.breakpoints()), 1801)
+        self.assertAlmostEqual(source.soc(900.0), 0.5)
+        self.assertAlmostEqual(source.qcell(0.0), 1.5173195359225133)
+        self.assertAlmostEqual(source.qcell(900.0), 1.2535485694951245)
+        self.assertAlmostEqual(source.qcell(1800.0), 2.4228902680554714)
+        self.assertAlmostEqual(config.derived.cell_heat_w, source.qcell(0.0))
+        self.assertAlmostEqual(
+            source.qvol(900.0) * config.derived.cell_volume_m3 * config.cells.count,
+            source.qcell(900.0) * 23,
+        )
+
+    def test_ppt_bernardi_bundle_contains_auditable_terms_and_direct_udf(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "ppt_bernardi_udf.yaml",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            manifest = write_heat_source_bundle(config, output)
+            self.assertEqual(
+                manifest["status"], "PPT_BERNARDI_COMPONENT_FITS_IMPLEMENTED"
+            )
+            samples = (output / "heat_source_samples.csv").read_text().splitlines()
+            self.assertEqual(len(samples), 1802)
+            self.assertIn("q_irreversible_W,q_reversible_W", samples[0])
+            self.assertTrue(samples[-1].startswith("1800,0,"))
+            openfoam = (
+                output / "OpenFOAM" / "batterySolid" / "fvOptions"
+            ).read_text()
+            self.assertIn("explicit table", openfoam)
+            self.assertIn("(900 65018.2340691)", openfoam)
+            self.assertIn("(1800 125668.88145)", openfoam)
+            fluent = (output / "Fluent" / "battery_heat_source.c").read_text()
+            self.assertIn("q_reversible = -CURRENT_A", fluent)
+            self.assertIn("return battery_qvol(CURRENT_TIME);", fluent)
+            self.assertNotIn("PROFILE_COUNT", fluent)
+
+    def test_ppt_bernardi_solver_keeps_steady_source_constant(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "ppt_bernardi_udf.yaml",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            manifest = write_openfoam_solver_bundle(config, output)
+            self.assertEqual(
+                manifest["heat_source_mode"],
+                "peneklioglu_bernardi_2c_293p15",
+            )
+            steady = (
+                output / "profiles/steady/constant/batterySolid/fvOptions"
+            ).read_text()
+            transient = (
+                output / "profiles/frozen_flow/constant/batterySolid/fvOptions"
+            ).read_text()
+            self.assertIn("h            (78699.3333524 0);", steady)
+            self.assertNotIn("explicit table", steady)
+            self.assertIn("explicit table", transient)
+            self.assertIn("(900 65018.2340691)", transient)
+            self.assertIn("(1800 125668.88145)", transient)
+            actual_run = (output / "AllrunFrozenFlowThermalActual1s").read_text()
+            self.assertIn(
+                ': >"$run_dir/frozen_flow_actual_1s.foam"', actual_run
+            )
+            self.assertIn("build_energy_balance.py", actual_run)
 
 
 if __name__ == "__main__":

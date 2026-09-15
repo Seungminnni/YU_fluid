@@ -96,6 +96,27 @@ class ConfigTests(unittest.TestCase):
         self.assertAlmostEqual(changed.boundary.inlet_temperature_k, 293.15)
         self.assertAlmostEqual(changed.boundary.initial_fluid_temperature_k, 293.15)
 
+    def test_ppt_bernardi_overlay_is_restricted_to_published_conditions(self) -> None:
+        overlay = ROOT / "configs" / "ppt_bernardi_udf.yaml"
+        config = load_config(BASELINE, overlay_paths=(overlay,))
+        self.assertEqual(
+            config.battery.heat_source.mode,
+            "peneklioglu_bernardi_2c_293p15",
+        )
+        self.assertAlmostEqual(config.derived.cell_heat_w, 1.5173195359225133)
+        for override, message in (
+            ("battery.electrical_metadata.discharge_rate_c=1.0", "restricted to 2C"),
+            ("battery.electrical_metadata.capacity=2.5 Ah", "restricted to a 2 Ah"),
+            ("battery.heat_source.reference_temperature=298.15 K", "restricted to 293.15 K"),
+        ):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(ConfigError, message):
+                    load_config(
+                        BASELINE,
+                        overlay_paths=(overlay,),
+                        overrides=(override,),
+                    )
+
     def test_unsafe_full_transient_settings_are_rejected(self) -> None:
         mutations = (
             ("max_courant", 5.01),

@@ -409,7 +409,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("relaxationFactors.equations.h -set 0.5", cold_continuation)
             self.assertIn("validate_cold_flow.py", cold_continuation)
             decompose = (output / "system" / "decomposeParDict").read_text()
-            self.assertIn("numberOfSubdomains 10;", decompose)
+            self.assertIn("numberOfSubdomains 4;", decompose)
             self.assertIn("method scotch;", decompose)
             self.assertEqual(
                 (output / "system" / "coolant" / "decomposeParDict").read_text(),
@@ -424,8 +424,11 @@ class ProductionMeshTests(unittest.TestCase):
                 ).read_text(),
                 decompose,
             )
-            self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], 10)
+            self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], 4)
             self.assertEqual(manifest["parallel_execution"]["default_mesh_mpi_ranks"], 1)
+            self.assertTrue(
+                (output / "heat_source_reference" / "heat_source_manifest.json").is_file()
+            )
             coolant_zone = (output / "system" / "topoSetDict.coolantZone").read_text()
             self.assertEqual(coolant_zone.count("source zoneToCell;"), 23)
             self.assertIn("source setToCellZone;", coolant_zone)
@@ -597,6 +600,9 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("actual_xy85_temperature_1s", actual_control)
             self.assertIn("actual_battery_near_surface_temperature_1s", actual_control)
             self.assertEqual(actual_control.count("interpolationScheme cell;"), 11)
+            self.assertIn("coolant_temperature_volume_integral", actual_control)
+            self.assertIn("batterySolid_temperature_volume_integral", actual_control)
+            self.assertEqual(actual_control.count("operation volIntegrate;"), 2)
             self.assertIn("deltaT 0.1;", full_actual_control)
             self.assertIn("adjustTimeStep yes;", full_actual_control)
             self.assertIn("maxDeltaT 0.1;", full_actual_control)
@@ -634,6 +640,9 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertTrue((output / "run-full-transient-actual-1s.sh").is_file())
             self.assertTrue((output / "run-full-transient-actual-1s.ps1").is_file())
             frozen_script = (output / "AllrunFrozenFlowThermalPilot").read_text()
+            frozen_actual_script = (
+                output / "AllrunFrozenFlowThermalActual1s"
+            ).read_text()
             full_actual_script = (output / "AllrunFullTransientActual1s").read_text()
             cold_script = (output / "AllrunColdFlowPilot").read_text()
             self.assertIn("validate_yplus.py", cold_script)
@@ -651,12 +660,18 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("validate_frozen_flow.py", frozen_script)
             self.assertIn("--qvol-samples", frozen_script)
             self.assertIn("--field-interval 1", frozen_script)
+            self.assertIn("build_energy_balance.py", frozen_script)
+            self.assertTrue((output / "tools/build_energy_balance.py").is_file())
             self.assertIn("extract_transient_residuals.py", full_actual_script)
             self.assertIn("transient_residuals.csv", full_actual_script)
             self.assertTrue((output / "tools/extract_transient_residuals.py").is_file())
             self.assertNotIn(
                 'reconstructPar -case "$run_dir" -allRegions -latestTime',
                 frozen_script,
+            )
+            self.assertIn(
+                'reconstructPar -case "$run_dir" -allRegions -latestTime',
+                frozen_actual_script,
             )
             self.assertNotIn('cp "$source_field" "$run_dir/0/coolant/T"', frozen_script)
             steady_script = (output / "AllrunSteadyPilot").read_text()

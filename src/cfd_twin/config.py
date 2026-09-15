@@ -17,9 +17,13 @@ from typing import Any
 import yaml
 
 from .battery_correlation import (
+    PENEKLIOGLU_BERNARDI_CAPACITY_AH,
+    PENEKLIOGLU_BERNARDI_C_RATE,
+    PENEKLIOGLU_BERNARDI_TEMPERATURE_K,
     PENEKLIOGLU_C_RATE_RANGE,
     PENEKLIOGLU_SOC_RANGE,
     PENEKLIOGLU_TEMPERATURE_RANGE_K,
+    peneklioglu_bernardi_2c_293p15_heat_terms_w,
     peneklioglu_expanded_first_order_q_w,
 )
 from .errors import ConfigError
@@ -243,6 +247,7 @@ def _parse_heat_source(data: dict[str, Any]) -> HeatSourceSpec:
         "table_qvol",
         "electrical_joule",
         "peneklioglu_expanded_first_order",
+        "peneklioglu_bernardi_2c_293p15",
     }
     if mode not in allowed:
         raise ConfigError(f"battery.heat_source.mode: expected one of {sorted(allowed)}")
@@ -268,10 +273,14 @@ def _parse_heat_source(data: dict[str, Any]) -> HeatSourceSpec:
         resistance_path = str(_required(data, "resistance_profile_path", "battery.heat_source"))
     else:
         correlation = str(_required(data, "correlation", "battery.heat_source"))
-        if correlation != "expanded_first_order_q_gt_0p5":
+        expected_correlation = {
+            "peneklioglu_expanded_first_order": "expanded_first_order_q_gt_0p5",
+            "peneklioglu_bernardi_2c_293p15": "bernardi_ri_entropy_component_fits",
+        }[mode]
+        if correlation != expected_correlation:
             raise ConfigError(
-                "battery.heat_source.correlation: only "
-                "expanded_first_order_q_gt_0p5 is reproducible from the supplied PDF"
+                "battery.heat_source.correlation: expected "
+                f"{expected_correlation!r} for mode {mode!r}"
             )
         initial_soc = float(_required(data, "initial_soc", "battery.heat_source"))
         reference_temperature_k = positive(
@@ -284,14 +293,25 @@ def _parse_heat_source(data: dict[str, Any]) -> HeatSourceSpec:
         )
         if not PENEKLIOGLU_SOC_RANGE[0] <= initial_soc <= PENEKLIOGLU_SOC_RANGE[1]:
             raise ConfigError("battery.heat_source.initial_soc: expected value in [0, 1]")
-        if not (
-            PENEKLIOGLU_TEMPERATURE_RANGE_K[0]
-            <= reference_temperature_k
-            <= PENEKLIOGLU_TEMPERATURE_RANGE_K[1]
+        if mode == "peneklioglu_expanded_first_order":
+            if not (
+                PENEKLIOGLU_TEMPERATURE_RANGE_K[0]
+                <= reference_temperature_k
+                <= PENEKLIOGLU_TEMPERATURE_RANGE_K[1]
+            ):
+                raise ConfigError(
+                    "battery.heat_source.reference_temperature: paper range is "
+                    "293.15 to 303.15 K"
+                )
+        elif not math.isclose(
+            reference_temperature_k,
+            PENEKLIOGLU_BERNARDI_TEMPERATURE_K,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
         ):
             raise ConfigError(
-                "battery.heat_source.reference_temperature: paper range is "
-                "293.15 to 303.15 K"
+                "battery.heat_source.reference_temperature: the PPT Bernardi fits "
+                "are restricted to 293.15 K"
             )
     return HeatSourceSpec(
         mode,
@@ -497,16 +517,41 @@ def load_config(
         capacity_ah=positive(quantity(_required(electrical_raw, "capacity", "battery.electrical_metadata"), "capacity", "battery.electrical_metadata.capacity"), "battery.electrical_metadata.capacity"),
         discharge_rate_c=positive(float(_required(electrical_raw, "discharge_rate_c", "battery.electrical_metadata")), "battery.electrical_metadata.discharge_rate_c"),
     )
-    if (
-        str(_mapping(_required(battery_raw, "heat_source", "battery"), "battery.heat_source").get("mode"))
-        == "peneklioglu_expanded_first_order"
-        and not PENEKLIOGLU_C_RATE_RANGE[0]
+    heat_source_mode = str(
+        _mapping(
+            _required(battery_raw, "heat_source", "battery"),
+            "battery.heat_source",
+        ).get("mode")
+    )
+    if heat_source_mode == "peneklioglu_expanded_first_order" and not (
+        PENEKLIOGLU_C_RATE_RANGE[0]
         <= electrical.discharge_rate_c
         <= PENEKLIOGLU_C_RATE_RANGE[1]
     ):
         raise ConfigError(
             "battery.electrical_metadata.discharge_rate_c: paper correlation range is [0.5, 2.0]"
         )
+    if heat_source_mode == "peneklioglu_bernardi_2c_293p15":
+        if not math.isclose(
+            electrical.discharge_rate_c,
+            PENEKLIOGLU_BERNARDI_C_RATE,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise ConfigError(
+                "battery.electrical_metadata.discharge_rate_c: the PPT Bernardi "
+                "resistance fit is restricted to 2C"
+            )
+        if not math.isclose(
+            electrical.capacity_ah,
+            PENEKLIOGLU_BERNARDI_CAPACITY_AH,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise ConfigError(
+                "battery.electrical_metadata.capacity: the PPT Bernardi derivation "
+                "is restricted to a 2 Ah cell"
+            )
     battery = Battery(
         density_kg_m3=positive(quantity(_required(battery_raw, "density", "battery"), "density", "battery.density"), "battery.density"),
         specific_heat_j_kgk=positive(quantity(_required(battery_raw, "specific_heat", "battery"), "specific_heat", "battery.specific_heat"), "battery.specific_heat"),
@@ -568,6 +613,12 @@ def load_config(
             electrical.discharge_rate_c,
             battery.heat_source.initial_soc,
             battery.heat_source.reference_temperature_k,
+        )
+        qvol = qcell / cell_volume
+    elif battery.heat_source.mode == "peneklioglu_bernardi_2c_293p15":
+        assert battery.heat_source.initial_soc is not None
+        _, _, qcell = peneklioglu_bernardi_2c_293p15_heat_terms_w(
+            battery.heat_source.initial_soc
         )
         qvol = qcell / cell_volume
     else:

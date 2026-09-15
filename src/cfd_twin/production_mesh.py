@@ -20,7 +20,8 @@ from .config import ResolvedConfig
 from .engineering_judgement import write_engineering_judgements
 from .errors import CfdTwinError
 from .geometry import cell_placements
-from .openfoam_case import write_openfoam_solver_bundle
+from .heat_source import write_heat_source_bundle
+from .openfoam_case import DEFAULT_SOLVER_MPI_RANKS, write_openfoam_solver_bundle
 
 
 # 배터리 STL 이름과 C01~C23 ID가 CAD, zone, 계면, UI에서 동일해야 한다.
@@ -29,7 +30,7 @@ EXPECTED_BATTERY_FILES = tuple(
 )
 DEFAULT_MESH_PROFILE = "single"
 SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE, "production_800k")
-DEFAULT_MPI_RANKS = 10
+DEFAULT_MPI_RANKS = DEFAULT_SOLVER_MPI_RANKS
 DEFAULT_MESH_MPI_RANKS = 1
 # 10은 요청 layer 수다. snappyHexMesh가 품질을 위해 국부적으로 층을
 # 종료할 수 있으므로 실제 coverage와 thickness는 별도 gate로 재검증한다.
@@ -1368,6 +1369,9 @@ def write_production_mesh_source_bundle(
     _atomic_write(output / "system" / "meshQualityDict", _mesh_quality_dict(preset))
 
     solver_source = write_openfoam_solver_bundle(config, output)
+    heat_source_reference = write_heat_source_bundle(
+        config, output / "heat_source_reference"
+    )
     for region in ("coolant", "batterySolid"):
         _atomic_write(
             output / "system" / region / "decomposeParDict",
@@ -1426,6 +1430,10 @@ def write_production_mesh_source_bundle(
     shutil.copy2(
         Path(__file__).with_name("openfoam_transient_residuals.py"),
         output / "tools" / "extract_transient_residuals.py",
+    )
+    shutil.copy2(
+        Path(__file__).with_name("openfoam_energy_balance.py"),
+        output / "tools" / "build_energy_balance.py",
     )
     shutil.copy2(
         Path(__file__).with_name("openfoam_production_gate.py"),
@@ -1605,6 +1613,7 @@ def write_production_mesh_source_bundle(
         ],
         "expected_regions": ["coolant", "batterySolid"],
         "solver_source": solver_source,
+        "heat_source_reference": heat_source_reference,
         "region_grouping": {
             "batterySolid": "battery_C.*",
             "coolant": "coolant",

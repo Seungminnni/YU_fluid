@@ -23,6 +23,7 @@ from .heat_source import (
 
 
 STRICT_STEADY_RESIDUAL_TARGET = 1.0e-6
+DEFAULT_SOLVER_MPI_RANKS = 4
 
 
 def _steady_qvol(config: ResolvedConfig) -> float:
@@ -737,8 +738,28 @@ def _functions(
         writeControl {sample_control};
         writeInterval {sample_interval};
         writeFields false;
-    }}'''
+            }}'''
         )
+    if transient:
+        # Constant rho/Cp are used in the current framework, so the time
+        # derivative of rho*Cp*integral(T dV) is the stored thermal power.
+        # Persist both regional integrals every second so the browser energy
+        # balance can separate removal, storage, and numerical imbalance.
+        for region in ("coolant", "batterySolid"):
+            entries.append(
+                f'''    {region}_temperature_volume_integral
+    {{
+        type volFieldValue;
+        libs (fieldFunctionObjects);
+        region {region};
+        regionType all;
+        operation volIntegrate;
+        fields (T);
+        writeControl {sample_control};
+        writeInterval {sample_interval};
+        writeFields false;
+    }}'''
+            )
     if include_battery_temperatures:
         for index in range(1, 24):
             zone = f"battery_C{index:02d}"
@@ -1148,7 +1169,7 @@ done
 {flow_copy}
 mkdir -p "$run_dir/logs/solver"
 {flow_initialisation}
-mpi_ranks=${{OPENFOAM_MPI_RANKS:-10}}
+mpi_ranks=${{OPENFOAM_MPI_RANKS:-{DEFAULT_SOLVER_MPI_RANKS}}}
 case "$mpi_ranks" in
     ''|*[!0-9]*) echo "OPENFOAM_MPI_RANKS must be a positive integer" >&2; exit 2 ;;
 esac
@@ -1209,7 +1230,7 @@ for tool in foamListTimes foamDictionary mpirun reconstructPar chtMultiRegionSim
     command -v "$tool" >/dev/null 2>&1 || {{ echo "$tool is unavailable" >&2; exit 2; }}
 done
 
-mpi_ranks=${{OPENFOAM_MPI_RANKS:-10}}
+mpi_ranks=${{OPENFOAM_MPI_RANKS:-{DEFAULT_SOLVER_MPI_RANKS}}}
 additional_iterations=${{STEADY_ADDITIONAL_ITERATIONS:-2000}}
 case "$mpi_ranks" in
     ''|*[!0-9]*) echo "OPENFOAM_MPI_RANKS must be a positive integer" >&2; exit 2 ;;
@@ -1292,7 +1313,7 @@ for tool in foamListTimes foamDictionary mpirun reconstructPar chtMultiRegionSim
     command -v "$tool" >/dev/null 2>&1 || { echo "$tool is unavailable" >&2; exit 2; }
 done
 
-mpi_ranks=${OPENFOAM_MPI_RANKS:-10}
+mpi_ranks=${OPENFOAM_MPI_RANKS:-__DEFAULT_SOLVER_MPI_RANKS__}
 additional_iterations=${COLD_FLOW_ADDITIONAL_ITERATIONS:-500}
 case "$mpi_ranks" in
     ''|*[!0-9]*) echo "OPENFOAM_MPI_RANKS must be a positive integer" >&2; exit 2 ;;
@@ -1338,7 +1359,7 @@ python3 "$case_dir/tools/validate_cold_flow.py" \
     --output "$run_dir/reports/solver/cold_flow_validation.json"
 
 echo "Cold-flow continuation passed all gates at iteration $target_time. Run: $run_dir"
-'''
+'''.replace("__DEFAULT_SOLVER_MPI_RANKS__", str(DEFAULT_SOLVER_MPI_RANKS))
 
 
 def _activate_profile_script() -> str:
@@ -1382,6 +1403,7 @@ def _transient_pilot_script(
     frozen_flow: bool,
     field_interval_s: float = 15.0,
     result_run: bool = False,
+    reconstruct_latest_only: bool = False,
 ) -> str:
     mode = (
         "frozen-flow"
@@ -1389,7 +1411,11 @@ def _transient_pilot_script(
         else "full-transient result" if result_run else "full-transient validation"
     )
     initial_temperature = config.boundary.initial_solid_temperature_k
-    reconstruct_scope = "" if frozen_flow or result_run else "-latestTime"
+    reconstruct_scope = (
+        "-latestTime"
+        if reconstruct_latest_only or (not frozen_flow and not result_run)
+        else ""
+    )
     required_python = " python3"
     post_validation = f'''
 python3 "$case_dir/tools/extract_transient_residuals.py" \
@@ -1411,6 +1437,19 @@ python3 "$case_dir/tools/validate_frozen_flow.py" \
     --steady-initial-temperature "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-{initial_temperature:.12g}}}" \
     --field-interval {field_interval_s:.12g} \
     --output "$run_dir/reports/solver/frozen_flow_validation.json"
+
+python3 "$case_dir/tools/build_energy_balance.py" \
+    --run-dir "$run_dir" \
+    --mesh-integral-report "$case_dir/reports/production_mesh/mesh_integrals_pre_split.json" \
+    --qvol-samples "$case_dir/heat_source_reference/heat_source_samples.csv" \
+    --fluid-density {config.fluid.density_kg_m3:.12g} \
+    --fluid-cp {config.fluid.specific_heat_j_kgk:.12g} \
+    --solid-density {config.battery.density_kg_m3:.12g} \
+    --solid-cp {config.battery.specific_heat_j_kgk:.12g} \
+    --initial-temperature {initial_temperature:.12g} \
+    --maximum-final-window-imbalance 0.02 \
+    --output-csv "$run_dir/reports/solver/energy_balance.csv" \
+    --output-report "$run_dir/reports/solver/energy_balance.json"
 '''
     return f'''#!/bin/sh
 set -eu
@@ -1491,8 +1530,9 @@ grep -Eq 'internalField[[:space:]]+uniform[[:space:]]+{initial_temperature:.12g}
     "$run_dir/0/batterySolid/T" || {{ echo "batterySolid T was not reset to {initial_temperature:.12g} K" >&2; exit 2; }}
 
 mkdir -p "$run_dir/logs/solver" "$run_dir/reports/solver"
+: >"$run_dir/{run_name}.foam"
 echo "$latest_time" >"$run_dir/reports/solver/source_cold_flow_time.txt"
-mpi_ranks=${{OPENFOAM_MPI_RANKS:-10}}
+mpi_ranks=${{OPENFOAM_MPI_RANKS:-{DEFAULT_SOLVER_MPI_RANKS}}}
 case "$mpi_ranks" in
     ''|*[!0-9]*) echo "OPENFOAM_MPI_RANKS must be a positive integer" >&2; exit 2 ;;
 esac
@@ -1692,6 +1732,7 @@ def write_openfoam_solver_bundle(
             run_name="frozen_flow_actual_1s",
             frozen_flow=True,
             field_interval_s=1.0,
+            reconstruct_latest_only=True,
         ),
         "AllrunFullTransientActual1s": _transient_pilot_script(
             config,
@@ -1749,7 +1790,7 @@ def write_openfoam_solver_bundle(
         "transient_solver": "chtMultiRegionFoam",
         "parallel_execution": {
             "enabled": True,
-            "default_mpi_ranks": 10,
+            "default_mpi_ranks": DEFAULT_SOLVER_MPI_RANKS,
             "override_environment_variable": "OPENFOAM_MPI_RANKS",
             "decomposition_method": "scotch",
         },
@@ -1776,6 +1817,8 @@ def write_openfoam_solver_bundle(
                 "direct_cell_probe_interval_s": 1.0,
                 "full_field_write_interval_s": 1800.0,
                 "temperature_field_write_interval_s": 1.0,
+                "native_parallel_temperature_storage": "all integer seconds",
+                "reconstructed_field_storage": "latest time only for UI spatial field",
                 "static_flow_field_policy": "reuse validated time-zero flow at every display second",
                 "section_probe_spacing_mm": {"xy": 1.0, "xz": 1.5},
                 "cell_surface_probe_lattice": "32-angle by 16-height plus caps",
@@ -1824,6 +1867,7 @@ def write_openfoam_solver_bundle(
         "battery_volume_temperature_function_objects": 46,
         "battery_surface_temperature_function_objects": 69,
         "flow_and_field_diagnostic_function_objects": 7,
+        "transient_energy_balance_function_objects": 2,
         "heat_source_field": config.solver.energy_field,
         "heat_source_mode": config.battery.heat_source.mode,
         "qvol_at_steady_time_zero_W_m3": _steady_qvol(config),

@@ -11,6 +11,7 @@ from cfd_twin.config import load_config
 from cfd_twin.viewer import (
     _convergence_payload,
     _energy_balance_payload,
+    _mesh_runs_payload,
     _portable_dataset_javascript,
     write_viewer_bundle,
 )
@@ -21,6 +22,39 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class ViewerTests(unittest.TestCase):
+    def test_precision_mesh_card_uses_executed_800k_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            case = Path(directory)
+            report = (
+                case
+                / "production/L3/reports/production_mesh/mesh_target_composition.json"
+            )
+            report.parent.mkdir(parents=True)
+            report.write_text(
+                json.dumps(
+                    {
+                        "status": "MESH_TARGET_VALIDATION_PASSED",
+                        "actual": {
+                            "total_cells": 849_284,
+                            "fluid_cells": 557_402,
+                            "solid_cells": 291_882,
+                            "points": 945_483,
+                            "hexahedron_fraction": 0.902227,
+                            "cell_types": {"hexahedra": 766_247},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            precision = _mesh_runs_payload(
+                case, precision_data_ready=True
+            )[0]
+
+            self.assertEqual(precision["label"], "80만급 생산 결과 · 849,284셀")
+            self.assertEqual(precision["counts"]["points"], 945_483)
+            self.assertIn("90.223% hexahedra", precision["element_family"])
+
     def test_energy_balance_payload_preserves_persisted_samples(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             case = Path(directory)
@@ -178,6 +212,7 @@ class ViewerTests(unittest.TestCase):
                 "세로 단면 유속",
             ):
                 self.assertIn(mode_label, html)
+
             self.assertIn('id="playback-rate"', html)
             self.assertIn('id="video-seek"', html)
             self.assertIn('id="video-prev"', html)
@@ -418,6 +453,22 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("requestAnimationFrame(animate)", script)
             self.assertFalse(model["interactive_cfd"]["enabled"])
 
+    def test_ppt_bernardi_heat_range_is_exposed_to_the_ui(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(ROOT / "configs" / "ppt_bernardi_udf.yaml",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            model = write_viewer_bundle(config, directory)
+
+        heat = model["heat_source"]
+        self.assertEqual(heat["mode"], "peneklioglu_bernardi_2c_293p15")
+        self.assertEqual(heat["label"], "PPT Bernardi · 2C · 293.15 K")
+        self.assertTrue(heat["time_varying"])
+        self.assertAlmostEqual(heat["cell_heat_start_w"], 1.5173195359225133)
+        self.assertAlmostEqual(heat["cell_heat_end_w"], 2.4228902680554714)
+        self.assertAlmostEqual(heat["total_heat_end_w"], 55.72647616527584)
+
     def test_portable_dataset_script_round_trips_binary_values(self) -> None:
         raw = bytes(range(256)) * 7
         script = _portable_dataset_javascript("xz50", raw)
@@ -491,6 +542,42 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("격자 독립성 PASS", model["status_label"])
             self.assertIn("0.004321 K", model["calculation_note"])
             self.assertIn("과도속도장이 아닙니다", model["calculation_note"])
+
+    def test_viewer_preserves_completed_result_but_surfaces_quality_warning(self) -> None:
+        config = load_config(BASELINE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            results = root / "case" / "results"
+            results.mkdir(parents=True)
+            (results / "result_manifest.json").write_text(
+                '{"data_status":"L0_CFD_RESULTS_READY","actual_solver_data":true,'
+                '"quality_status":"COMPLETED_WITH_ENERGY_BALANCE_WARNING",'
+                '"validation_status":"FROZEN_FLOW_VALIDATION_FAILED",'
+                '"validation_warnings":["energy target missed"],'
+                '"final_summary":{"battery_tmax_k":294.214098934,'
+                '"complete_energy_balance_mean_fraction":0.038995509}}',
+                encoding="utf-8",
+            )
+            model = write_viewer_bundle(
+                config, root / "viewer", case_dir=root / "case"
+            )
+            self.assertTrue(model["actual_solver_data"])
+            self.assertTrue(model["quality_warning"])
+            self.assertEqual(
+                model["quality_status"],
+                "COMPLETED_WITH_ENERGY_BALANCE_WARNING",
+            )
+            self.assertEqual(model["validation_warnings"], ["energy target missed"])
+            self.assertIn("품질 경고", model["calculation_summary"])
+            self.assertIn("3.8996%", model["calculation_summary"])
+            css = next((root / "viewer").glob("style.*.css")).read_text(
+                encoding="utf-8"
+            )
+            app = next((root / "viewer").glob("app.*.js")).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(".quality-warning .result-badge", css)
+            self.assertIn('"계산 완료 · 경고"', app)
 
 
 if __name__ == "__main__":
