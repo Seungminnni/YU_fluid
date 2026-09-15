@@ -400,6 +400,10 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("STEADY_ADDITIONAL_ITERATIONS:-2000", continuation)
             self.assertIn("startFrom -set latestTime", continuation)
             self.assertIn("processor directory count", continuation)
+            self.assertIn(
+                'decomposePar -case "$run_dir" -allRegions -latestTime -force',
+                continuation,
+            )
             self.assertIn("validate_steady_cht.py", continuation)
             self.assertIn("relaxationFactors.fields.p_rgh -set 0.3", continuation)
             self.assertIn("relaxationFactors.equations.U -set 0.15", continuation)

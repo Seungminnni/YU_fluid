@@ -1207,7 +1207,6 @@ set -eu
 case_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 run_dir="$case_dir/runs/steady_cht"
 [ -d "$run_dir" ] || {{ echo "steady CHT run is unavailable: $run_dir" >&2; exit 2; }}
-[ -d "$run_dir/processor0" ] || {{ echo "parallel steady CHT fields are unavailable" >&2; exit 2; }}
 
 for report in \
     "$case_dir/reports/production_mesh/production_mesh_gate.json" \
@@ -1226,7 +1225,7 @@ grep -q '"status": "COLD_FLOW_VALIDATION_PASSED"' \
     exit 2
 }}
 
-for tool in foamListTimes foamDictionary mpirun reconstructPar chtMultiRegionSimpleFoam python3; do
+for tool in foamListTimes foamDictionary decomposePar mpirun reconstructPar chtMultiRegionSimpleFoam python3; do
     command -v "$tool" >/dev/null 2>&1 || {{ echo "$tool is unavailable" >&2; exit 2; }}
 done
 
@@ -1241,16 +1240,36 @@ esac
 [ "$mpi_ranks" -ge 1 ] || {{ echo "OPENFOAM_MPI_RANKS must be at least 1" >&2; exit 2; }}
 [ "$additional_iterations" -ge 1 ] || {{ echo "STEADY_ADDITIONAL_ITERATIONS must be at least 1" >&2; exit 2; }}
 
+latest_time=$(foamListTimes -case "$run_dir" -latestTime)
+case "$latest_time" in
+    ''|*[!0-9]*) echo "steady continuation requires an integer latest time, got: $latest_time" >&2; exit 2 ;;
+esac
+
+# Cleanup may remove bulky processor directories while retaining the reconstructed
+# latest-time checkpoint. Rebuild the parallel checkpoint from that exact time so
+# the converged solution can still be continued instead of restarted from zero.
 processor_count=$(find "$run_dir" -maxdepth 1 -type d -name 'processor[0-9]*' | wc -l | tr -d ' ')
+if [ "$processor_count" -eq 0 ]; then
+    decompose_log="$run_dir/logs/solver/decomposePar_continue_${{latest_time}}.log"
+    : >"$decompose_log"
+    for decompose_dict in \
+        "$run_dir/system/decomposeParDict" \
+        "$run_dir/system/coolant/decomposeParDict" \
+        "$run_dir/system/batterySolid/decomposeParDict"
+    do
+        foamDictionary "$decompose_dict" \
+            -entry numberOfSubdomains -set "$mpi_ranks" \
+            >>"$decompose_log" 2>&1
+    done
+    decomposePar -case "$run_dir" -allRegions -latestTime -force \
+        >>"$decompose_log" 2>&1
+    processor_count=$(find "$run_dir" -maxdepth 1 -type d -name 'processor[0-9]*' | wc -l | tr -d ' ')
+fi
 [ "$processor_count" -eq "$mpi_ranks" ] || {{
     echo "processor directory count $processor_count does not match MPI rank count $mpi_ranks" >&2
     exit 2
 }}
 
-latest_time=$(foamListTimes -case "$run_dir" -latestTime)
-case "$latest_time" in
-    ''|*[!0-9]*) echo "steady continuation requires an integer latest time, got: $latest_time" >&2; exit 2 ;;
-esac
 target_time=$((latest_time + additional_iterations))
 foamDictionary "$run_dir/system/controlDict" -entry startFrom -set latestTime >/dev/null
 foamDictionary "$run_dir/system/controlDict" -entry endTime -set "$target_time" >/dev/null
