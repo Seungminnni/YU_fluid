@@ -425,7 +425,8 @@ snGradSchemes
 
 
 def _fluid_solution(
-    *, conservative: bool = False, enthalpy_relaxation: float | None = None
+    *, conservative: bool = False, enthalpy_relaxation: float | None = None,
+    pressure_reference_pa: float = 101325.0,
 ) -> str:
     """정상 SIMPLE 계산의 선형솔버, 잔차기준과 완화계수를 만든다."""
 
@@ -479,7 +480,7 @@ SIMPLE
     momentumPredictor true;
     frozenFlow no;
     pRefCell 0;
-    pRefValue 101325;
+    pRefValue __PRESSURE_REFERENCE__;
     residualControl
     {
         p_rgh 1e-6;
@@ -512,11 +513,13 @@ relaxationFactors
         .replace("__VELOCITY_RELAXATION__", str(velocity_relaxation))
         .replace("__ENTHALPY_RELAXATION__", str(enthalpy_relaxation))
         .replace("__TURBULENCE_RELAXATION__", str(turbulence_relaxation))
+        .replace("__PRESSURE_REFERENCE__", f"{pressure_reference_pa:.12g}")
     )
 
 
 def _transient_fluid_solution(
-    *, frozen_flow: bool, enthalpy_relaxation: float = 0.3
+    *, frozen_flow: bool, enthalpy_relaxation: float = 0.3,
+    pressure_reference_pa: float = 101325.0,
 ) -> str:
     """과도 PIMPLE 설정을 만들고 현재 열해석에서는 수렴 유동장을 고정한다.
 
@@ -580,7 +583,7 @@ PIMPLE
     momentumPredictor {momentum_predictor};
     frozenFlow {frozen};
     pRefCell 0;
-    pRefValue 101325;
+    pRefValue {pressure_reference_pa:.12g};
 }}
 relaxationFactors
 {{
@@ -665,25 +668,29 @@ relaxationFactors
 
 
 def _root_solution(
-    *, transient: bool, energy_coupling_iterations: int = 20
+    *, transient: bool, energy_coupling_iterations: int = 20,
+    energy_coupling_tolerance: float = 1e-6,
 ) -> str:
     """두 영역 사이 PIMPLE outer correction과 에너지 결합 횟수를 정의한다."""
 
     if transient:
         if energy_coupling_iterations < 1:
             raise ValueError("energy_coupling_iterations must be at least 1")
+        if not math.isfinite(energy_coupling_tolerance) or not 0 < energy_coupling_tolerance < 1:
+            raise ValueError("energy_coupling_tolerance must be finite and in (0, 1)")
         return _header("fvSolution") + f'''solvers {{}}
 PIMPLE
 {{
     nOuterCorrectors 3;
     energyCoupling
     {{
-        // loopControl uses `iterations`; `maxIter` is a linear-solver key and
-        // does not activate the additional fluid/solid energy loop.
+        // Upper bound, not a fixed count: loopControl exits when h has
+        // converged in every region. Never use a linear-solver final residual
+        // as the inter-region convergence decision.
         iterations {energy_coupling_iterations};
         convergence
         {{
-            "h" 1e-6;
+            "h" {energy_coupling_tolerance:.12g};
         }}
     }}
 }}
@@ -1456,7 +1463,7 @@ def _transient_pilot_script(
     if frozen_flow:
         runtime_configuration = '''
 transient_delta_t=${TRANSIENT_DELTA_T:-1}
-energy_coupling_iterations=${ENERGY_COUPLING_ITERATIONS:-100}
+energy_coupling_iterations=${ENERGY_COUPLING_ITERATIONS:-200}
 python3 -c 'import sys; value=float(sys.argv[1]); assert value > 0.0' \
     "$transient_delta_t" || { echo "TRANSIENT_DELTA_T must be positive" >&2; exit 2; }
 case "$energy_coupling_iterations" in
@@ -1482,6 +1489,12 @@ python3 "$case_dir/tools/extract_transient_residuals.py" \
 '''
     if frozen_flow:
         post_validation += f'''
+python3 "$case_dir/tools/audit_energy_coupling.py" \
+    --log "$run_dir/logs/solver/{run_name}.log" \
+    --threshold 1e-5 \
+    --expected-cap "$energy_coupling_iterations" \
+    --output "$run_dir/reports/solver/energy_coupling_audit.json"
+
 python3 "$case_dir/tools/validate_frozen_flow.py" \
     --log "$run_dir/logs/solver/{run_name}.log" \
     --run-dir "$run_dir" \
@@ -1529,7 +1542,7 @@ do
     }}
 done
 
-for tool in foamListTimes foamDictionary decomposePar mpirun reconstructPar chtMultiRegionFoam{required_python}; do
+for tool in foamListTimes foamDictionary decomposePar mpirun reconstructPar chtMultiRegionFoamAdaptive{required_python}; do
     command -v "$tool" >/dev/null 2>&1 || {{ echo "$tool is unavailable" >&2; exit 2; }}
 done
 
@@ -1611,7 +1624,7 @@ done
 decomposePar -case "$run_dir" -allRegions -force \
     >"$run_dir/logs/solver/decomposePar.log" 2>&1
 mpirun --allow-run-as-root -np "$mpi_ranks" \
-    chtMultiRegionFoam -case "$run_dir" -parallel \
+    chtMultiRegionFoamAdaptive -case "$run_dir" -parallel \
     >"$run_dir/logs/solver/{run_name}.log" 2>&1
 reconstructPar -case "$run_dir" -allRegions {reconstruct_scope} \
     >"$run_dir/logs/solver/reconstructPar.log" 2>&1
@@ -1634,6 +1647,7 @@ def _solver_profile_files(
     actual_one_second_sampling: bool = False,
     temperature_field_write_interval_s: float | None = None,
     energy_coupling_iterations: int = 20,
+    energy_coupling_tolerance: float = 1e-6,
     transient_enthalpy_relaxation: float = 0.3,
 ) -> dict[str, str]:
     transient = delta_t is not None
@@ -1648,6 +1662,7 @@ def _solver_profile_files(
             "system/coolant/fvSolution": _fluid_solution(
                 conservative=effective_conservative,
                 enthalpy_relaxation=enthalpy_relaxation,
+                pressure_reference_pa=config.boundary.pressure_reference_absolute_pa,
             ),
             "system/batterySolid/fvSchemes": _solid_schemes(),
             "system/batterySolid/fvSolution": _solid_solution(
@@ -1667,11 +1682,13 @@ def _solver_profile_files(
         "system/fvSolution": _root_solution(
             transient=True,
             energy_coupling_iterations=energy_coupling_iterations,
+            energy_coupling_tolerance=energy_coupling_tolerance,
         ),
         "system/coolant/fvSchemes": _fluid_schemes(transient=True),
         "system/coolant/fvSolution": _transient_fluid_solution(
             frozen_flow=frozen_flow,
             enthalpy_relaxation=transient_enthalpy_relaxation,
+            pressure_reference_pa=config.boundary.pressure_reference_absolute_pa,
         ),
         "system/batterySolid/fvSchemes": _solid_schemes(transient=True),
         "system/batterySolid/fvSolution": _transient_solid_solution(
@@ -1727,7 +1744,8 @@ def write_openfoam_solver_bundle(
                 config,
                 delta_t=1.0,
                 frozen_flow=True,
-                energy_coupling_iterations=100,
+                energy_coupling_iterations=200,
+                energy_coupling_tolerance=1e-5,
                 transient_enthalpy_relaxation=0.5,
             ),
             "constant/batterySolid/fvOptions": heat_source_dict,
@@ -1740,7 +1758,8 @@ def write_openfoam_solver_bundle(
                 field_write_interval_s=1800.0,
                 actual_one_second_sampling=True,
                 temperature_field_write_interval_s=1.0,
-                energy_coupling_iterations=100,
+                energy_coupling_iterations=200,
+                energy_coupling_tolerance=1e-5,
                 transient_enthalpy_relaxation=0.5,
             ),
             "constant/batterySolid/fvOptions": heat_source_dict,
@@ -1863,6 +1882,7 @@ def write_openfoam_solver_bundle(
         "version": config.solver.version,
         "steady_solver": "chtMultiRegionSimpleFoam",
         "transient_solver": "chtMultiRegionFoam",
+        "frozen_flow_adaptive_solver": "chtMultiRegionFoamAdaptive",
         "parallel_execution": {
             "enabled": True,
             "default_mpi_ranks": DEFAULT_SOLVER_MPI_RANKS,
@@ -1879,7 +1899,8 @@ def write_openfoam_solver_bundle(
                 "transient": True,
                 "frozenFlow": True,
                 "deltaT_s": 1.0,
-                "energy_coupling_iterations": 100,
+                "energy_coupling_iterations": 200,
+                "energy_coupling_tolerance": 1e-5,
                 "enthalpy_relaxation": 0.5,
                 "runtime_overrides": {
                     "deltaT_s": "TRANSIENT_DELTA_T",
@@ -1893,7 +1914,8 @@ def write_openfoam_solver_bundle(
                 "transient": True,
                 "frozenFlow": True,
                 "deltaT_s": 1.0,
-                "energy_coupling_iterations": 100,
+                "energy_coupling_iterations": 200,
+                "energy_coupling_tolerance": 1e-5,
                 "enthalpy_relaxation": 0.5,
                 "runtime_overrides": {
                     "deltaT_s": "TRANSIENT_DELTA_T",

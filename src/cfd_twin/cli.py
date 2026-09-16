@@ -204,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="single",
         help=(
             "single=validated 207,390-cell contract; "
+            "production_700k=~700,000-cell validation profile; "
             "production_800k=calibrated ~800,000-cell high-quality profile"
         ),
     )
@@ -218,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     workflow = subparsers.add_parser(
         "serve-workflow",
-        help="serve the local CAD/setup/progress portal without starting another CFD run",
+        help="serve baseline results and explicitly confirmed imported-STEP CFD jobs",
     )
     workflow.add_argument("--case-dir", required=True)
     workflow.add_argument("--cad-dir", required=True)

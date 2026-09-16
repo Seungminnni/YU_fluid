@@ -246,6 +246,21 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertFalse(manifest["automatic_quality_limits"]["ai_decision_allowed"])
             self.assertTrue((output / "engineering_judgements.json").is_file())
 
+    def test_700k_contract_and_adaptive_solver_are_bundled(self) -> None:
+        config = load_config(BASELINE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "production"
+            manifest = write_production_mesh_source_bundle(
+                config, _fake_cad(config, root), output, mesh_level="production_700k"
+            )
+            self.assertEqual(manifest["target_cell_count"], 700000)
+            self.assertEqual(manifest["element_family"]["minimum_hexahedron_fraction"], 0.89)
+            self.assertIn("--minimum-hexahedron-fraction 0.89", (output / "AllmeshProduction").read_text())
+            self.assertIn("chtMultiRegionFoamAdaptive", (output / "Dockerfile.openfoam").read_text())
+            self.assertIn("chtMultiRegionFoamAdaptive", (output / "AllrunFrozenFlowThermalActual1s").read_text())
+            self.assertTrue((output / "tools/patch_adaptive_cht_solver.py").is_file())
+
     def test_source_bundle_has_exact_23_zone_and_two_region_contract(self) -> None:
         config = load_config(BASELINE)
         with tempfile.TemporaryDirectory() as directory:
@@ -643,9 +658,10 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("h 0.3;", full_solution)
             self.assertIn("h 0.3;", full_transient_solid_solution)
             self.assertIn("nOuterCorrectors 3;", transient_root)
-            self.assertIn("iterations 100;", transient_root)
+            self.assertIn("iterations 200;", transient_root)
             self.assertIn("iterations 20;", full_transient_root)
-            self.assertIn('"h" 1e-6;', transient_root)
+            self.assertIn('"h" 1e-05;', transient_root)
+            self.assertIn('"h" 1e-06;', full_transient_root)
             self.assertNotIn("maxIter 1;", transient_root)
             self.assertIn("frozenFlow no;", full_solution)
             self.assertIn("momentumPredictor yes;", full_solution)
@@ -658,6 +674,11 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertTrue((output / "run-cold-flow-pilot.sh").is_file())
             self.assertTrue((output / "run-until-converged.sh").is_file())
             self.assertTrue((output / "tools/steady_convergence.py").is_file())
+            self.assertTrue((output / "tools/audit_energy_coupling.py").is_file())
+            self.assertIn(
+                "--threshold 1e-5",
+                (output / "AllrunFrozenFlowThermalActual1s").read_text(),
+            )
             controller = (output / "run-until-converged.sh").read_text()
             self.assertIn("--maximum \"$maximum\"", controller)
             self.assertIn("--increment \"$increment\"", controller)
@@ -679,7 +700,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertNotIn("-writephi", cold_script)
             self.assertIn("decomposePar -case \"$run_dir\" -allRegions", frozen_script)
             self.assertNotIn("-copyZero", frozen_script)
-            self.assertIn("chtMultiRegionFoam -case \"$run_dir\" -parallel", frozen_script)
+            self.assertIn("chtMultiRegionFoamAdaptive -case \"$run_dir\" -parallel", frozen_script)
             self.assertIn("reconstructPar -case \"$run_dir\" -allRegions", frozen_script)
             self.assertIn("for field in U p p_rgh k omega nut alphat phi", frozen_script)
             self.assertIn('steady_dir="$case_dir/runs/steady_cold_flow"', frozen_script)

@@ -9,10 +9,49 @@
 from __future__ import annotations
 
 import math
+import base64
+import gzip
+import struct
+import sys
+from array import array
 from pathlib import Path
 from typing import Callable
 
 from .openfoam_mesh_integrals import _boundary, _faces, _points
+
+
+def extract_complete_volume_edges(case_dir: str | Path) -> dict[str, object]:
+    """Pack every unique 3D edge of both actual region polyMeshes, unsampled.
+
+    Data is split from the ordinary viewer asset so that millions of lines are
+    transferred/decompressed only when the user explicitly selects this mode.
+    It shows the *entire* volume topology, unlike a surface wireframe or cut.
+    """
+
+    case = Path(case_dir).resolve()
+    payload: dict[str, str] = {}
+    counts: dict[str, dict[str, int]] = {}
+    for region in ("coolant", "batterySolid"):
+        mesh_dir = case / "constant" / region / "polyMesh"
+        points = _points(mesh_dir / "points")
+        faces = _faces(mesh_dir / "faces")
+        keys: set[int] = set()
+        for face in faces:
+            last = face[-1]
+            for current in face:
+                first, second = (last, current) if last < current else (current, last)
+                keys.add((first << 32) | second)
+                last = current
+        coordinates = array("f", (1000.0 * value for point in points for value in point))
+        endpoints = array("I", (index for key in sorted(keys) for index in (key >> 32, key & 0xFFFFFFFF)))
+        if sys.byteorder != "little":
+            coordinates.byteswap()
+            endpoints.byteswap()
+        packed = struct.pack("<III", len(points), len(keys), len(faces)) + coordinates.tobytes() + endpoints.tobytes()
+        payload[region] = base64.b64encode(gzip.compress(packed, compresslevel=9)).decode("ascii")
+        counts[region] = {"points": len(points), "edges": len(keys), "faces": len(faces)}
+    return {"source": "all unique edges of actual coolant and batterySolid polyMesh faces",
+            "sampling": "none", "length_unit": "mm", "counts": counts, "payload": payload}
 
 
 def _sample_patch_edges(
@@ -163,12 +202,14 @@ def mesh_wireframes_for_viewer(case_root: str | Path) -> dict[str, dict[str, obj
 
 
 def extract_full_mesh_views(case_dir: str | Path) -> dict[str, object]:
-    """Export every unique boundary and two central cut edge, without thinning.
+    """Export real boundary edges and exact internal-cell cuts, without thinning.
 
     The existing simulation overlay deliberately samples about 13k edges. This
     separate mesh-only view instead retains the full real boundary topology and
-    the cell intersections at central XY/XZ planes. A 3D exterior surface is
-    not misrepresented as all internal edges of the 849k volume cells.
+    the cell intersections at central XY/XZ planes. Three 3D cutaways combine
+    the clipped exterior with actual YZ intersections of the fluid/solid volume
+    cells. A 3D exterior surface is not misrepresented as all internal edges of
+    the 849k volume cells.
     """
 
     from .openfoam_results import OpenFoamResultReader
@@ -220,6 +261,38 @@ def extract_full_mesh_views(case_dir: str | Path) -> dict[str, object]:
         del source_faces, source_points
     modes["surface"] = {"label": "3D 경계", "groups": outer_groups}
 
+    # Keeping every volume edge visible at once would obscure the interior.
+    # Retain the genuine 3D boundary on one side of each exact volume cut and
+    # show all cell/plane intersections on the newly exposed face instead.
+    outer_x = [point[0] for point in points_mm]
+    x_min, x_max = min(outer_x), max(outer_x)
+
+    def clipped_shell(cut_mm: float) -> list[dict[str, object]]:
+        clipped_groups: list[dict[str, object]] = []
+        for group in outer_groups:
+            kept: list[list[int]] = []
+            for first, second in group["edges"]:
+                a, b = points_mm[first], points_mm[second]
+                a_inside, b_inside = a[0] >= cut_mm, b[0] >= cut_mm
+                if a_inside and b_inside:
+                    kept.append([first, second])
+                elif a_inside != b_inside:
+                    fraction = (cut_mm - a[0]) / (b[0] - a[0])
+                    crossing_mm = [a[index] + fraction * (b[index] - a[index]) for index in range(3)]
+                    crossing = register(tuple(value / 1000.0 for value in crossing_mm))
+                    kept.append([first, crossing] if a_inside else [crossing, second])
+            if kept:
+                clipped_groups.append(
+                    {
+                        "name": group["name"],
+                        "kind": group["kind"] + "_shell",
+                        "region": group["region"],
+                        "edge_count": len(kept),
+                        "edges": kept,
+                    }
+                )
+        return clipped_groups
+
     foam_file = case / "runs/steady_cht/steady_cht.foam"
     backend = OpenFoamResultReader(foam_file)
     numeric_times = []
@@ -235,6 +308,15 @@ def extract_full_mesh_views(case_dir: str | Path) -> dict[str, object]:
     for mode, normal, origin, label in (
         ("xy", (0, 0, 1), (0, 0, 0.041), "XY · Z = 41.0 mm"),
         ("xz", (0, 1, 0), (0, 0.0605, 0), "XZ · Y = 60.5 mm"),
+        *(
+            (
+                f"interior{percent}",
+                (1, 0, 0),
+                ((x_min + (x_max - x_min) * percent / 100.0) / 1000.0, 0, 0),
+                f"3D 내부 절개 · X = {x_min + (x_max - x_min) * percent / 100.0:.1f} mm",
+            )
+            for percent in (25, 50, 75)
+        ),
     ):
         cut_groups = []
         for region, dataset, kind in (
@@ -269,10 +351,13 @@ def extract_full_mesh_views(case_dir: str | Path) -> dict[str, object]:
             cut_groups.append(
                 {"name": region, "kind": kind, "region": region, "edge_count": len(edges), "edges": edges}
             )
-        modes[mode] = {"label": label, "groups": cut_groups}
+        modes[mode] = {
+            "label": label,
+            "groups": (clipped_shell(origin[0] * 1000.0) + cut_groups) if mode.startswith("interior") else cut_groups,
+        }
 
     return {
-        "source": "actual OpenFOAM polyMesh boundary faces and VTK exact plane cuts",
+        "source": "actual OpenFOAM polyMesh boundary faces and VTK exact volume-cell cuts",
         "sampling": "none",
         "length_unit": "mm",
         "point_count": len(points_mm),

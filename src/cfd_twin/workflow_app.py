@@ -1,9 +1,7 @@
-"""Local CFD workflow portal for the validated baseline case.
+"""Local baseline viewer and explicitly confirmed imported-STEP CFD jobs.
 
-The portal never starts a new solver. A CAD upload is inspected, not silently
-substituted for the meshed CAD. Progress comes from OpenFOAM logs and validation
-files; after clean validated completion, a background worker packages the saved
-solver fields into a review-only 3D viewer.
+Uploads are inert until the user reviews detected geometry and operating
+conditions, then explicitly starts an isolated mesh/S0/S1/S2 worker.
 """
 
 from __future__ import annotations
@@ -20,6 +18,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from .errors import CfdTwinError
+from .workflow_run import (
+    create_imported_run,
+    imported_run_status,
+    prepare_imported_run,
+    stage_uploaded_step,
+)
+
 
 ASSETS = Path(__file__).with_name("workflow_assets")
 MAX_CAD_BYTES = 50 * 1024 * 1024
@@ -29,7 +35,7 @@ BASELINE_INPUTS = {
     "inlet_temperature_k": 293.0,
     "inlet_velocity_m_s": 0.4,
     "outlet_pressure_pa": 101325.0,
-    "mesh_target_cells": 849284,
+    "mesh_target_cells": 800000,
 }
 CAD_ROLES = {
     "enclosure_with_ports.step": "탱크·포트 외형",
@@ -97,7 +103,7 @@ def inspect_cad_bytes(name: str, data: bytes, cad_dir: Path) -> dict[str, object
         "message": (
             "검증된 기준 CAD와 내용이 일치합니다."
             if matched
-            else "형식만 확인했습니다. 단위·닫힘·영역·입출구 면은 아직 검증되지 않아 계산에 사용하지 않습니다."
+            else "파일 형식만 확인했습니다. 새 계산 전 3영역 STEP의 닫힘·치수·배터리·입출구를 별도로 검사합니다."
         ),
     }
 
@@ -127,14 +133,18 @@ def baseline_geometry(cad_dir: Path) -> dict[str, object]:
         "tank_mm": [114, 121, 82],
         "cell_count": measured.get("battery_solid_count", 23),
         "arrangement": "5–4–5–4–5",
-        "inlet_diameter_mm": manifest.get("port_diameter_mm"),
-        "outlet_diameter_mm": manifest.get("port_diameter_mm"),
+        "inlet_diameter_mm": manifest.get("inlet_diameter_mm", manifest.get("port_diameter_mm")),
+        "outlet_diameter_mm": manifest.get("outlet_diameter_mm", manifest.get("port_diameter_mm")),
         "inlet_area_mm2": measured.get("inlet_area_mm2"),
         "outlet_area_mm2": measured.get("outlet_area_mm2"),
         "port_source": manifest.get("port_source"),
         "role_files": list(CAD_ROLES),
         "geometry_sha256": manifest.get("geometry_sha256"),
-        "note": "포트 중심은 A-04 기준 가정입니다. 업로드된 새 CAD의 포트 위치를 자동 확정하지 않습니다.",
+        "note": (
+            "입·출구 구경과 중심을 첨부 STEP에서 검증했습니다."
+            if result.get("imported_step") else
+            "포트 중심은 A-04 기준 가정입니다. 업로드된 새 CAD의 포트 위치를 자동 확정하지 않습니다."
+        ),
     }
 
 
@@ -161,8 +171,8 @@ def prepare_inputs(value: object, *, run_active: bool) -> dict[str, object]:
         if not math.isfinite(number) or not lower <= number <= upper:
             raise ValueError(f"{key}: 허용 범위 {lower:g}–{upper:g} 밖입니다.")
         numeric[key] = number
-    if not numeric["mesh_target_cells"].is_integer():
-        raise ValueError("mesh_target_cells: 정수여야 합니다.")
+    if numeric["mesh_target_cells"] not in {700_000, 800_000}:
+        raise ValueError("메시 등급은 검증된 70만급 또는 80만급 중 하나여야 합니다.")
     cad_mode = value.get("cad_mode")
     if cad_mode not in {"baseline", "exact_baseline_upload"}:
         raise ValueError("검증되지 않은 CAD는 아직 계산에 연결할 수 없습니다.")
@@ -178,9 +188,9 @@ def prepare_inputs(value: object, *, run_active: bool) -> dict[str, object]:
         "can_start_new_solver": False,
         "can_view_current_run": unchanged and run_active,
         "message": (
-            "동일한 기준 조건의 계산이 진행 중입니다. 새 계산을 시작하지 않고 그 진행 상황을 보여줍니다."
+            "동일한 기준 조건의 기존 계산 또는 검증된 결과를 연결합니다. 새 계산은 시작하지 않습니다."
             if unchanged and run_active
-            else "설정 확인까지 완료했습니다. 변경된 입력으로 새 CFD를 시작하는 백엔드는 아직 연결되지 않았습니다."
+            else "기준 조건과 달라 새 CFD 계산이 필요합니다. CAD·운전조건 확인과 저장공간 검사를 이어서 진행합니다."
         ),
     }
 
@@ -201,6 +211,9 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
     )
     energy_report = _read_json(
         case_dir / "runs/frozen_flow_actual_1s/reports/solver/energy_balance.json"
+    )
+    coupling_audit = _read_json(
+        case_dir / "runs/frozen_flow_actual_1s/reports/solver/energy_coupling_audit.json"
     )
     log = case_dir / "runs/frozen_flow_actual_1s/logs/solver/frozen_flow_actual_1s.log"
     tail = _log_tail(log)
@@ -258,6 +271,10 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
             "physical_time_percent": min(100.0, 100.0 * time_s / END_TIME_S) if time_s is not None else 0.0,
             "energy_coupling_iteration": coupling_current,
             "energy_coupling_limit": coupling_limit,
+            "energy_coupling_audit": {
+                key: coupling_audit.get(key)
+                for key in ("target", "cap", "time_step_count", "early_exit_count", "cap_reached_count", "coupling_not_entered_count")
+            } if coupling_audit else None,
             "log_age_s": log_age_s,
             "solver_clean_end": clean_end,
             "validation_status": transient_report.get("status"),
@@ -291,11 +308,12 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
 def serve_workflow(
     *, case_dir: Path, cad_dir: Path, viewer_dir: Path, port: int = 8765
 ) -> None:
-    """Serve the portal only on loopback; never invoke Docker or OpenFOAM."""
+    """Serve baseline status and user-confirmed isolated CAD jobs on loopback."""
 
     case_dir, cad_dir, viewer_dir = (
         case_dir.resolve(), cad_dir.resolve(), viewer_dir.resolve()
     )
+    imported_root = case_dir.parent / "imported_runs"
     monitor_stop = threading.Event()
 
     def monitor_completed_run() -> None:
@@ -355,34 +373,92 @@ def serve_workflow(
                 self._json(HTTPStatus.OK, workflow_status(case_dir, cad_dir, viewer_dir))
             elif path == "/api/geometry":
                 self._json(HTTPStatus.OK, baseline_geometry(cad_dir))
+            elif path.startswith("/api/runs/"):
+                try:
+                    self._json(HTTPStatus.OK, imported_run_status(imported_root, path[len("/api/runs/"):]))
+                except ValueError as exc:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             elif path in {"/", "/index.html"}:
                 self._file(ASSETS, "index.html")
             elif path in {"/app.js", "/style.css"}:
                 self._file(ASSETS, path.lstrip("/"))
             elif path.startswith("/viewer/") and workflow_status(case_dir, cad_dir, viewer_dir)["viewer_ready"]:
                 self._file(viewer_dir, path[len("/viewer/"):])
+            elif path.startswith("/runs/"):
+                parts = path.split("/", 4)
+                if len(parts) == 5 and parts[3] == "viewer":
+                    try:
+                        status = imported_run_status(imported_root, parts[2])
+                    except ValueError:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                        return
+                    if status.get("status") == "complete":
+                        self._file(imported_root / "runs" / parts[2] / "viewer", parts[4])
+                        return
+                self.send_error(HTTPStatus.NOT_FOUND)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802 (HTTP interface)
             path = urlsplit(self.path).path
             try:
+                origin = self.headers.get("Origin")
+                host = self.headers.get("Host", "")
+                allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+                if host not in allowed_hosts or (origin and origin not in {f"http://{name}" for name in allowed_hosts}):
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "다른 출처의 로컬 계산 요청은 허용하지 않습니다."})
+                    return
                 length = int(self.headers.get("Content-Length", "0"))
-                if length <= 0 or length > MAX_CAD_BYTES:
+                if length <= 0 or length > MAX_CAD_BYTES + 4096:
                     raise ValueError("요청 본문이 비었거나 50 MiB를 초과했습니다.")
                 data = self.rfile.read(length)
                 if path == "/api/cad/inspect":
                     name = unquote(self.headers.get("X-CAD-Filename", ""))
                     result = inspect_cad_bytes(name, data, cad_dir)
+                    if result["format"] == "STEP":
+                        result["upload_token"] = stage_uploaded_step(imported_root, name, data)
                 elif path == "/api/prepare":
                     payload = json.loads(data.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("입력은 JSON 객체여야 합니다.")
                     status = workflow_status(case_dir, cad_dir, viewer_dir)
-                    active = next(s for s in status["stages"] if s["id"] == "transient")["status"] == "running"
+                    active = status["viewer_ready"] or next(s for s in status["stages"] if s["id"] == "transient")["status"] == "running"
                     result = prepare_inputs(payload, run_active=active)
+                elif path == "/api/import/prepare":
+                    payload = json.loads(data.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("입력은 JSON 객체여야 합니다.")
+                    result = prepare_imported_run(imported_root, payload.get("files"), payload.get("inputs"))
+                elif path == "/api/baseline/prepare":
+                    payload = json.loads(data.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("입력은 JSON 객체여야 합니다.")
+                    if not baseline_geometry(cad_dir)["verified"]:
+                        raise ValueError("기준 CAD의 원본 해시 검증이 필요합니다.")
+                    selected = {
+                        role: stage_uploaded_step(imported_root, role, (cad_dir / role).read_bytes())
+                        for role in CAD_ROLES
+                    }
+                    result = prepare_imported_run(imported_root, selected, payload)
+                    result["files"] = selected
+                    result["built_in_baseline"] = True
+                elif path == "/api/import/start":
+                    payload = json.loads(data.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("입력은 JSON 객체여야 합니다.")
+                    if payload.get("geometry_confirmed") is not True:
+                        raise ValueError("검증된 형상·운전 조건을 확인해야 새 계산을 시작할 수 있습니다.")
+                    current = workflow_status(case_dir, cad_dir, viewer_dir)
+                    if any(stage["id"] == "transient" and stage["status"] == "running" for stage in current["stages"]):
+                        raise ValueError("현재 기준 CFD 계산 중입니다. 자원 충돌을 막기 위해 완료 후 새 계산을 시작하십시오.")
+                    result = create_imported_run(
+                        imported_root, payload.get("files"), payload.get("inputs"),
+                        payload.get("confirmation", ""),
+                    )
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
-            except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError, CfdTwinError) as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             self._json(HTTPStatus.OK, result)

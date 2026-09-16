@@ -29,7 +29,7 @@ EXPECTED_BATTERY_FILES = tuple(
     f"battery_C{index:02d}.stl" for index in range(1, 24)
 )
 DEFAULT_MESH_PROFILE = "single"
-SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE, "production_800k")
+SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE, "production_700k", "production_800k")
 DEFAULT_MPI_RANKS = DEFAULT_SOLVER_MPI_RANKS
 DEFAULT_MESH_MPI_RANKS = 1
 # 10은 요청 layer 수다. snappyHexMesh가 품질을 위해 국부적으로 층을
@@ -87,6 +87,23 @@ MESH_PRESETS = {
         target_solid_cells=SINGLE_MESH_TARGET_COUNTS["solid_cells"],
         target_fluid_cells=SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
         target_points=SINGLE_MESH_TARGET_COUNTS["points"],
+    ),
+    # A 3.00 mm source produced 732,766 actual cells. Curved surface snapping
+    # gives 89.35% hexes here, so the separately declared 700k-class contract
+    # uses an 89% minimum (the 800k-class contract remains at 90%). All other
+    # volume, port-area, layer, skewness and non-orthogonality gates stay strict.
+    "production_700k": MeshPreset(
+        target_cells=700_000,
+        background_cell_m=0.00300,
+        surface_min_level=0,
+        surface_max_level=1,
+        battery_inside_level=1,
+        first_layer_thickness_m=12e-6,
+        minimum_hexahedron_fraction=0.89,
+        maximum_non_orthogonality=70.0,
+        maximum_skewness=5.0,
+        generation_max_non_orthogonality=69.5,
+        calibration_status="CALIBRATED_EXECUTED_732766_MESH_GATE_PASSED",
     ),
     # Professor-requested ~800k mesh. The fourth 2.90 mm / 12 um attempt passed
     # count, topology, quality and cold-flow gates with 849,284 cells, 90.223%
@@ -271,23 +288,25 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
 
     port_refinement_regions: list[str] = []
     if preset.background_cell_m <= 0.0027:
-        port_half_width = config.ports.inlet_diameter_m / 2 + 0.001
         refinement_depth = 0.004
-        for name, center, end_z, inward_sign in (
+        for name, center, diameter, end_z, inward_sign in (
             (
                 "inletCapRefinement",
                 config.ports.inlet_center_xy_m,
+                config.ports.inlet_diameter_m,
                 config.enclosure.height_z_m + config.ports.external_length_m,
                 -1.0,
             ),
             (
                 "outletCapRefinement",
                 config.ports.outlet_center_xy_m,
+                config.ports.outlet_diameter_m,
                 -config.ports.external_length_m,
                 1.0,
             ),
         ):
             x, y = center
+            port_half_width = diameter / 2 + 0.001
             inner_z = end_z + inward_sign * refinement_depth
             geometry_entries.append(
                 f'''    {name}
@@ -483,18 +502,22 @@ mergeTolerance 1e-6;
 
 
 def _topo_set_ports_dict(config: ResolvedConfig) -> str:
-    radius = config.ports.inlet_diameter_m / 2
     epsilon = 1e-5
     entries: list[str] = []
-    for name, center, z in (
+    for name, center, diameter, z in (
         (
             "inlet",
             config.ports.inlet_center_xy_m,
+            config.ports.inlet_diameter_m,
             config.enclosure.height_z_m + config.ports.external_length_m,
         ),
-        ("outlet", config.ports.outlet_center_xy_m, -config.ports.external_length_m),
+        (
+            "outlet", config.ports.outlet_center_xy_m,
+            config.ports.outlet_diameter_m, -config.ports.external_length_m,
+        ),
     ):
         x, y = center
+        radius = diameter / 2
         entries.append(
             f'''    {{
         name {name}Faces;
@@ -1055,7 +1078,7 @@ def _compose_yaml() -> str:
     environment:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
       TRANSIENT_DELTA_T: "${{TRANSIENT_DELTA_T:-1}}"
-      ENERGY_COUPLING_ITERATIONS: "${{ENERGY_COUPLING_ITERATIONS:-100}}"
+      ENERGY_COUPLING_ITERATIONS: "${{ENERGY_COUPLING_ITERATIONS:-200}}"
     volumes:
       - .:/case
     command: ["/bin/sh", "/case/AllrunFrozenFlowThermalPilot"]
@@ -1069,7 +1092,7 @@ def _compose_yaml() -> str:
       OPENFOAM_MPI_RANKS: "${{OPENFOAM_MPI_RANKS:-{DEFAULT_MPI_RANKS}}}"
       FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K: "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-293}}"
       TRANSIENT_DELTA_T: "${{TRANSIENT_DELTA_T:-1}}"
-      ENERGY_COUPLING_ITERATIONS: "${{ENERGY_COUPLING_ITERATIONS:-100}}"
+      ENERGY_COUPLING_ITERATIONS: "${{ENERGY_COUPLING_ITERATIONS:-200}}"
     volumes:
       - .:/case
     command: ["/bin/sh", "/case/AllrunFrozenFlowThermalActual1s"]
@@ -1115,6 +1138,12 @@ def _dockerfile() -> str:
 RUN apt-get update \\
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 \\
  && rm -rf /var/lib/apt/lists/*
+
+COPY tools/patch_adaptive_cht_solver.py /tmp/patch_adaptive_cht_solver.py
+RUN cp -a /usr/lib/openfoam/openfoam2512/applications/solvers/heatTransfer/chtMultiRegionFoam /tmp/chtMultiRegionFoamAdaptive \\
+ && python3 /tmp/patch_adaptive_cht_solver.py /tmp/chtMultiRegionFoamAdaptive/chtMultiRegionFoam.C \\
+ && sed -i 's@$(FOAM_APPBIN)/chtMultiRegionFoam@$(FOAM_APPBIN)/chtMultiRegionFoamAdaptive@' /tmp/chtMultiRegionFoamAdaptive/Make/files \\
+ && /bin/bash -lc 'source /usr/lib/openfoam/openfoam2512/etc/bashrc && cd /tmp/chtMultiRegionFoamAdaptive && wmake'
 '''
 
 
@@ -1260,7 +1289,7 @@ def _readme(level: str) -> str:
         "This is the default single-run profile targeting 207,390 total cells "
         "(70,840 solid + 136,550 fluid) and 221,878 points."
         if level == DEFAULT_MESH_PROFILE
-        else "This is a retained legacy validation profile."
+        else f"This is a {MESH_PRESETS[level].target_cells:,}-cell-class production profile; actual cell count and quality are checked after execution."
     )
     return f'''# Production mesh source ({level})
 
@@ -1499,6 +1528,14 @@ def write_production_mesh_source_bundle(
     shutil.copy2(
         Path(__file__).with_name("openfoam_transient_residuals.py"),
         output / "tools" / "extract_transient_residuals.py",
+    )
+    shutil.copy2(
+        Path(__file__).with_name("openfoam_energy_coupling_audit.py"),
+        output / "tools" / "audit_energy_coupling.py",
+    )
+    shutil.copy2(
+        Path(__file__).with_name("patch_adaptive_cht_solver.py"),
+        output / "tools" / "patch_adaptive_cht_solver.py",
     )
     shutil.copy2(
         Path(__file__).with_name("openfoam_energy_balance.py"),

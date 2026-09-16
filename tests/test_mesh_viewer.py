@@ -40,15 +40,22 @@ class MeshOnlyViewerTest(unittest.TestCase):
                 "points_mm": [[0, 0, 0], [1, 0, 0]],
                 "modes": {
                     mode: {"label": mode, "groups": [{"kind": "fluid", "edge_count": 1, "edges": [[0, 1]]}]}
-                    for mode in ("surface", "xy", "xz")
+                    for mode in ("surface", "xy", "xz", "interior25", "interior50", "interior75")
                 },
             }
-            with patch("cfd_twin.mesh_viewer.extract_full_mesh_views", return_value=data):
+            volume = {"payload": {"coolant": "ZGF0YQ==", "batterySolid": "ZGF0YQ=="},
+                      "counts": {"coolant": {"points": 2, "edges": 1, "faces": 1},
+                                 "batterySolid": {"points": 2, "edges": 1, "faces": 1}}}
+            with patch("cfd_twin.mesh_viewer.extract_full_mesh_views", return_value=data), \
+                 patch("cfd_twin.mesh_viewer.extract_complete_volume_edges", return_value=volume):
                 summary = write_mesh_only_viewer(root / "case", root / "viewer")
             self.assertEqual(summary["cell_counts"]["total_cells"], 849284)
             html = (root / "viewer/mesh.html").read_text(encoding="utf-8")
             self.assertIn("가로 XY 단면", html)
             self.assertIn("세로 XZ 단면", html)
+            self.assertIn("3D 내부 절개", html)
+            self.assertIn("3D 전체 격자", html)
+            self.assertIn('id="cut-x"', html)
             self.assertIn('id="mesh-home" href="../"', html)
             self.assertIn('id="save-png"', html)
             self.assertIn('canvas.toBlob(blob=>', (root / "viewer/mesh.js").read_text(encoding="utf-8"))
@@ -60,6 +67,9 @@ class MeshOnlyViewerTest(unittest.TestCase):
             self.assertEqual(exported["sampling"], "none")
             self.assertEqual(exported["cell_counts"]["total_cells"], 849284)
             self.assertEqual(exported["modes"]["xy"]["groups"][0]["edges"], [[0, 1]])
+            self.assertEqual(exported["modes"]["interior50"]["groups"][0]["edges"], [[0, 1]])
+            self.assertEqual(summary["complete_volume_edge_counts"]["coolant"]["edges"], 1)
+            self.assertTrue((root / "viewer/mesh-volume-data.js").is_file())
 
 
 if __name__ == "__main__":

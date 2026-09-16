@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YU Fluid · CFD 작업실</title>
-  <link rel="stylesheet" href="/style.css?v=light-ui-1">
+  <link rel="stylesheet" href="/style.css?v=import-cad-1">
 </head>
 <body>
   <header class="topbar">
@@ -25,6 +25,13 @@
     <section id="results-view" class="workspace" hidden>
       <div class="section-head"><div><p class="eyebrow">RESULTS</p><h2>결과 보기</h2></div><button class="text-button home" type="button">← 처음으로</button></div>
       <div id="result-notice" class="notice">결과 상태를 불러오는 중입니다.</div>
+      <article id="imported-run-panel" class="panel imported-run" hidden>
+        <div class="panel-head"><h3>새 CAD 계산</h3><span id="imported-run-state" class="pill">대기</span></div>
+        <p id="imported-run-message"></p>
+        <div id="imported-run-stages" class="stage-list"></div>
+        <p id="imported-run-progress" class="quiet"></p>
+        <a id="open-imported-viewer" class="button-link" hidden>새 CAD 3D 결과·그래프 열기 ↗</a>
+      </article>
       <div class="result-grid">
         <article class="panel">
           <div class="panel-head"><h3>현재 결과</h3><span id="mesh-count" class="pill">메시 확인 중</span></div>
@@ -53,11 +60,12 @@
         <article class="panel">
           <div class="panel-head"><h3>01 · CAD 형상</h3><span id="cad-badge" class="pill">검증 확인 중</span></div>
           <label class="choice"><input type="radio" name="cad-mode" value="baseline" checked> 검증된 기준 CAD 사용</label>
-          <label class="choice"><input type="radio" name="cad-mode" value="upload"> CAD 파일 첨부·검사</label>
+          <label class="choice"><input type="radio" name="cad-mode" value="upload"> 새 CAD 첨부·계산</label>
           <div id="upload-area" hidden>
             <label for="cad-files" class="upload-target">STEP / STL 파일 선택 <small>여러 파일 가능 · 파일당 최대 50 MiB</small></label>
             <input id="cad-files" type="file" accept=".step,.stp,.stl" multiple>
             <div id="cad-file-results" class="file-results" aria-live="polite"></div>
+            <p class="quiet">STEP 3개를 탱크·포트 / 냉각수 / 배터리 영역에 지정합니다. STL은 참고용으로만 검사합니다.</p>
           </div>
           <div class="geometry-facts">
             <div><span>탱크</span><strong id="tank-size">—</strong></div>
@@ -75,11 +83,14 @@
             <label>입구 온도 <small>K</small><input name="inlet_temperature_k" type="number" value="293" min="250" max="370" step="0.01" required></label>
             <label>입구 속도 <small>m/s</small><input name="inlet_velocity_m_s" type="number" value="0.4" min="0.001" max="5" step="0.001" required></label>
             <label>출구 절대압력 <small>Pa</small><input name="outlet_pressure_pa" type="number" value="101325" min="50000" max="300000" step="1" required></label>
-            <label>목표 메시 수 <small>cell</small><input name="mesh_target_cells" type="number" value="849284" min="700000" max="900000" step="1" required></label>
+            <label>메시 등급 <small>실제 수 검증</small><select name="mesh_target_cells" required>
+              <option value="800000" selected>80만급 · 기준 형상 849,284셀</option>
+              <option value="700000">70만급 · 기준 형상 732,766셀</option>
+            </select></label>
           </div>
           <div class="source-box"><strong>발열</strong><span>Peneklioglu / Bernardi 시간가변 열원 · 2C · 0–1800 s</span></div>
           <button class="primary full" type="submit">형상·조건 확인하기 →</button>
-          <p class="quiet">입구·출구 구경은 CAD에서 가져옵니다. 현재는 동일한 기준 CAD와 기존 계산만 연결하며, 새 변수 계산은 시작하지 않습니다.</p>
+          <p class="quiet">새 STEP의 입·출구 구경은 형상에서 읽습니다. 현재 자동 계산은 동일한 23셀 탱크 계열 형상에 한하며, 검증을 통과하지 못한 CAD는 실행되지 않습니다.</p>
         </form>
       </div>
     </section>
@@ -90,10 +101,11 @@
       <p class="eyebrow">RUN CONFIRMATION</p><h2>계산 조건 확인</h2>
       <div id="confirmation-details" class="confirm-list"></div>
       <p id="confirmation-message" class="notice"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">돌아가기</button><button id="attach-run" value="attach" class="primary" disabled>현재 계산 진행 보기</button></div>
+      <label id="geometry-confirmation" class="choice" hidden><input id="geometry-confirmed" type="checkbox"> 표시된 CAD 형상과 운전 조건을 확인했습니다</label>
+      <div class="dialog-actions"><button value="cancel" class="secondary">돌아가기</button><button id="attach-run" value="attach" class="primary" disabled>현재 계산 진행 보기</button><button id="start-imported-run" type="button" class="primary" hidden disabled>새 CFD 계산 시작</button></div>
     </form>
   </dialog>
   <footer>YU Fluid · 기준 CAD / 원본 솔버 로그 / 검증 보고서에 연결된 상태만 표시</footer>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=import-cad-1" defer></script>
 </body>
 </html>

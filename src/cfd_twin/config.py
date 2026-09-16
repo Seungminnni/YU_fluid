@@ -33,7 +33,11 @@ from .units import positive, quantity
 PAPER_REYNOLDS = 8782.0
 EXPECTED_TOPOLOGY = "staggered_5_4_5_4_5"
 EXPECTED_COUNTS = (5, 4, 5, 4, 5)
-ALLOWED_MODES = {"paper_geometry_baseline", "viscosity_re8782_sensitivity"}
+ALLOWED_MODES = {
+    "paper_geometry_baseline",
+    "viscosity_re8782_sensitivity",
+    "imported_23cell",
+}
 
 
 def _mapping(value: object, field: str) -> dict[str, Any]:
@@ -483,6 +487,11 @@ def load_config(
         ("inlet diameter", ports.inlet_diameter_m, 0.019),
         ("outlet diameter", ports.outlet_diameter_m, 0.019),
     ):
+        # Imported STEP geometry may change the port sizes. The current
+        # OpenFOAM/23-cell source contract still fixes battery dimensions;
+        # unsupported topology must fail before meshing.
+        if mode == "imported_23cell" and label in {"inlet diameter", "outlet diameter"}:
+            continue
         if not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-12):
             raise ConfigError(f"final-design {label} must be {expected} m")
     notch_expectations = {

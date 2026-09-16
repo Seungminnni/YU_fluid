@@ -32,8 +32,10 @@ def _write_json(path: Path, value: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def publish_completed_run(case_dir: Path, viewer_dir: Path) -> dict[str, object]:
-    """Gate, pack, verify, and display the existing 849k baseline run."""
+def publish_completed_run(
+    case_dir: Path, viewer_dir: Path, *, config=None
+) -> dict[str, object]:
+    """Gate, pack, verify, and display one completed single-mesh run."""
 
     from .actual_one_second import (
         build_actual_one_second_bundle,
@@ -89,14 +91,20 @@ def publish_completed_run(case_dir: Path, viewer_dir: Path) -> dict[str, object]
         raise ValueError("validated transient final time is not 1800 s")
 
     packed_dir = run / "reports/viewer"
+    if config is None:
+        root = Path(__file__).resolve().parents[2]
+        config = load_config(
+            root / "configs/baseline_23cell.yaml",
+            overlay_paths=(root / "configs/ppt_bernardi_udf.yaml",),
+        )
     packed_report = _read_json(packed_dir / "actual_1s_validation.json")
     if packed_report.get("status") != "ACTUAL_ONE_SECOND_BUNDLE_VALIDATION_PASSED":
         update("packing", "1초 원본 온도 프레임을 포장하고 전수검증 중입니다.")
         build_actual_one_second_bundle(
             run,
             packed_dir,
-            initial_temperature_k=293.15,
-            initial_fluid_temperature_k=293.0,
+            initial_temperature_k=config.boundary.initial_solid_temperature_k,
+            initial_fluid_temperature_k=config.boundary.initial_fluid_temperature_k,
             end_time_s=1800,
         )
         packed_report = validate_actual_one_second_bundle(run, packed_dir)
@@ -104,11 +112,6 @@ def publish_completed_run(case_dir: Path, viewer_dir: Path) -> dict[str, object]
         raise ValueError("1-second probe frame validation failed")
 
     update("viewer", "검증된 원본 필드와 1초 프레임을 3D 뷰어에 연결 중입니다.")
-    root = Path(__file__).resolve().parents[2]
-    config = load_config(
-        root / "configs/baseline_23cell.yaml",
-        overlay_paths=(root / "configs/ppt_bernardi_udf.yaml",),
-    )
     balance = reports["energy_balance"]
     result_manifest = {
         "schema_version": 1,
