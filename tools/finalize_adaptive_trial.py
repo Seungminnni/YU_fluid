@@ -16,6 +16,7 @@ from pathlib import Path
 
 from cfd_twin.case_builder import _docker_command
 from cfd_twin.openfoam_log_merge import merge_solver_logs
+from cfd_twin.thermal_history_comparison import compare_thermal_histories
 
 
 SEGMENTS = (
@@ -154,6 +155,15 @@ def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
             save()
         if failed:
             raise RuntimeError("validation stages failed: " + ", ".join(failed))
+        comparison = compare_thermal_histories(
+            reference_run, trial, mesh_report,
+            reports / "thermal_history_comparison.json",
+        )
+        result["stages"]["thermal_history_comparison"] = {
+            "status": comparison["status"],
+            "sample_count": comparison["sample_count"],
+            "series": comparison["series"],
+        }
         result["status"] = "ADAPTIVE_TRIAL_VALIDATION_PASSED"
     except Exception as exc:
         result["status"] = "ADAPTIVE_TRIAL_VALIDATION_FAILED"
