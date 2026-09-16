@@ -6,6 +6,7 @@ import hashlib
 import contextlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,11 +22,21 @@ from cfd_twin.workflow_run import (
     create_imported_run,
     prepare_imported_run,
     _run_steady_stages,
+    _worker_process_options,
     stage_uploaded_step,
 )
 
 
 class ImportedCadWorkflowTests(unittest.TestCase):
+    def test_worker_detach_flags_are_host_specific(self) -> None:
+        self.assertEqual(_worker_process_options("posix"), {"start_new_session": True})
+        with patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True), \
+             patch.object(subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True):
+            self.assertEqual(
+                _worker_process_options("nt"),
+                {"creationflags": 0x08000200},
+            )
+
     @classmethod
     def setUpClass(cls) -> None:
         try:

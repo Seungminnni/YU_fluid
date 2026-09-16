@@ -55,6 +55,16 @@ def _lock_solver_file(stream: object) -> None:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+def _worker_process_options(platform_name: str | None = None) -> dict[str, object]:
+    """Detach the CFD worker with flags supported by the current host OS."""
+
+    if (platform_name or os.name) == "nt":
+        return {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+        }
+    return {"start_new_session": True}
+
+
 def _compose_service(case: Path, service: str, output: object, *, environment: dict[str, str] | None = None) -> int:
     docker = _docker_command()
     if docker is None:
@@ -240,7 +250,7 @@ def create_imported_run(
         subprocess.Popen(
             [sys.executable, "-m", "cfd_twin.workflow_run", str(job_dir / "job.json")],
             cwd=SOURCE_ROOT, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **_worker_process_options(),
         )
     return {"id": run_id, "status": "queued", "status_url": f"/api/runs/{run_id}"}
 
