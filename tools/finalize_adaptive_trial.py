@@ -129,6 +129,13 @@ def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
         for name, module, arguments in calls:
             code = _run([sys.executable, "-m", module, *arguments], reports / f"{name}.log")
             result["stages"][name] = {"exit_code": code}
+            if name == "coupling_audit" and code == 0:
+                audit = json.loads((reports / "energy_coupling_audit.json").read_text(encoding="utf-8"))
+                result["stages"][name]["no_inner_loop_outer_h_gate_passed"] = audit[
+                    "coupling_not_entered_outer_h_gate_passed"
+                ]
+                if not audit["coupling_not_entered_outer_h_gate_passed"]:
+                    failed.append(name)
             if code:
                 failed.append(name)
             save()

@@ -4,7 +4,9 @@ The OpenFOAM loopControl limit is adaptive, but reaching its limit is not a
 convergence claim. This read-only report distinguishes early exits from
 limit-bound steps and preserves the raw initial residuals for both regions.
 Additional PIMPLE outer-corrector solves after energyCoupling are deliberately
-not mislabelled as part of the inner coupling loop.
+not mislabelled as part of the inner coupling loop. A step can enter no inner
+loop at all while still solving both energies in outer correctors; verify its
+last h pair before treating that step as an acceptable skip.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ def audit_energy_coupling(log: Path, *, threshold: float, expected_cap: int) -> 
     region: str | None = None
     awaiting: set[str] = set()
     active_pair: dict[str, float] = {}
+    all_h_initial_residuals: list[float] = []
 
     def finish_pair() -> None:
         nonlocal active_pair
@@ -43,6 +46,11 @@ def audit_energy_coupling(log: Path, *, threshold: float, expected_cap: int) -> 
     def finish_step() -> None:
         finish_pair()
         if current is not None:
+            last_pair = all_h_initial_residuals[-2:]
+            current["last_any_h_initial_residual_pair"] = last_pair
+            current["last_any_h_pair_below_target"] = (
+                len(last_pair) == 2 and max(last_pair) < threshold
+            )
             if current["coupling_iterations"] is not None:
                 pair = current.get("last_inner_h_initial_residual", {})
                 current["both_inner_h_below_target"] = (
@@ -64,6 +72,7 @@ def audit_energy_coupling(log: Path, *, threshold: float, expected_cap: int) -> 
                 current = {"time_s": float(match.group(1)), "coupling_iterations": None, "coupling_cap": None}
                 region = None
                 awaiting = set()
+                all_h_initial_residuals = []
                 continue
             match = COUPLING_RE.match(line)
             if match and current is not None:
@@ -77,15 +86,19 @@ def audit_energy_coupling(log: Path, *, threshold: float, expected_cap: int) -> 
                 region = "coolant"
             elif line.startswith("Solving for solid region batterySolid"):
                 region = "batterySolid"
-            elif region in awaiting:
+            else:
                 match = RESIDUAL_RE.search(line)
-                if match:
-                    active_pair[region] = float(match.group(1))
-                    awaiting.remove(region)
+                if match and current is not None:
+                    value = float(match.group(1))
+                    all_h_initial_residuals.append(value)
+                    if region in awaiting:
+                        active_pair[region] = value
+                        awaiting.remove(region)
     finish_step()
     if not any(step["coupling_iterations"] is not None for step in steps):
         raise ValueError("no energyCoupling iterations found in solver log")
     loop_steps = [step for step in steps if step["coupling_iterations"] is not None]
+    no_loop_steps = [step for step in steps if step["coupling_iterations"] is None]
     if any(step["coupling_cap"] != expected_cap or "last_inner_h_initial_residual" not in step for step in loop_steps):
         raise ValueError("some time steps have an unexpected cap or incomplete fluid/solid h pair")
     return {
@@ -97,6 +110,12 @@ def audit_energy_coupling(log: Path, *, threshold: float, expected_cap: int) -> 
         "time_step_count": len(steps),
         "coupling_loop_time_step_count": len(loop_steps),
         "coupling_not_entered_count": len(steps) - len(loop_steps),
+        "coupling_not_entered_last_h_below_target_count": sum(
+            bool(step["last_any_h_pair_below_target"]) for step in no_loop_steps
+        ),
+        "coupling_not_entered_outer_h_gate_passed": all(
+            bool(step["last_any_h_pair_below_target"]) for step in no_loop_steps
+        ),
         "early_exit_count": sum(bool(step["early_exit"]) for step in loop_steps),
         "cap_reached_count": sum(not step["early_exit"] for step in loop_steps),
         "early_exit_both_h_below_target_count": sum(bool(step["early_exit"] and step["both_inner_h_below_target"]) for step in loop_steps),

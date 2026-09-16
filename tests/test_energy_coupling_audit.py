@@ -41,6 +41,30 @@ class EnergyCouplingAuditTests(unittest.TestCase):
             self.assertEqual(report["cap_reached_count"], 1)
             self.assertEqual(report["early_exit_both_h_below_target_count"], 1)
             self.assertEqual(report["steps"][0]["last_inner_h_initial_residual"]["batterySolid"], 8e-6)
+            self.assertFalse(report["coupling_not_entered_outer_h_gate_passed"])
+            self.assertEqual(report["steps"][1]["last_any_h_initial_residual_pair"], [4e-6])
+
+    def test_no_inner_loop_still_checks_outer_fluid_and_solid_h(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "solver.log"
+            log.write_text(
+                "Time = 1\n"
+                "energyCoupling: 1/200\n"
+                "Solving for fluid region coolant\n"
+                "Solving for h, Initial residual = 2e-6\n"
+                "Solving for solid region batterySolid\n"
+                "Solving for h, Initial residual = 3e-6\n"
+                "Time = 2\n"
+                "Solving for h, Initial residual = 4e-6\n"
+                "Solving for solid region batterySolid\n"
+                "Solving for h, Initial residual = 9e-6\n",
+                encoding="utf-8",
+            )
+            report = audit_energy_coupling(log, threshold=1e-5, expected_cap=200)
+            self.assertEqual(report["coupling_not_entered_count"], 1)
+            self.assertEqual(report["coupling_not_entered_last_h_below_target_count"], 1)
+            self.assertTrue(report["coupling_not_entered_outer_h_gate_passed"])
+            self.assertEqual(report["steps"][1]["last_any_h_initial_residual_pair"], [4e-6, 9e-6])
 
 
 if __name__ == "__main__":
