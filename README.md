@@ -848,11 +848,13 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 ```bash
 .venv/bin/cfd-twin build-cad-source \
   configs/baseline_23cell.yaml \
-  --output build/case_validated/cad_source
+  --overlay configs/ppt_bernardi_udf.yaml \
+  --output build/ppt_bernardi_cad_source
 
 .venv/bin/cfd-twin build-cad \
   configs/baseline_23cell.yaml \
-  --output build/case_validated/cad_source
+  --overlay configs/ppt_bernardi_udf.yaml \
+  --output build/ppt_bernardi_cad_source
 ```
 
 ### 13.3 표준 생산 메시와 솔버 bundle 생성
@@ -874,7 +876,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/cfd-twin build-production-mesh-source \
   configs/baseline_23cell.yaml \
   --overlay configs/ppt_bernardi_udf.yaml \
-  --cad-dir build/case_validated/cad_source \
+  --cad-dir build/ppt_bernardi_cad_source \
   --output build/ppt_bernardi_800k \
   --profile production_800k
 ```
@@ -882,12 +884,11 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 ### 13.4 실행 순서
 
 ```bash
-build/case_validated/production/single/run-production-mesh.sh
-build/case_validated/production/single/run-cold-flow-pilot.sh
-build/case_validated/production/single/run-cold-flow-continue.sh   # gate가 요구할 때만
-build/case_validated/production/single/run-steady-pilot.sh
-build/case_validated/production/single/run-steady-continue.sh     # gate가 요구할 때만
-build/case_validated/production/single/run-frozen-flow-actual-1s.sh
+build/ppt_bernardi_800k/run-production-mesh.sh
+build/ppt_bernardi_800k/run-cold-flow-pilot.sh
+build/ppt_bernardi_800k/run-steady-pilot.sh
+TRANSIENT_DELTA_T=0.01 ENERGY_COUPLING_ITERATIONS=100 \
+  build/ppt_bernardi_800k/run-frozen-flow-actual-1s.sh
 ```
 
 전체 연성 과도 경로는 별도 검증용이다.

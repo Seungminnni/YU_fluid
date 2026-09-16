@@ -30,10 +30,27 @@ prevent a future cleanup from deleting the validated CFD results.
 | `build/case_validated/results/` | Current static figure artifacts consumed when rebuilding the viewer. |
 | `build/case_validated/cad_source/`, `heat_source/`, manifests and reports | Reproducibility inputs and provenance for the retained production cases. |
 | `build/reference_viewer/` | Current portable interactive viewer and its packed one-second datasets. |
+| `build/*웹앱*.zip`, `build/*viewer*.zip`, Desktop delivery copies | User-deliverable web-app packages. Never delete during CFD-result cleanup; retain older dated packages when creating a replacement. |
 
 `build/case_validated/` is the authoritative generated case/result root.
 `build/reference_viewer/` is the authoritative presentation bundle. Neither is
 committed to Git, so they require a separate backup if the workspace is moved.
+
+### Web-app retention rule
+
+Deleting or regenerating CFD meshes and solver results does **not** authorize
+deleting a packaged viewer. Web-app directories and ZIP deliveries are a
+separate preservation class. A new package must use a dated/condition-labelled
+name and must not overwrite or remove the previous package unless the user
+explicitly names that package for deletion.
+
+## Removed on 2026-09-16
+
+At the user's request, the old CFD result trees were removed before the clean
+Fluent-condition rerun. This included the prior `framework_udf_800k`,
+`case_validated`, `ppt_bernardi_800k`, `ppt_bernardi_case` and generated
+`reference_viewer` trees. The prior 9 September 16 web-app ZIP was also removed
+in that cleanup; this is the reason for the stricter retention rule above.
 
 ## Removed on 2026-09-11
 
@@ -57,7 +74,6 @@ targets.
 
 | Path | Reason |
 |---|---|
-| `build/CFD_viewer_portable.zip`, `build/reference_viewer.zip` | Duplicate stale archives from before the latest viewer rebuild. Recreate from `build/reference_viewer/` when needed. |
 | `production/L3/runs/frozen_flow_actual_1s/` | Superseded by `frozen_flow_actual_1s_xy5`. |
 | failed `steady_cold_flow*failed*` runs | Failed y+ experiments; passed cold-flow results remain. |
 | `production/L3/processor0` ... `processor9` | Reconstructible decomposition left by mesh generation; retained solver runs contain their own required meshes. |
