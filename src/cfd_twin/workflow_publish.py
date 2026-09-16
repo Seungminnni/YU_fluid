@@ -106,6 +106,7 @@ def publish_completed_run(
             initial_temperature_k=config.boundary.initial_solid_temperature_k,
             initial_fluid_temperature_k=config.boundary.initial_fluid_temperature_k,
             end_time_s=1800,
+            mesh_case_dir=case,
         )
         packed_report = validate_actual_one_second_bundle(run, packed_dir)
     if packed_report.get("status") != "ACTUAL_ONE_SECOND_BUNDLE_VALIDATION_PASSED":
@@ -130,6 +131,21 @@ def publish_completed_run(
             ),
         },
     }
+    adaptive_audit = _read_json(report_dir / "energy_coupling_audit.json")
+    if adaptive_audit.get("status") == "ENERGY_COUPLING_HISTORY_EXTRACTED":
+        cap_failures = (
+            int(adaptive_audit.get("cap_reached_count", 0))
+            - int(adaptive_audit.get("cap_reached_both_h_below_target_count", 0))
+            - int(adaptive_audit.get("cap_reached_after_earlier_target_count", 0))
+        )
+        result_manifest["execution_variant"] = "adaptive_energy_coupling_trial"
+        result_manifest["energy_residual_target"] = adaptive_audit.get("target")
+        result_manifest["energy_coupling_cap_failures"] = cap_failures
+        if cap_failures:
+            result_manifest["validation_warnings"] = [
+                f"{cap_failures}개 시간단계가 결합 반복 상한에 도달하여 "
+                "에너지 잔차 목표를 충족하지 못했습니다."
+            ]
     _write_json(case / "results/result_manifest.json", result_manifest)
     model = write_viewer_bundle(config, viewer, case_dir=case)
     if (

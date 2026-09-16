@@ -49,6 +49,45 @@ def read_openfoam_dat(path: str | Path) -> list[tuple[float, ...]]:
     return rows
 
 
+def read_openfoam_dat_series(path: str | Path) -> list[tuple[float, ...]]:
+    """Merge numeric restart directories of one function-object table.
+
+    OpenFOAM starts a new directory whenever a run resumes.  Refuse changed
+    columns and conflicting overlapping rows rather than silently
+    showing only the first segment in the result viewer.
+    """
+
+    source = Path(path)
+    parent = source.parent.parent
+    if source.parent.name.isdecimal() and parent.is_dir():
+        sources = sorted(
+            (directory / source.name for directory in parent.iterdir()
+             if directory.is_dir() and directory.name.isdecimal()
+             and (directory / source.name).is_file()),
+            key=lambda candidate: int(candidate.parent.name),
+        )
+    else:
+        sources = [source]
+    if source not in sources:
+        raise CfdTwinError(f"initial OpenFOAM table segment is missing: {source}")
+    merged: list[tuple[float, ...]] = []
+    for segment in sources:
+        for row in read_openfoam_dat(segment):
+            if merged and row[0] < merged[-1][0]:
+                raise CfdTwinError(f"OpenFOAM table times moved backwards: {segment}")
+            if merged and row[0] == merged[-1][0]:
+                if len(row) != len(merged[-1]) or any(
+                    not math.isclose(left, right, rel_tol=1e-10, abs_tol=1e-10)
+                    for left, right in zip(row, merged[-1])
+                ):
+                    raise CfdTwinError(f"conflicting restart row in {segment}: {row[0]}")
+                continue
+            if merged and len(row) != len(merged[-1]):
+                raise CfdTwinError(f"OpenFOAM table columns changed: {segment}")
+            merged.append(row)
+    return merged
+
+
 class OpenFoamResultReader:
     """검증된 솔버 필드를 UI 데이터로 바꾸는 최소 VTK 어댑터."""
 

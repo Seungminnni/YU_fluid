@@ -106,3 +106,17 @@ TRANSIENT_DELTA_T=1 ENERGY_COUPLING_ITERATIONS=200 \
 3개 기준 STEP의 SHA-256이 검증 보고서와 정확히 같으면 탱크·포트/냉각수/23개 배터리 역할을 자동 인식한다. 새 CAD에서 같은 이름을 붙였다는 이유만으로 역할이나 Ø19 mm 포트를 가정하지 않는다. 결과 비교표는 3개 슬롯을 준비했으나 실제 검증 완료 데이터가 없는 칸은 비워 둔다. 계산이 끝난 뒤에도 S2 검증·결과 manifest·뷰어 생성이 모두 끝나야 `3D 결과·그래프 열기`가 활성화된다.
 
 뷰어 생성은 모든 필수 gate가 통과한 뒤에만 한다. [`viewer.py`](../src/cfd_twin/viewer.py)는 검증된 원본 필드·probe를 UI 데이터로 변환한다. 시뮬레이션 화면은 격자선을 그리지 않는다. 별도 메시 화면은 [`mesh_wireframe.py`](../src/cfd_twin/mesh_wireframe.py)로 실제 `polyMesh`의 3D 경계, 내부 절개와 XY/XZ 단면을 보여주며, 선택 시에만 **냉각수 1,863,552개 + 고체 1,002,584개 = 2,866,136개 고유 체적 에지 전체**를 로딩한다(표본화 없음). 전체 3D 에지는 겹침이 많아 내부 구조 판독에는 절개·단면 보기를 함께 쓴다. 합격 전의 중단된 실행이나 서로 다른 메시·초기조건의 곡선을 한 결과로 섞지 않는다. 현재 자동 생성되는 84.9만 셀 결과는 단일 메시 **내부 검토용**이다. 과도 솔버 gate와 완전 에너지 수지 및 UI 프레임 검증을 통과해도 별도 격자 독립성·Fluent 교차검증 전에는 논문 최종 승인 결과로 승격하지 않는다.
+
+적응형 시험은 기준 웹앱·`build/reference_viewer`를 덮어쓰지 않고 `build/adaptive_trial_viewer/index.html`에 따로 표시한다. 재시작된 probe와 function-object 표는 `0/`, `1/`, `10/`, `40/`, `65/`를 시간순으로 읽고, 좌표·유효점·열 수가 바뀌거나 중복 값이 충돌하면 게시를 거부한다. 1–1,800초의 모든 표본을 직접 포장하고 `actual_1s_validation.json`으로 반 양자 이내 전수 비교한다. 결과 화면에는 **적응형 시험과 잔차 목표 미달 32단계**를 명시하고, 에너지 수지 통과와 그 잔차 한계를 혼동하지 않는다. 이 별도 화면 역시 전체 3D 체적 격자 버튼을 제공한다.
+
+검증 완료 후 별도 게시 명령은 다음과 같다. 이 명령은 검증 보고서·기준 해시를 확인하고 기준 S0/S1은 읽기 전용으로 연결한다. 기존 결과 디렉터리나 현재 서비스의 뷰어를 덮어쓰지 않는다.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m cfd_twin.adaptive_publish \
+  --trial-dir build/energy_coupling_adaptive_cold_pilot \
+  --reference-case-dir build/ppt_bernardi_800k \
+  --review-case-dir build/adaptive_trial_review_case \
+  --viewer-dir build/adaptive_trial_viewer
+```
+
+휴대용 검토본은 `build/YU_fluid_적응형시험_전체격자_20260917.zip`에 따로 보관한다. 압축을 풀고 `adaptive_trial_viewer/index.html`을 열면 된다. 기존 `build/YU_fluid_웹앱_20260917.zip`과 `build/reference_viewer`는 이전 고정 반복 결과로 그대로 남긴다.

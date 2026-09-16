@@ -25,6 +25,13 @@ class ProbeFile:
     data_offset: int
 
 
+@dataclass(frozen=True)
+class ProbeSeries:
+    files: tuple[ProbeFile, ...]
+    points: list[tuple[float, float, float]]
+    valid_indices: list[int]
+
+
 _PROBE_RE = re.compile(
     r"^# Probe\s+(\d+)\s+\(([^)]+)\)(?:\s+# Not Found)?\s*$"
 )
@@ -68,7 +75,52 @@ def iter_probe_rows(probe: ProbeFile):
                     f"{probe.path}: expected {len(probe.points) + 1} columns, "
                     f"found {len(values)}"
                 )
-            yield int(round(float(values[0]))), values[1:]
+            time = float(values[0])
+            if not math.isfinite(time) or abs(time - round(time)) > 1e-7:
+                raise ValueError(f"{probe.path}: non-integer sample time {time}")
+            yield int(round(time)), values[1:]
+
+
+def read_probe_series(path: str | Path) -> ProbeSeries:
+    """Collect every OpenFOAM restart segment of one probe function object."""
+
+    source = Path(path)
+    siblings = source.parent.parent
+    if source.parent.name.isdecimal() and siblings.is_dir():
+        paths = sorted(
+            (directory / source.name for directory in siblings.iterdir()
+             if directory.is_dir() and directory.name.isdecimal()
+             and (directory / source.name).is_file()),
+            key=lambda candidate: int(candidate.parent.name),
+        )
+    else:
+        paths = [source]
+    if source not in paths:
+        raise ValueError(f"{source}: initial probe segment is missing")
+    files = tuple(read_probe_header(candidate) for candidate in paths)
+    first = files[0]
+    for segment in files[1:]:
+        if segment.points != first.points or segment.valid_indices != first.valid_indices:
+            raise ValueError(f"{segment.path}: probe grid changed after restart")
+    return ProbeSeries(files, first.points, first.valid_indices)
+
+
+def iter_probe_series_rows(series: ProbeSeries):
+    """Stream ordered seconds; allow identical restart-boundary duplicate rows."""
+
+    previous_time = -1
+    previous_values = None
+    for segment in series.files:
+        for time_s, values in iter_probe_rows(segment):
+            if time_s < previous_time:
+                raise ValueError(f"{segment.path}: probe times moved backwards")
+            if time_s == previous_time:
+                if previous_values is None or not np.array_equal(values, previous_values):
+                    raise ValueError(f"{segment.path}: conflicting duplicate at {time_s} s")
+                continue
+            previous_time = time_s
+            previous_values = values
+            yield time_s, values
 
 
 def _probe_specs(run_dir: Path) -> dict[str, dict[str, object]]:
@@ -124,10 +176,10 @@ def _probe_specs(run_dir: Path) -> dict[str, dict[str, object]]:
     return specs
 
 
-def _mesh_identity(run_dir: Path) -> tuple[str, int]:
+def _mesh_identity(run_dir: Path, case_dir: Path | None = None) -> tuple[str, int]:
     """Read the executed mesh identity instead of stamping a legacy L3 count."""
 
-    case_dir = run_dir.parent.parent
+    case_dir = case_dir.resolve() if case_dir is not None else run_dir.parent.parent
     manifest_path = case_dir / "production_mesh_manifest.json"
     composition_path = (
         case_dir / "reports/production_mesh/mesh_target_composition.json"
@@ -155,13 +207,16 @@ def build_actual_one_second_bundle(
     initial_temperature_k: float = 293.15,
     initial_fluid_temperature_k: float | None = None,
     end_time_s: int = 1800,
+    mesh_case_dir: str | Path | None = None,
 ) -> dict[str, object]:
     """11개 직접 probe 데이터셋을 총 1,801개의 uint16 프레임으로 만든다."""
 
     run = Path(run_dir).resolve()
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    mesh_level, mesh_cell_count = _mesh_identity(run)
+    mesh_level, mesh_cell_count = _mesh_identity(
+        run, Path(mesh_case_dir) if mesh_case_dir is not None else None
+    )
     specs = _probe_specs(run)
     initial_solid_temperature_k = initial_temperature_k
     if initial_fluid_temperature_k is None:
@@ -174,13 +229,13 @@ def build_actual_one_second_bundle(
             else initial_fluid_temperature_k
         )
 
-    probes: dict[str, ProbeFile] = {}
+    probes: dict[str, ProbeSeries] = {}
     dataset_ranges: dict[str, tuple[float, float]] = {}
     low = min(initial_fluid_temperature_k, initial_solid_temperature_k)
     high = max(initial_fluid_temperature_k, initial_solid_temperature_k)
     expected_times = list(range(1, end_time_s + 1))
     for name, spec in specs.items():
-        probe = read_probe_header(spec["path"])
+        probe = read_probe_series(spec["path"])
         if len(probe.points) != int(spec.get("columns", 0)) * int(
             spec.get("rows", 0)
         ) and name != "cell_surface":
@@ -190,7 +245,7 @@ def build_actual_one_second_bundle(
         dataset_initial_k = dataset_initial_temperature(name)
         dataset_low = dataset_initial_k
         dataset_high = dataset_initial_k
-        for time_s, values in iter_probe_rows(probe):
+        for time_s, values in iter_probe_series_rows(probe):
             times.append(time_s)
             selected = values[valid]
             if not np.all(np.isfinite(selected)):
@@ -220,7 +275,7 @@ def build_actual_one_second_bundle(
         initial = np.full(len(valid), dataset_initial_k)
         with destination.open("wb") as stream:
             stream.write(np.rint((initial - low) / quantum_k).astype("<u2").tobytes())
-            for _, values in iter_probe_rows(probe):
+            for _, values in iter_probe_series_rows(probe):
                 selected = values[valid]
                 quantized = np.rint((selected - low) / quantum_k).clip(0, 65535)
                 stream.write(quantized.astype("<u2").tobytes())
@@ -239,7 +294,8 @@ def build_actual_one_second_bundle(
                 "first_time_s": 0,
                 "last_time_s": end_time_s,
                 "time_step_s": 1,
-                "source": str(probe.path),
+                "source": str(probe.files[0].path),
+                "source_segments": [str(item.path) for item in probe.files],
                 "sampling": "OpenFOAM probes interpolationScheme cell",
                 "invalid_policy": "omitted and preserved invalid; no padding",
                 "temperature_range_k": list(dataset_ranges[name]),
@@ -308,7 +364,7 @@ def validate_actual_one_second_bundle(
     all_passed = True
     for name, source_spec in _probe_specs(run).items():
         specification = manifest["datasets"][name]
-        probe = read_probe_header(source_spec["path"])
+        probe = read_probe_series(source_spec["path"])
         valid = np.asarray(probe.valid_indices, dtype=int)
         encoded = np.memmap(output / specification["file"], dtype="<u2", mode="r")
         expected_values = int(specification["frame_count"]) * len(valid)
@@ -326,7 +382,9 @@ def validate_actual_one_second_bundle(
                 ),
             )
             maximum_error = float(np.max(np.abs(low + frames[0] * quantum - initial)))
-            for frame, (time_s, values) in enumerate(iter_probe_rows(probe), start=1):
+            for frame, (time_s, values) in enumerate(iter_probe_series_rows(probe), start=1):
+                if frame >= int(specification["frame_count"]):
+                    raise ValueError(f"{name}: more source rows than encoded frames")
                 times.append(time_s)
                 decoded = low + frames[frame] * quantum
                 maximum_error = max(
@@ -378,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--initial-temperature", type=float, default=293.15)
     parser.add_argument("--initial-fluid-temperature", type=float)
     parser.add_argument("--end-time", type=int, default=1800)
+    parser.add_argument("--mesh-case-dir", type=Path)
     parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args(argv)
     if not args.verify_only:
@@ -387,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
             initial_temperature_k=args.initial_temperature,
             initial_fluid_temperature_k=args.initial_fluid_temperature,
             end_time_s=args.end_time,
+            mesh_case_dir=args.mesh_case_dir,
         )
     report = validate_actual_one_second_bundle(args.run_dir, args.output)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

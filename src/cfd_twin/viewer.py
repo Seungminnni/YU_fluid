@@ -28,6 +28,7 @@ from .openfoam_results import (
     REFERENCE_FIGURE_RANGES,
     OpenFoamResultReader,
     read_openfoam_dat,
+    read_openfoam_dat_series,
 )
 from .production_mesh import SINGLE_MESH_TARGET_COUNTS
 from .result_contract import figure_catalog
@@ -116,6 +117,7 @@ def _mesh_runs_payload(
                 precision[name] = actual[name]
         if "cell_types" in actual:
             precision["cell_types"] = actual["cell_types"]
+            precision["hexahedra"] = int(actual["cell_types"].get("hexahedra", 0))
     precision_zone_report = (
         case / "production/L3/reports/production_mesh/cellZones_pre_split.json"
     )
@@ -1221,7 +1223,7 @@ def _interactive_actual_cfd_payload(
 
     def exact_series(path: Path, initial_k: float) -> list[float]:
         values = {0: initial_k}
-        for row in read_openfoam_dat(path):
+        for row in read_openfoam_dat_series(path):
             time_s = int(round(row[0]))
             if abs(row[0] - time_s) > 1e-7:
                 raise ValueError(f"{path}: non-integral time {row[0]}")
@@ -1306,19 +1308,19 @@ def _interactive_actual_cfd_payload(
 
     flow_root = run / "postProcessing/coolant"
     inlet_mass = abs(
-        read_openfoam_dat(
+        read_openfoam_dat_series(
             flow_root / "coolant_inlet_mass_flow/0/surfaceFieldValue.dat"
         )[-1][1]
     )
     outlet_mass = abs(
-        read_openfoam_dat(
+        read_openfoam_dat_series(
             flow_root / "coolant_outlet_mass_flow/0/surfaceFieldValue.dat"
         )[-1][1]
     )
-    inlet_pressure = read_openfoam_dat(
+    inlet_pressure = read_openfoam_dat_series(
         flow_root / "coolant_inlet_pressure_avg/0/surfaceFieldValue.dat"
     )[-1][1]
-    outlet_pressure = read_openfoam_dat(
+    outlet_pressure = read_openfoam_dat_series(
         flow_root / "coolant_outlet_pressure_avg/0/surfaceFieldValue.dat"
     )[-1][1]
     inlet_area = math.pi * (0.5 * config.ports.inlet_diameter_m) ** 2
@@ -3425,7 +3427,7 @@ function renderActiveMeshRun(){
   meshRunNote.textContent=run.note;
   const waiting=run.data_ready===false;
   const qualityWarning=Boolean(model.quality_warning)&&!waiting;
-  document.getElementById("status").textContent=waiting?`${run.label} · ${run.state_label}`:(qualityWarning?`계산 완료 · 에너지 수지 경고 · ${run.label} · 1초 단위`:(model.review_only?`계산 완료 · 단일 메시 검토용 · ${run.label} · 1초 단위`:(actualOneSecond?`계산 완료 · ${run.label} · 1초 단위`:model.status_label)));
+  document.getElementById("status").textContent=waiting?`${run.label} · ${run.state_label}`:(model.execution_variant==="adaptive_energy_coupling_trial"?`적응형 시험 · ${model.energy_coupling_cap_failures}단계 잔차 목표 미달 · ${run.label}`:(qualityWarning?`계산 완료 · 에너지 수지 경고 · ${run.label} · 1초 단위`:(model.review_only?`계산 완료 · 단일 메시 검토용 · ${run.label} · 1초 단위`:(actualOneSecond?`계산 완료 · ${run.label} · 1초 단위`:model.status_label))));
   document.getElementById("result-badge").textContent=waiting?run.state_label:(qualityWarning?"계산 완료 · 경고":(model.review_only?"계산 완료 · 검토용":(model.actual_solver_data?"계산 완료":"준비 중")));
   document.getElementById("calculation-summary").innerHTML=waiting
     ?`<strong>${run.label}</strong> · 자체 CFD 결과 없음`
@@ -4040,7 +4042,7 @@ function showCellNotification(cellId){
 }
 cellGrid.querySelectorAll("[data-cell-id]").forEach(button=>button.addEventListener("click",()=>showCellNotification(button.dataset.cellId)));
 const meshCellCount=actualOneSecond?.mesh_cell_count;
-document.getElementById("status").textContent=model.quality_warning?"계산 완료 · 에너지 수지 경고 · 1초 단위":(model.review_only?"계산 완료 · 단일 메시 검토용 · 1초 단위":(actualOneSecond?"계산 완료 · 정밀 결과 · 1초 단위":model.status_label));
+document.getElementById("status").textContent=model.execution_variant==="adaptive_energy_coupling_trial"?`적응형 시험 · ${model.energy_coupling_cap_failures}단계 잔차 목표 미달`:(model.quality_warning?"계산 완료 · 에너지 수지 경고 · 1초 단위":(model.review_only?"계산 완료 · 단일 메시 검토용 · 1초 단위":(actualOneSecond?"계산 완료 · 정밀 결과 · 1초 단위":model.status_label)));
 document.getElementById("result-badge").textContent=model.quality_warning?"계산 완료 · 경고":(model.review_only?"계산 완료 · 검토용":(model.actual_solver_data?"계산 완료":"준비 중"));
 document.getElementById("calculation-summary").innerHTML=model.actual_solver_data
   ?(model.review_only?model.calculation_summary:`<strong>정밀 CFD 결과</strong> · ${meshCellCount?meshCellCount.toLocaleString()+" cells · ":""}0–1800 s`)
@@ -4430,6 +4432,13 @@ def write_viewer_bundle(
         "quality_warning": quality_warning,
         "review_only": review_only,
         "validation_warnings": validation_warnings,
+        "execution_variant": (
+            result_manifest.get("execution_variant") if result_manifest else None
+        ),
+        "energy_coupling_cap_failures": (
+            int(result_manifest.get("energy_coupling_cap_failures", 0))
+            if result_manifest else 0
+        ),
         "interactive_cfd": interactive_cfd,
         "interactive_cfd_by_mesh": interactive_cfd_by_mesh,
         "mesh_runs": mesh_runs,
