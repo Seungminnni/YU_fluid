@@ -29,6 +29,14 @@ def _run(command: list[str], log_path: Path) -> int:
         return subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, check=False).returncode
 
 
+def _energy_balance_passed(report_path: Path) -> bool:
+    """The balance CLI exits zero even when its numerical gate is a warning."""
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    gate = report.get("energy_balance_gate", {})
+    return report.get("status") == "TRANSIENT_ENERGY_BALANCE_PASSED" and gate.get("passed") is True
+
+
 def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
     trial = trial.resolve()
     reference = reference.resolve()
@@ -135,6 +143,11 @@ def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
                     "coupling_not_entered_outer_h_gate_passed"
                 ]
                 if not audit["coupling_not_entered_outer_h_gate_passed"]:
+                    failed.append(name)
+            if name == "energy_balance" and code == 0:
+                balance_passed = _energy_balance_passed(reports / "energy_balance.json")
+                result["stages"][name]["numerical_gate_passed"] = balance_passed
+                if not balance_passed:
                     failed.append(name)
             if code:
                 failed.append(name)
