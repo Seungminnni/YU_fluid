@@ -54,11 +54,12 @@ def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
     save()
     try:
         reference_run = reference / "runs/frozen_flow_actual_1s"
-        for relative in (
-            "constant/coolant/polyMesh/points",
-            "constant/batterySolid/polyMesh/points",
-            "constant/batterySolid/fvOptions",
-        ):
+        mesh_files = tuple(
+            f"constant/{region}/polyMesh/{name}"
+            for region in ("coolant", "batterySolid")
+            for name in ("points", "faces", "owner", "neighbour", "boundary")
+        )
+        for relative in (*mesh_files, "constant/batterySolid/fvOptions"):
             candidate = trial / relative
             original = reference_run / relative
             if hashlib.sha256(candidate.read_bytes()).digest() != hashlib.sha256(original.read_bytes()).digest():

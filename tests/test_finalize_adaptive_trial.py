@@ -24,11 +24,12 @@ class AdaptiveTrialFinalizationTests(unittest.TestCase):
             root = Path(directory)
             trial, reference = root / "trial", root / "reference"
             original_run = reference / "runs/frozen_flow_actual_1s"
-            for relative in (
-                "constant/coolant/polyMesh/points",
-                "constant/batterySolid/polyMesh/points",
-                "constant/batterySolid/fvOptions",
-            ):
+            mesh_files = tuple(
+                f"constant/{region}/polyMesh/{name}"
+                for region in ("coolant", "batterySolid")
+                for name in ("points", "faces", "owner", "neighbour", "boundary")
+            )
+            for relative in (*mesh_files, "constant/batterySolid/fvOptions"):
                 (trial / relative).parent.mkdir(parents=True, exist_ok=True)
                 (original_run / relative).parent.mkdir(parents=True, exist_ok=True)
                 (trial / relative).write_bytes(b"same evidence")
@@ -42,6 +43,11 @@ class AdaptiveTrialFinalizationTests(unittest.TestCase):
             self.assertEqual(report["status"], "ADAPTIVE_TRIAL_VALIDATION_FAILED")
             self.assertIn("solver_65_to_1800.log", report["error"])
             self.assertFalse((reference / "reports").exists())
+
+            (trial / "constant/coolant/polyMesh/faces").write_bytes(b"different topology")
+            report = finalize(trial, reference, image="unused")
+            self.assertEqual(report["status"], "ADAPTIVE_TRIAL_VALIDATION_FAILED")
+            self.assertIn("constant/coolant/polyMesh/faces", report["error"])
 
     def test_reference_itself_cannot_be_used_as_trial(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
