@@ -656,6 +656,12 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertTrue((output / "AllrunFullTransientActual1s").is_file())
             self.assertTrue((output / "AllrunColdFlowPilot").is_file())
             self.assertTrue((output / "run-cold-flow-pilot.sh").is_file())
+            self.assertTrue((output / "run-until-converged.sh").is_file())
+            self.assertTrue((output / "tools/steady_convergence.py").is_file())
+            controller = (output / "run-until-converged.sh").read_text()
+            self.assertIn("--maximum \"$maximum\"", controller)
+            self.assertIn("--increment \"$increment\"", controller)
+            self.assertIn("RUN_FROZEN_FLOW_AFTER_STEADY", controller)
             self.assertTrue((output / "run-cold-flow-pilot.ps1").is_file())
             self.assertTrue((output / "run-frozen-flow-pilot.sh").is_file())
             self.assertTrue((output / "run-frozen-flow-pilot.ps1").is_file())
@@ -723,6 +729,11 @@ class ProductionMeshTests(unittest.TestCase):
                 / "system"
                 / "controlDict"
             ).read_text()
+            self.assertIn("endTime 6000;", cold_control)
+            steady_control = (
+                output / "profiles" / "steady" / "system" / "controlDict"
+            ).read_text()
+            self.assertIn("endTime 6000;", steady_control)
             self.assertEqual(cold_control.count("type surfaceFieldValue;"), 6)
             self.assertNotIn("type volFieldValue;", cold_control)
             self.assertIn("type fieldMinMax;", cold_control)

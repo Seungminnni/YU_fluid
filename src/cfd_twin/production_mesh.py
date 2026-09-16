@@ -1171,6 +1171,71 @@ fi
 '''
 
 
+def _bounded_steady_shell_script() -> str:
+    return '''#!/bin/sh
+set -eu
+
+case_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+maximum=${STEADY_ABSOLUTE_MAX_ITERATIONS:-9500}
+increment=${STEADY_CONTINUATION_INCREMENT:-500}
+case "$maximum:$increment" in
+    *[!0-9:]*|:|0:*) echo "iteration limits must be positive integers" >&2; exit 2 ;;
+esac
+[ "$maximum" -ge 6000 ] && [ "$increment" -ge 1 ] || {
+    echo "iteration maximum must be at least 6000 and increment must be positive" >&2; exit 2;
+}
+
+run_stage() {
+    stage=$1
+    run_name=$2
+    pilot=$3
+    continuation=$4
+    report_name=$5
+    run_dir="$case_dir/runs/$run_name"
+    report="$run_dir/reports/solver/$report_name"
+    decision="$run_dir/reports/solver/convergence_decision.json"
+    if [ ! -d "$run_dir" ]; then
+        "$case_dir/$pilot" || [ -f "$report" ] || {
+            echo "$run_name stopped without a validation report" >&2; exit 2;
+        }
+    elif [ ! -f "$report" ]; then
+        echo "$run_name exists without a completed validation report; check for an active run" >&2
+        exit 2
+    fi
+    while :; do
+        status=0
+        python3 "$case_dir/tools/steady_convergence.py" \\
+            --report "$report" --stage "$stage" --maximum "$maximum" \\
+            --increment "$increment" --decision "$decision" || status=$?
+        case "$status" in
+            0) break ;;
+            10)
+                additional=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["additional_iterations"])' "$decision")
+                previous=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["iteration"])' "$decision")
+                if [ "$stage" = cold ]; then
+                    COLD_FLOW_ADDITIONAL_ITERATIONS="$additional" "$case_dir/$continuation" || [ -f "$report" ] || exit 2
+                else
+                    STEADY_ADDITIONAL_ITERATIONS="$additional" "$case_dir/$continuation" || [ -f "$report" ] || exit 2
+                fi
+                current=$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["final_iteration"]))' "$report")
+                [ "$current" -gt "$previous" ] || {
+                    echo "$run_name validation did not advance past iteration $previous" >&2; exit 2;
+                }
+                ;;
+            *) echo "$run_name failed a non-retryable gate or reached the absolute cap" >&2; exit 2 ;;
+        esac
+    done
+}
+
+run_stage cold steady_cold_flow run-cold-flow-pilot.sh run-cold-flow-continue.sh cold_flow_validation.json
+run_stage cht steady_cht run-steady-pilot.sh run-steady-continue.sh steady_cht_validation.json
+
+if [ "${RUN_FROZEN_FLOW_AFTER_STEADY:-0}" = 1 ]; then
+    "$case_dir/run-frozen-flow-actual-1s.sh"
+fi
+'''
+
+
 def _docker_solver_powershell_script(service: str) -> str:
     return f'''$ErrorActionPreference = "Stop"
 $CaseDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -1447,6 +1512,10 @@ def write_production_mesh_source_bundle(
         Path(__file__).with_name("openfoam_mesh_target_validation.py"),
         output / "tools" / "validate_mesh_target.py",
     )
+    shutil.copy2(
+        Path(__file__).with_name("steady_convergence.py"),
+        output / "tools" / "steady_convergence.py",
+    )
 
     _atomic_write(output / "AllmeshProduction", _allmesh_production(config, preset))
     (output / "AllmeshProduction").chmod(0o755)
@@ -1456,6 +1525,8 @@ def write_production_mesh_source_bundle(
     _atomic_write(output / "Dockerfile.openfoam", _dockerfile())
     _atomic_write(output / "run-production-mesh.sh", _docker_shell_script())
     (output / "run-production-mesh.sh").chmod(0o755)
+    _atomic_write(output / "run-until-converged.sh", _bounded_steady_shell_script())
+    (output / "run-until-converged.sh").chmod(0o755)
     _atomic_write(
         output / "run-production-mesh.ps1", _docker_powershell_script()
     )

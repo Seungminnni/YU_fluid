@@ -22,3 +22,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cfd_twin = ["workflow_assets/*.html", "workflow_assets/*.css", "workflow_assets/*.js"]

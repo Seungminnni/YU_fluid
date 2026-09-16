@@ -15,16 +15,24 @@ from pathlib import Path
 
 try:
     from .openfoam_cold_flow_validation import (
+        ACCEPTANCE_RESIDUAL_TARGET,
         DEFAULT_RESIDUAL_FLOORS,
+        FLOW_ACCEPTANCE_FIELDS,
+        MINIMUM_STEADY_ITERATIONS,
         STRICT_RESIDUAL_TARGET,
         _residual_maxima,
+        _window_residual_maxima,
         parse_cold_flow_log,
     )
 except ImportError:  # Standalone copy inside a generated OpenFOAM case.
     from validate_cold_flow import (
+        ACCEPTANCE_RESIDUAL_TARGET,
         DEFAULT_RESIDUAL_FLOORS,
+        FLOW_ACCEPTANCE_FIELDS,
+        MINIMUM_STEADY_ITERATIONS,
         STRICT_RESIDUAL_TARGET,
         _residual_maxima,
+        _window_residual_maxima,
         parse_cold_flow_log,
     )
 
@@ -72,6 +80,13 @@ def validate_steady_cht(
     strict_residual_checks = {
         name: value <= STRICT_RESIDUAL_TARGET
         for name, value in final_residuals.items()
+    }
+    acceptance_fields = (*FLOW_ACCEPTANCE_FIELDS, "coolant.h", "batterySolid.h")
+    window_residuals = _window_residual_maxima(window_records)
+    acceptance_residual_checks = {
+        name: name in window_residuals
+        and window_residuals[name] <= ACCEPTANCE_RESIDUAL_TARGET
+        for name in acceptance_fields
     }
 
     monitor_rows = []
@@ -156,6 +171,11 @@ def validate_steady_cht(
         "cold_flow_compound_gate_passed": cold_report.get("status")
         == "COLD_FLOW_VALIDATION_PASSED",
         "final_iteration_present": final_record is not None,
+        "minimum_5000_outer_iterations_completed": final_time is not None
+        and final_time >= MINIMUM_STEADY_ITERATIONS,
+        "last_200_flow_and_energy_residuals_below_1e-4": all(
+            acceptance_residual_checks.values()
+        ),
         "pilot_derived_residual_floors_reached": all(residual_checks.values()),
         "monitor_window_has_at_least_21_samples": len(monitor_rows) >= 21,
         "battery_tmax_change_below_0p001_k": bool(tmax)
@@ -197,6 +217,13 @@ def validate_steady_cht(
         "residual_floors": floors,
         "final_initial_residual_maxima": final_residuals,
         "residual_checks": residual_checks,
+        "acceptance_residual_audit": {
+            "target": ACCEPTANCE_RESIDUAL_TARGET,
+            "required_fields": list(acceptance_fields),
+            "window_outer_iterations": monitor_window,
+            "window_maxima": window_residuals,
+            "checks": acceptance_residual_checks,
+        },
         "strict_residual_audit": {
             "target": STRICT_RESIDUAL_TARGET,
             "all_reported_equations_at_or_below_target": bool(strict_residual_checks)

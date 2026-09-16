@@ -23,7 +23,10 @@ from .heat_source import (
 
 
 STRICT_STEADY_RESIDUAL_TARGET = 1.0e-6
-STEADY_MAXIMUM_ITERATIONS = 9500
+# The calibrated 849k mesh reaches the presentation acceptance band near 5k.
+# Run a conservative 6k primary solve, then use the existing 500-iteration
+# continuation path only when the compound convergence gate still fails.
+STEADY_MAXIMUM_ITERATIONS = 6000
 DEFAULT_SOLVER_MPI_RANKS = 4
 
 

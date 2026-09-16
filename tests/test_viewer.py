@@ -265,6 +265,7 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("CFD 수렴 모니터", html)
             self.assertIn('id="convergence-chart-open"', html)
             self.assertIn('<option value="energy-balance">6. 에너지 수지</option>', html)
+            self.assertIn('<option value="key-cells">7. 주요 배터리 5셀 온도</option>', html)
             self.assertIn("해석 세부정보", html)
             self.assertIn('id="kpi-outlet-temperature"', html)
             self.assertIn('id="kpi-cell-maximum"', html)
@@ -353,6 +354,9 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('value="surface-average"', html)
             self.assertIn('value="internal-average"', html)
             self.assertIn('value="per-cell"', html)
+            self.assertIn('if(metric==="key-cells")', script)
+            self.assertNotIn('function residualLineDash(key)', script)
+            self.assertNotIn('context.setLineDash(residualLineDash', script)
             self.assertIn('id="temperature-chart-png"', html)
             self.assertIn('id="temperature-chart-csv"', html)
             self.assertIn('id="temperature-chart-all-csv"', html)
@@ -360,6 +364,10 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("180×", html)
             self.assertEqual(model["enclosure_mm"]["notch_depth"], 11.25)
             self.assertEqual(len(model["cells"]), 23)
+            self.assertEqual(
+                [cell["id"] for cell in model["featured_temperature_cells"]],
+                ["C01", "C05", "C19", "C23", "C12"],
+            )
             self.assertEqual(len(model["outline_mm"]), 22)
             self.assertEqual([port["id"] for port in model["ports"]], ["IN", "OUT"])
             self.assertEqual([item["id"] for item in model["figures"]], [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14])

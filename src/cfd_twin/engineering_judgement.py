@@ -229,6 +229,16 @@ def framework_judgement_manifest() -> dict[str, object]:
                 "transient_result": "1800 one-second steps completed; Tavg/Tmax/outlet 293.6436767072/294.134288096/293.116331217 K; final-60-second complete energy-balance mean/max 0.216397%/0.223259%; every frozen-flow gate passed",
                 "status": "FLUENT_ALIGNED_THERMAL_RECALCULATION_PASSED",
             },
+            {
+                "id": "EJ-023",
+                "subject": "transient time-step provenance and production rerun",
+                "decision": "use the verified one-second production time step with 100 energy-coupling iterations; do not label 0.01 s as a confirmed Fluent setting without a Fluent case, journal, or settings capture",
+                "evidence": "the supplied UDF presentation specifies the heat-source model but contains no Fluent Time Step Size; the 0.01 s run requires 180000 steps rather than 1800 and was stopped after about 17 s of simulated time",
+                "preservation": "retain the incomplete 0.01 s run as a separate audit directory and exclude it from validated results and viewer inputs",
+                "implementation": "reuse the passed 849284-cell mesh and 6000-iteration S0/S1 fields, then restart S2 from 0 s with TRANSIENT_DELTA_T=1 and ENERGY_COUPLING_ITERATIONS=100",
+                "future_gate": "if an actual Fluent setup is supplied, compare its time step, internal iterations, and monitor definitions; assess time-step sensitivity on a short identical interval before selecting a finer production step",
+                "status": "PRODUCTION_POLICY_CORRECTED",
+            },
         ],
     }
 

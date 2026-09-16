@@ -160,3 +160,122 @@ def mesh_wireframes_for_viewer(case_root: str | Path) -> dict[str, dict[str, obj
                 )
                 break
     return payload
+
+
+def extract_full_mesh_views(case_dir: str | Path) -> dict[str, object]:
+    """Export every unique boundary and two central cut edge, without thinning.
+
+    The existing simulation overlay deliberately samples about 13k edges. This
+    separate mesh-only view instead retains the full real boundary topology and
+    the cell intersections at central XY/XZ planes. A 3D exterior surface is
+    not misrepresented as all internal edges of the 849k volume cells.
+    """
+
+    from .openfoam_results import OpenFoamResultReader
+
+    case = Path(case_dir).resolve()
+    points_mm: list[list[float]] = []
+    point_index: dict[tuple[float, float, float], int] = {}
+
+    def register(point: tuple[float, float, float]) -> int:
+        key = tuple(round(1000.0 * value, 6) for value in point)
+        found = point_index.get(key)
+        if found is None:
+            found = len(points_mm)
+            point_index[key] = found
+            points_mm.append(list(key))
+        return found
+
+    modes: dict[str, dict[str, object]] = {}
+    outer_groups: list[dict[str, object]] = []
+    for region, selector in (
+        ("coolant", lambda name: "port" if name in {"inlet", "outlet"} else "fluid" if name == "outerWall" else None),
+        ("batterySolid", lambda name: "solid" if name.startswith("battery_C") and "interface" in name else None),
+    ):
+        mesh_dir = case / "constant" / region / "polyMesh"
+        source_points = _points(mesh_dir / "points")
+        source_faces = _faces(mesh_dir / "faces")
+        for patch_name, (start, count) in _boundary(mesh_dir / "boundary").items():
+            kind = selector(patch_name)
+            if kind is None:
+                continue
+            edges: set[tuple[int, int]] = set()
+            for face in source_faces[start : start + count]:
+                for first, second in zip(face, face[1:] + face[:1]):
+                    edges.add((min(first, second), max(first, second)))
+            packed_edges = [
+                [register(source_points[first]), register(source_points[second])]
+                for first, second in sorted(edges)
+            ]
+            outer_groups.append(
+                {
+                    "name": patch_name,
+                    "kind": kind,
+                    "region": region,
+                    "source_face_count": count,
+                    "edge_count": len(packed_edges),
+                    "edges": packed_edges,
+                }
+            )
+        del source_faces, source_points
+    modes["surface"] = {"label": "3D 경계", "groups": outer_groups}
+
+    foam_file = case / "runs/steady_cht/steady_cht.foam"
+    backend = OpenFoamResultReader(foam_file)
+    numeric_times = []
+    for item in foam_file.parent.iterdir():
+        if item.is_dir():
+            try:
+                numeric_times.append(float(item.name))
+            except ValueError:
+                continue
+    if not numeric_times:
+        raise ValueError(f"no steady-CHT field time in {foam_file.parent}")
+    fluid, solid = backend.regions(max(numeric_times))
+    for mode, normal, origin, label in (
+        ("xy", (0, 0, 1), (0, 0, 0.041), "XY · Z = 41.0 mm"),
+        ("xz", (0, 1, 0), (0, 0.0605, 0), "XZ · Y = 60.5 mm"),
+    ):
+        cut_groups = []
+        for region, dataset, kind in (
+            ("coolant", fluid, "fluid"),
+            ("batterySolid", solid, "solid"),
+        ):
+            plane = backend.vtk.vtkPlane()
+            plane.SetNormal(*normal)
+            plane.SetOrigin(*origin)
+            cutter = backend.vtk.vtkCutter()
+            cutter.SetInputData(dataset)
+            cutter.SetCutFunction(plane)
+            cutter.Update()
+            unique = backend.vtk.vtkExtractEdges()
+            unique.SetInputConnection(cutter.GetOutputPort())
+            unique.Update()
+            output = unique.GetOutput()
+            raw_points = output.GetPoints()
+            if raw_points is None or not output.GetNumberOfCells():
+                raise ValueError(f"{mode} cut missing {region} mesh edges")
+            local_index = [register(raw_points.GetPoint(index)) for index in range(output.GetNumberOfPoints())]
+            edges = []
+            for index in range(output.GetNumberOfCells()):
+                cell = output.GetCell(index)
+                for segment in range(cell.GetNumberOfPoints() - 1):
+                    edges.append(
+                        [
+                            local_index[cell.GetPointId(segment)],
+                            local_index[cell.GetPointId(segment + 1)],
+                        ]
+                    )
+            cut_groups.append(
+                {"name": region, "kind": kind, "region": region, "edge_count": len(edges), "edges": edges}
+            )
+        modes[mode] = {"label": label, "groups": cut_groups}
+
+    return {
+        "source": "actual OpenFOAM polyMesh boundary faces and VTK exact plane cuts",
+        "sampling": "none",
+        "length_unit": "mm",
+        "point_count": len(points_mm),
+        "points_mm": points_mm,
+        "modes": modes,
+    }

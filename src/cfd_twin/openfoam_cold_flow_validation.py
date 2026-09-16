@@ -28,6 +28,16 @@ DEFAULT_RESIDUAL_FLOORS = {
     "batterySolid.h": 5.0e-4,
 }
 STRICT_RESIDUAL_TARGET = 1.0e-6
+ACCEPTANCE_RESIDUAL_TARGET = 1.0e-4
+MINIMUM_STEADY_ITERATIONS = 5000
+FLOW_ACCEPTANCE_FIELDS = (
+    "coolant.Ux",
+    "coolant.Uy",
+    "coolant.Uz",
+    "coolant.p_rgh",
+    "coolant.k",
+    "coolant.omega",
+)
 
 
 def _finite(value: float | None) -> bool:
@@ -192,6 +202,18 @@ def _residual_maxima(record: dict[str, object]) -> dict[str, float]:
     }
 
 
+def _window_residual_maxima(
+    window_records: list[tuple[float, dict[str, object]]],
+) -> dict[str, float]:
+    """Return the worst raw initial residual for each equation in the window."""
+
+    maxima: dict[str, float] = {}
+    for _, record in window_records:
+        for name, value in _residual_maxima(record).items():
+            maxima[name] = max(maxima.get(name, value), value)
+    return maxima
+
+
 def validate_cold_flow(
     log_path: str | Path,
     *,
@@ -224,6 +246,12 @@ def validate_cold_flow(
     strict_residual_checks = {
         name: value <= STRICT_RESIDUAL_TARGET
         for name, value in final_residuals.items()
+    }
+    window_residuals = _window_residual_maxima(window_records)
+    acceptance_residual_checks = {
+        name: name in window_residuals
+        and window_residuals[name] <= ACCEPTANCE_RESIDUAL_TARGET
+        for name in FLOW_ACCEPTANCE_FIELDS
     }
 
     monitor_rows = []
@@ -300,6 +328,11 @@ def validate_cold_flow(
     checks = {
         "solver_clean_end": parsed["clean_end"] and not parsed["fatal_error"],
         "final_iteration_present": final_record is not None,
+        "minimum_5000_outer_iterations_completed": final_time is not None
+        and final_time >= MINIMUM_STEADY_ITERATIONS,
+        "last_200_flow_residuals_below_1e-4": all(
+            acceptance_residual_checks.values()
+        ),
         "pilot_derived_residual_floors_reached": all(residual_checks.values()),
         "monitor_window_has_at_least_21_samples": len(monitor_rows) >= 21,
         "mass_imbalance_below_0p1_percent": (
@@ -333,6 +366,13 @@ def validate_cold_flow(
         "residual_floors": floors,
         "final_initial_residual_maxima": final_residuals,
         "residual_checks": residual_checks,
+        "acceptance_residual_audit": {
+            "target": ACCEPTANCE_RESIDUAL_TARGET,
+            "required_fields": list(FLOW_ACCEPTANCE_FIELDS),
+            "window_outer_iterations": monitor_window,
+            "window_maxima": window_residuals,
+            "checks": acceptance_residual_checks,
+        },
         "strict_residual_audit": {
             "target": STRICT_RESIDUAL_TARGET,
             "all_reported_equations_at_or_below_target": bool(strict_residual_checks)

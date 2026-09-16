@@ -73,9 +73,38 @@ class ColdFlowValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             report = validate_cold_flow(log, yplus_report_path=yplus)
+            self.assertEqual(report["status"], "COLD_FLOW_VALIDATION_FAILED")
+            self.assertFalse(report["checks"]["minimum_5000_outer_iterations_completed"])
+            self.assertFalse(report["checks"]["last_200_flow_residuals_below_1e-4"])
+            self.assertEqual(report["monitor_summary"]["sample_count"], 21)
+
+            # The same stable 200-iteration window is accepted only after the
+            # minimum outer iteration and the raw initial residual gate.
+            converged_rows = [
+                (f"Time = {5000 + int(line.split(' = ')[1])}" if line.startswith("Time = ") else line)
+                .replace("Initial residual = 2e-4", "Initial residual = 2e-5")
+                .replace("Initial residual = 1e-4", "Initial residual = 1e-5")
+                .replace("Initial residual = 1e-3", "Initial residual = 1e-5")
+                .replace("Initial residual = 3e-4", "Initial residual = 3e-5")
+                for line in rows
+            ]
+            log.write_text("\n".join(converged_rows) + "\n", encoding="utf-8")
+            report = validate_cold_flow(log, yplus_report_path=yplus)
             self.assertEqual(report["status"], "COLD_FLOW_VALIDATION_PASSED")
             self.assertTrue(report["runnable_thermal_pilot"])
-            self.assertEqual(report["monitor_summary"]["sample_count"], 21)
+
+            # A single spike within the last 200 iterations must not be
+            # hidden by a low final residual.
+            spiked = "\n".join(converged_rows).replace(
+                "Time = 5100\nSolving for fluid region coolant\n"
+                "smoothSolver: Solving for Ux, Initial residual = 2e-5",
+                "Time = 5100\nSolving for fluid region coolant\n"
+                "smoothSolver: Solving for Ux, Initial residual = 2e-4",
+                1,
+            )
+            log.write_text(spiked + "\n", encoding="utf-8")
+            report = validate_cold_flow(log, yplus_report_path=yplus)
+            self.assertFalse(report["checks"]["last_200_flow_residuals_below_1e-4"])
 
             yplus.write_text(
                 json.dumps({"status": "YPLUS_VALIDATION_FAILED"}),
@@ -150,7 +179,11 @@ class ColdFlowValidationTests(unittest.TestCase):
                 coolant_cp_j_kgk=1.0,
                 initial_temperature_k=300.0,
             )
-            self.assertEqual(report["status"], "STEADY_CHT_VALIDATION_PASSED")
+            self.assertEqual(report["status"], "STEADY_CHT_VALIDATION_FAILED")
+            self.assertFalse(report["checks"]["minimum_5000_outer_iterations_completed"])
+            self.assertFalse(
+                report["checks"]["last_200_flow_and_energy_residuals_below_1e-4"]
+            )
             self.assertAlmostEqual(
                 report["monitor_summary"]["mean_energy_imbalance_fraction"],
                 0.0,

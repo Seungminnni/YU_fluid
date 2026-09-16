@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YU Fluid · CFD 작업실</title>
+  <link rel="stylesheet" href="/style.css?v=light-ui-1">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">YF</span><span>YU FLUID <small>CFD DIGITAL TWIN</small></span></div>
+    <span id="live-state" class="live-state">계산 상태 확인 중</span>
+  </header>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">23-CELL IMMERSION COOLING · OPENFOAM</p>
+      <h1>계산에서 결과까지,<br><em>한 화면에서 이어서.</em></h1>
+      <p>검증된 CAD와 계산 기록을 기준으로 형상을 확인하고, 운전 조건을 검토하고, 실제 솔버 단계의 진행 상황을 확인합니다.</p>
+      <div class="hero-actions">
+        <button id="go-results" class="primary" type="button">결과 보기</button>
+        <button id="go-calculate" class="secondary" type="button">계산하기</button>
+      </div>
+    </section>
+
+    <section id="results-view" class="workspace" hidden>
+      <div class="section-head"><div><p class="eyebrow">RESULTS</p><h2>결과 보기</h2></div><button class="text-button home" type="button">← 처음으로</button></div>
+      <div id="result-notice" class="notice">결과 상태를 불러오는 중입니다.</div>
+      <div class="result-grid">
+        <article class="panel">
+          <div class="panel-head"><h3>현재 결과</h3><span id="mesh-count" class="pill">메시 확인 중</span></div>
+          <p id="result-status">검증된 결과가 준비되면 3D 디지털 트윈을 열 수 있습니다.</p>
+          <a id="open-viewer" class="button-link" href="/viewer/index.html" hidden>3D 결과·그래프 열기 ↗</a>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><h3>결과 비교</h3><span class="pill">최대 3개</span></div>
+          <table aria-label="최대 세 가지 CFD 결과 비교"><thead><tr><th>결과</th><th>상태</th><th>최고 온도</th><th>출구 온도</th></tr></thead><tbody id="comparison-rows"></tbody></table>
+          <p class="quiet">검증이 끝난 동일 정의의 결과만 비교합니다. 비어 있는 결과를 추정값으로 채우지 않습니다.</p>
+        </article>
+      </div>
+      <article class="panel progress-panel">
+        <div class="panel-head"><h3>실제 CFD 계산 단계</h3><span id="physical-time" class="mono">— / 1800 s</span></div>
+        <div id="stage-list" class="stage-list"></div>
+        <div class="progress-caption"><span>과도 열해석 물리시간</span><strong id="progress-label">—</strong></div>
+        <progress id="transient-progress" max="100" value="0"></progress>
+        <p id="coupling-state" class="quiet">로그를 확인 중입니다.</p>
+        <p class="quiet">이 비율은 계산된 물리시간입니다. 잔차 수렴률이나 남은 시간의 예측값이 아닙니다.</p>
+      </article>
+    </section>
+
+    <section id="calculate-view" class="workspace" hidden>
+      <div class="section-head"><div><p class="eyebrow">SETUP</p><h2>계산하기</h2></div><button class="text-button home" type="button">← 처음으로</button></div>
+      <div class="setup-grid">
+        <article class="panel">
+          <div class="panel-head"><h3>01 · CAD 형상</h3><span id="cad-badge" class="pill">검증 확인 중</span></div>
+          <label class="choice"><input type="radio" name="cad-mode" value="baseline" checked> 검증된 기준 CAD 사용</label>
+          <label class="choice"><input type="radio" name="cad-mode" value="upload"> CAD 파일 첨부·검사</label>
+          <div id="upload-area" hidden>
+            <label for="cad-files" class="upload-target">STEP / STL 파일 선택 <small>여러 파일 가능 · 파일당 최대 50 MiB</small></label>
+            <input id="cad-files" type="file" accept=".step,.stp,.stl" multiple>
+            <div id="cad-file-results" class="file-results" aria-live="polite"></div>
+          </div>
+          <div class="geometry-facts">
+            <div><span>탱크</span><strong id="tank-size">—</strong></div>
+            <div><span>배터리</span><strong id="cell-count">—</strong></div>
+            <div><span>입구 / 출구</span><strong id="port-size">—</strong></div>
+            <div><span>형상</span><strong id="cad-source">—</strong></div>
+          </div>
+          <p id="geometry-note" class="quiet"></p>
+        </article>
+
+        <form id="calculation-form" class="panel">
+          <div class="panel-head"><h3>02 · 운전 조건</h3><span class="pill">입력 검토</span></div>
+          <div class="form-grid">
+            <label>냉각수 종류<select name="coolant"><option value="deionized_water">탈이온수 · 검증된 상수 물성</option></select></label>
+            <label>입구 온도 <small>K</small><input name="inlet_temperature_k" type="number" value="293" min="250" max="370" step="0.01" required></label>
+            <label>입구 속도 <small>m/s</small><input name="inlet_velocity_m_s" type="number" value="0.4" min="0.001" max="5" step="0.001" required></label>
+            <label>출구 절대압력 <small>Pa</small><input name="outlet_pressure_pa" type="number" value="101325" min="50000" max="300000" step="1" required></label>
+            <label>목표 메시 수 <small>cell</small><input name="mesh_target_cells" type="number" value="849284" min="700000" max="900000" step="1" required></label>
+          </div>
+          <div class="source-box"><strong>발열</strong><span>Peneklioglu / Bernardi 시간가변 열원 · 2C · 0–1800 s</span></div>
+          <button class="primary full" type="submit">형상·조건 확인하기 →</button>
+          <p class="quiet">입구·출구 구경은 CAD에서 가져옵니다. 현재는 동일한 기준 CAD와 기존 계산만 연결하며, 새 변수 계산은 시작하지 않습니다.</p>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog" class="dialog-card"><button class="dialog-close" value="cancel" aria-label="닫기">×</button>
+      <p class="eyebrow">RUN CONFIRMATION</p><h2>계산 조건 확인</h2>
+      <div id="confirmation-details" class="confirm-list"></div>
+      <p id="confirmation-message" class="notice"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">돌아가기</button><button id="attach-run" value="attach" class="primary" disabled>현재 계산 진행 보기</button></div>
+    </form>
+  </dialog>
+  <footer>YU Fluid · 기준 CAD / 원본 솔버 로그 / 검증 보고서에 연결된 상태만 표시</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

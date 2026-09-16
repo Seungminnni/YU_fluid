@@ -14,6 +14,7 @@ from .heat_source import source_from_config, write_heat_source_bundle
 from .production_mesh import SUPPORTED_LEVELS, write_production_mesh_source_bundle
 from .animation_validation import validate_animations
 from .viewer import write_viewer_bundle
+from .workflow_app import serve_workflow
 
 
 def _json(value: object) -> None:
@@ -128,6 +129,16 @@ def _validate_animations(args: argparse.Namespace) -> int:
     return 0 if report["status"] == "ANIMATION_VALIDATION_PASSED" else 2
 
 
+def _serve_workflow(args: argparse.Namespace) -> int:
+    serve_workflow(
+        case_dir=Path(args.case_dir),
+        cad_dir=Path(args.cad_dir),
+        viewer_dir=Path(args.viewer_dir),
+        port=args.port,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cfd-twin",
@@ -204,6 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
     animation_check.add_argument("--case-dir", required=True)
     animation_check.add_argument("--viewer-dir", required=True)
     animation_check.set_defaults(func=_validate_animations)
+
+    workflow = subparsers.add_parser(
+        "serve-workflow",
+        help="serve the local CAD/setup/progress portal without starting another CFD run",
+    )
+    workflow.add_argument("--case-dir", required=True)
+    workflow.add_argument("--cad-dir", required=True)
+    workflow.add_argument("--viewer-dir", required=True)
+    workflow.add_argument("--port", type=int, default=8765)
+    workflow.set_defaults(func=_serve_workflow)
 
     doctor = subparsers.add_parser("doctor")
     doctor.set_defaults(func=_doctor)
