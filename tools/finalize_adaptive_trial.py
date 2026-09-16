@@ -16,6 +16,7 @@ from pathlib import Path
 
 from cfd_twin.case_builder import _docker_command
 from cfd_twin.openfoam_log_merge import merge_solver_logs
+from cfd_twin.openfoam_runtime_comparison import compare_runtime_windows
 from cfd_twin.thermal_history_comparison import compare_thermal_histories
 
 
@@ -176,6 +177,19 @@ def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
             reference_run, trial, mesh_report,
             reports / "thermal_history_comparison.json",
         )
+        try:
+            runtime = compare_runtime_windows(
+                reference_run / "logs/solver/frozen_flow_actual_1s.log",
+                final_log,
+                reports / "runtime_comparison.json",
+            )
+            result["stages"]["runtime_comparison"] = {
+                "status": runtime["status"], "windows": runtime["windows"],
+            }
+        except (OSError, ValueError) as exc:
+            result["stages"]["runtime_comparison"] = {
+                "status": "DIAGNOSTIC_UNAVAILABLE", "error": str(exc),
+            }
         result["status"] = "ADAPTIVE_TRIAL_VALIDATION_PASSED"
     except Exception as exc:
         result["status"] = "ADAPTIVE_TRIAL_VALIDATION_FAILED"

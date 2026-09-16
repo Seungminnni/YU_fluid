@@ -85,6 +85,8 @@ TRANSIENT_DELTA_T=1 ENERGY_COUPLING_ITERATIONS=200 \
 
 종료 후 격리 시험은 `python tools/finalize_adaptive_trial.py --trial-dir build/energy_coupling_adaptive_cold_pilot --reference-case-dir build/ppt_bernardi_800k`로 검증한다. 이 명령은 메시와 동적 열원 해시·초기온도, 1–1800초 연속 로그, 1800초 원본 장 재구성, 시간별 잔차, 결합 조기 종료, 23셀 온도 및 완전 에너지 수지를 검사해 시험 디렉터리 안에만 보고서를 쓴다. 기준 케이스나 현재 웹앱 결과를 덮어쓰지 않으며, 필수 검증이 모두 통과하기 전에는 새 결과를 게시하지 않는다. 검증 이후에는 기존 고정 반복 결과와 새 적응형 결과의 출구·고체 평균·배터리 최고온도를 1초마다 비교한 `thermal_history_comparison.json`도 생성한다. 이 온도 차이는 알고리즘 변화의 영향 진단값이지, 잔차·에너지 수지 검증을 대신하는 합격 기준은 아니다.
 
+또한 같은 물리시간 1000–1800초와 1500–1800초의 OpenFOAM `ClockTime` 차이를 비교한 `runtime_comparison.json`을 남긴다. 시간 단축률은 관측값이며 실행 당시 호스트 부하·캐시 상태가 달라질 수 있으므로 수치 검증의 합격 기준으로 사용하지 않는다.
+
 호스트 사전점검 `python -m cfd_twin doctor`는 시스템 OpenFOAM과 Docker 실행을 분리해서 표시한다. macOS 실기에서는 Docker Engine 29.7.2, CAD·VTK·Pillow 의존성, 실제 격리 OpenFOAM 병렬 계산까지 확인했다. `openfoam_ready=false`는 호스트 PATH에 솔버가 없다는 뜻일 뿐이며 Docker 기반 작업의 실패를 뜻하지 않는다. Windows 경로는 같은 Python `docker compose` 드라이버와 PowerShell 실행기를 사용하도록 구성했지만, **Windows PC에서 Docker·메시·S0/S1/S2·뷰어의 종단 간 실행은 아직 실증되지 않았다**. 그 검증 전까지 Windows 완전 호환을 완료로 표시하지 않는다.
 
 공통 호스트 사전점검은 프로젝트 의존성을 설치한 뒤 `python tools/host_preflight.py --output build/host_preflight_호스트명`으로 실행한다. 기준 CAD를 실제 생성하고 `production_700k`·`production_800k` 소스와 Docker Compose 구문을 모두 확인해 `host_preflight.json`을 남긴다. 이미 존재하는 출력 디렉터리는 덮어쓰지 않는다. macOS 실기 보고서 `build/host_preflight_mac_20260917_v2/host_preflight.json`은 통과했다. 이 명령은 **실제 70만/80만 격자 생성이나 S0/S1/S2 완주를 하지 않으며**, JSON의 `full_mesh_and_cfd_verified=false`가 이를 명시한다. Windows PC에서도 같은 명령의 보고서를 받아야 호스트 준비를 비교할 수 있고, 이어서 실제 CFD와 뷰어까지 별도로 검증해야 한다.
