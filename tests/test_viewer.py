@@ -136,7 +136,7 @@ class ViewerTests(unittest.TestCase):
             payload = _convergence_payload(case)
 
             histories = {history["id"]: history for history in payload["histories"]}
-            self.assertEqual(payload["default_history_id"], "steady_cht")
+            self.assertEqual(payload["default_history_id"], "transient_energy")
             self.assertEqual(
                 set(histories), {"cold_flow", "steady_cht", "transient_energy"}
             )

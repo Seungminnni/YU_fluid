@@ -571,11 +571,11 @@ def _convergence_payload(case: Path) -> dict[str, object]:
             histories.append(history)
     histories.append(dict(payload))
     payload["histories"] = histories
-    payload["default_history_id"] = (
-        "steady_cht"
-        if any(history["id"] == "steady_cht" for history in histories)
-        else primary_id
-    )
+    # Open the residual history that belongs to the currently delivered result.
+    # The steady CHT history remains selectable, but defaulting to it made a
+    # completed 362k-iteration transient run look as if only 5,000 iterations
+    # had been calculated.
+    payload["default_history_id"] = primary_id
     return payload
 
 
@@ -3678,7 +3678,10 @@ function drawConvergenceChart(){
 }
 for(const history of convergenceHistories){
   if(!history?.available)continue;
-  const option=document.createElement("option");option.value=history.id||"";option.textContent=history.label||history.scope||history.id;
+  const option=document.createElement("option");option.value=history.id||"";
+  const iterationText=Number.isFinite(history.last_iteration)?` · 누적 ${Number(history.last_iteration).toLocaleString()}회`:"";
+  const timeText=Number.isFinite(history.last_time_s)?` · ${Number(history.first_time_s||0).toLocaleString()}–${Number(history.last_time_s).toLocaleString()} s`:"";
+  option.textContent=`${history.label||history.scope||history.id}${iterationText}${timeText}`;
   convergenceHistorySelect.appendChild(option);
 }
 const requestedConvergenceHistory=initialParams.get("history");
