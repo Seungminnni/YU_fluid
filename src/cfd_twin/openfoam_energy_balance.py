@@ -43,11 +43,39 @@ def _read_qvol(path: Path) -> dict[int, float]:
     return values
 
 
-def _function_file(run: Path, region: str, name: str, filename: str) -> Path:
-    path = run / "postProcessing" / region / name / "0" / filename
-    if not path.is_file():
-        raise ValueError(f"missing OpenFOAM function-object output: {path}")
-    return path
+def _read_function_series(run: Path, region: str, name: str, filename: str) -> dict[int, float]:
+    """Combine function-object files from every OpenFOAM restart segment.
+
+    OpenFOAM creates a new numeric directory beneath each function object when
+    a solver restarts. Reading only ``0`` silently discards all later samples.
+    """
+
+    directory = run / "postProcessing" / region / name
+    if not directory.is_dir():
+        raise ValueError(f"missing OpenFOAM function-object output: {directory}")
+    segments: list[tuple[float, Path]] = []
+    for candidate in directory.iterdir():
+        if not candidate.is_dir():
+            continue
+        try:
+            start_time = float(candidate.name)
+        except ValueError:
+            continue
+        if not math.isfinite(start_time):
+            continue
+        path = candidate / filename
+        if not path.is_file():
+            raise ValueError(f"missing OpenFOAM function-object output: {path}")
+        segments.append((start_time, path))
+    if not segments:
+        raise ValueError(f"missing OpenFOAM function-object output: {directory}/*/{filename}")
+    values: dict[int, float] = {}
+    for _, path in sorted(segments):
+        for time_s, value in _read_dat(path).items():
+            if time_s in values and not math.isclose(values[time_s], value, rel_tol=1e-10, abs_tol=1e-12):
+                raise ValueError(f"conflicting OpenFOAM samples for {name} at {time_s} s")
+            values[time_s] = value
+    return values
 
 
 def build_energy_balance(
@@ -97,43 +125,35 @@ def build_energy_balance(
     heat = _read_qvol(Path(qvol_samples))
     end_time_s = max(heat)
 
-    fluid_integral = _read_dat(
-        _function_file(
-            run,
-            "coolant",
-            "coolant_temperature_volume_integral",
-            "volFieldValue.dat",
-        )
+    fluid_integral = _read_function_series(
+        run,
+        "coolant",
+        "coolant_temperature_volume_integral",
+        "volFieldValue.dat",
     )
-    solid_integral = _read_dat(
-        _function_file(
-            run,
-            "batterySolid",
-            "batterySolid_temperature_volume_integral",
-            "volFieldValue.dat",
-        )
+    solid_integral = _read_function_series(
+        run,
+        "batterySolid",
+        "batterySolid_temperature_volume_integral",
+        "volFieldValue.dat",
     )
-    inlet_mass = _read_dat(
-        _function_file(run, "coolant", "coolant_inlet_mass_flow", "surfaceFieldValue.dat")
+    inlet_mass = _read_function_series(
+        run, "coolant", "coolant_inlet_mass_flow", "surfaceFieldValue.dat"
     )
-    outlet_mass = _read_dat(
-        _function_file(run, "coolant", "coolant_outlet_mass_flow", "surfaceFieldValue.dat")
+    outlet_mass = _read_function_series(
+        run, "coolant", "coolant_outlet_mass_flow", "surfaceFieldValue.dat"
     )
-    inlet_temperature = _read_dat(
-        _function_file(
-            run,
-            "coolant",
-            "coolant_inlet_mass_weighted_temperature",
-            "surfaceFieldValue.dat",
-        )
+    inlet_temperature = _read_function_series(
+        run,
+        "coolant",
+        "coolant_inlet_mass_weighted_temperature",
+        "surfaceFieldValue.dat",
     )
-    outlet_temperature = _read_dat(
-        _function_file(
-            run,
-            "coolant",
-            "coolant_outlet_mass_weighted_temperature",
-            "surfaceFieldValue.dat",
-        )
+    outlet_temperature = _read_function_series(
+        run,
+        "coolant",
+        "coolant_outlet_mass_weighted_temperature",
+        "surfaceFieldValue.dat",
     )
 
     expected = set(range(1, end_time_s + 1))

@@ -6,10 +6,34 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cfd_twin.openfoam_energy_balance import build_energy_balance
+from cfd_twin.openfoam_energy_balance import _read_function_series, build_energy_balance
 
 
 class OpenFoamEnergyBalanceTests(unittest.TestCase):
+    def test_restart_function_object_segments_are_combined_in_time_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            base = run / "postProcessing/coolant/outlet_temperature"
+            for segment, data in (("0", "1 293.1\n"), ("1", "2 293.2\n"), ("10", "11 293.3\n")):
+                path = base / segment / "surfaceFieldValue.dat"
+                path.parent.mkdir(parents=True)
+                path.write_text("# Time value\n" + data, encoding="utf-8")
+            self.assertEqual(
+                _read_function_series(run, "coolant", "outlet_temperature", "surfaceFieldValue.dat"),
+                {1: 293.1, 2: 293.2, 11: 293.3},
+            )
+
+    def test_conflicting_restart_samples_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            base = run / "postProcessing/coolant/outlet_temperature"
+            for segment, data in (("0", "1 293.1\n"), ("1", "1 294.0\n")):
+                path = base / segment / "surfaceFieldValue.dat"
+                path.parent.mkdir(parents=True)
+                path.write_text("# Time value\n" + data, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "conflicting OpenFOAM samples"):
+                _read_function_series(run, "coolant", "outlet_temperature", "surfaceFieldValue.dat")
+
     def test_builds_source_removal_storage_and_residual_terms(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
