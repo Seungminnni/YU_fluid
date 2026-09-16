@@ -453,9 +453,15 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("function paintMeshStructureFigure", script)
             self.assertIn("function paintTwoResultFigure", script)
             self.assertIn("function meshFinalMetrics", script)
-            self.assertIn(
+            self.assertNotIn(
                 "if([2,3].includes(item.id)&&meshRuns.length>=2)", script
             )
+            self.assertIn(
+                "const visibleFigures=model.figures.filter(item=>![2,3].includes(Number(item.id)))",
+                script,
+            )
+            self.assertIn("function drawActualMeshWireframe", script)
+            self.assertIn('id="show-mesh"', html)
             self.assertIn("배터리 최고 온도 상승", script)
             self.assertIn("표준 − 정밀", script)
             self.assertIn("각 계산에 사용된 실제 polyMesh", script)

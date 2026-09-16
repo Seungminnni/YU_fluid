@@ -23,6 +23,7 @@ from .heat_source import (
 
 
 STRICT_STEADY_RESIDUAL_TARGET = 1.0e-6
+STEADY_MAXIMUM_ITERATIONS = 9500
 DEFAULT_SOLVER_MPI_RANKS = 4
 
 
@@ -843,7 +844,7 @@ def _steady_control_dict(*, include_battery_temperatures: bool = True) -> str:
 startFrom startTime;
 startTime 0;
 stopAt endTime;
-endTime 5000;
+endTime {STEADY_MAXIMUM_ITERATIONS};
 deltaT 1;
 writeControl timeStep;
 writeInterval 100;
@@ -1955,7 +1956,7 @@ def write_openfoam_solver_bundle(
         "heat_source_mode": config.battery.heat_source.mode,
         "qvol_at_steady_time_zero_W_m3": _steady_qvol(config),
         "steady_residual_target": STRICT_STEADY_RESIDUAL_TARGET,
-        "steady_maximum_iterations": 5000,
+        "steady_maximum_iterations": STEADY_MAXIMUM_ITERATIONS,
         "strict_target_is_audited_not_silently_relaxed": True,
         "initial_fluid_temperature_K": config.boundary.initial_fluid_temperature_k,
         "initial_solid_temperature_K": config.boundary.initial_solid_temperature_k,

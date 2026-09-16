@@ -20,6 +20,7 @@ from pathlib import Path
 from .config import ResolvedConfig
 from .geometry import cell_placements, geometry_report
 from .heat_source import source_from_config
+from .mesh_wireframe import mesh_wireframes_for_viewer
 from .openfoam_cold_flow_validation import parse_cold_flow_log
 from .openfoam_results import (
     LEGACY_DISPLAY_TEMPERATURE_OFFSET_C,
@@ -1644,6 +1645,7 @@ HTML = '''<!doctype html>
             <label><input id="show-particles" type="checkbox" checked> 이동 헤드</label>
             <label><input id="show-section" type="checkbox" checked> 단면</label>
             <label><input id="show-grid" type="checkbox"> 샘플선</label>
+            <label title="계산에 사용한 실제 OpenFOAM polyMesh 경계 edge를 CAD 형상 위에 표시합니다"><input id="show-mesh" type="checkbox" checked> 실제 메시</label>
             <label title="실제 유효 샘플 또는 셀 표면 샘플의 경계만 부드럽게 연결하며 무효영역은 채우지 않습니다"><input id="smooth-section" type="checkbox" checked> 부드러운 색상</label>
             <label id="section-3d-option" title="가로 단면을 회전·확대 가능한 3D 평면으로 표시합니다" hidden><input id="section-3d" type="checkbox" checked> 3D 단면</label>
             <label><input id="show-enclosure" type="checkbox" checked> 외곽선</label>
@@ -2090,6 +2092,7 @@ const overlayCanvas = document.getElementById("scene-overlay");
 const overlayCtx = overlayCanvas.getContext("2d");
 const viewerControls = document.querySelector(".viewer-controls");
 const meshRuns=model.mesh_runs||[];
+const meshWireframes=model.mesh_wireframes||{};
 const requestedMeshRun=initialParams.get("mesh");
 let activeMeshRunId=meshRuns.some(run=>run.id===requestedMeshRun)?requestedMeshRun:(meshRuns.find(run=>run.data_ready)?.id||meshRuns[0]?.id||"precision");
 const flow=(model.interactive_cfd_by_mesh||{})[activeMeshRunId]||model.interactive_cfd||{enabled:false};
@@ -2140,11 +2143,11 @@ const dashboard={
   inletVelocity:document.getElementById("kpi-inlet-velocity"),pressureDrop:document.getElementById("kpi-pressure-drop"),
   outletTime:document.getElementById("kpi-outlet-time"),cellTime:document.getElementById("kpi-cell-time")
 };
-const visibility={cells:true,flow:true,particles:true,section:true,grid:false,enclosure:true};
+const visibility={cells:true,flow:true,particles:true,section:true,grid:false,mesh:true,enclosure:true};
 const optionInputs={
   cells:document.getElementById("show-cells"),flow:document.getElementById("show-flow"),
   particles:document.getElementById("show-particles"),section:document.getElementById("show-section"),
-  grid:document.getElementById("show-grid"),enclosure:document.getElementById("show-enclosure")
+  grid:document.getElementById("show-grid"),mesh:document.getElementById("show-mesh"),enclosure:document.getElementById("show-enclosure")
 };
 let yaw = 2.18, pitch = 0.52, zoom = 1, dragging = false, lastX = 0, lastY = 0;
 let highlightedCellId=null,cellHighlightTimer=null,cellExtremaCache={frame:-1,value:null};
@@ -2284,6 +2287,33 @@ function jet(value){
   return [Math.round(255*r),Math.round(255*g),Math.round(255*b)];
 }
 function activeMeshRun(){return meshRuns.find(run=>run.id===activeMeshRunId)||meshRuns[0]||null;}
+function activeMeshWireframe(){return meshWireframes[activeMeshRunId]||null;}
+let projectedMeshCache={key:null,points:null};
+function projectedMeshPoints(mesh,basis,scale,cx,cy,w,h){
+  if(!mesh?.points_mm)return null;
+  const key=[activeMeshRunId,yaw,pitch,zoom,w,h,scale,cx,cy,mesh.point_count].map(value=>String(value)).join("|");
+  if(projectedMeshCache.key===key)return projectedMeshCache.points;
+  const points=mesh.points_mm.map(point=>projected(point,basis,scale,cx,cy));
+  projectedMeshCache={key,points};return points;
+}
+function drawActualMeshWireframe(basis,scale,cx,cy,w,h){
+  const mesh=activeMeshWireframe();
+  if(!visibility.mesh||!mesh?.groups?.length)return;
+  const points=projectedMeshPoints(mesh,basis,scale,cx,cy,w,h);if(!points)return;
+  const styles={
+    battery:["rgba(116,225,247,.70)",.42],
+    enclosure:["rgba(164,195,216,.34)",.38],
+    port:["rgba(255,189,91,.78)",.58]
+  };
+  ctx.save();ctx.globalCompositeOperation="source-over";
+  for(const group of mesh.groups){
+    const style=styles[group.kind]||["rgba(180,210,226,.45)",.4];
+    ctx.beginPath();
+    for(const edge of group.edges){const a=points[edge[0]],b=points[edge[1]];ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);}
+    ctx.strokeStyle=style[0];ctx.lineWidth=style[1];ctx.stroke();
+  }
+  ctx.restore();
+}
 function faceVisible(face,basis){
   const entity=entityById.get(face.id);if(!entity)return true;
   let normal;
@@ -3104,6 +3134,7 @@ function drawScene(){
     if(visualMode==="xz-velocity")for(const section of selectedVertical)drawSection(section,"velocity",basis,scale,cx,cy,verticalRange("velocity"),verticalAlpha,verticalSubdivisions);
     if(visualMode.startsWith("xz-"))for(const section of selectedVertical)drawSectionLabel(section,basis,scale,cx,cy);
   }
+  drawActualMeshWireframe(basis,scale,cx,cy,w,h);
   if(visibility.flow){
     if(visualMode.startsWith("xy-")&&visualMode!=="xy-velocity")drawSectionVelocity(horizontalSection(),basis,scale,cx,cy);
     if(visualMode==="xy-velocity"&&horizontalSectionKey()!=="xy")drawSectionVelocity(horizontalSection(),basis,scale,cx,cy);
@@ -3247,11 +3278,12 @@ function setLayerVisibility(values){
   for(const [name,input] of Object.entries(optionInputs))input.checked=visibility[name];
   draw();
 }
-displayOptions.hidden=!flow.enabled;
+displayOptions.hidden=!flow.enabled&&!activeMeshWireframe();
 horizontalSections.hidden=true;
 verticalSections.hidden=true;
 for(const [name,input] of Object.entries(optionInputs)){
-  input.disabled=!flow.enabled;input.addEventListener("change",()=>{visibility[name]=input.checked;draw();});
+  input.disabled=name==="mesh"?!activeMeshWireframe():!flow.enabled;
+  input.addEventListener("change",()=>{visibility[name]=input.checked;draw();});
 }
 smoothSectionInput.disabled=!flow.enabled;
 smoothSectionInput.addEventListener("change",()=>{directXYVelocityCache=null;updateCanvasNote();draw();});
@@ -3300,11 +3332,11 @@ document.getElementById("vertical-centre").addEventListener("click",()=>{
 updateVerticalSection({changeView:false});
 document.getElementById("flow-only").addEventListener("click",()=>{
   const input=modeInputs.find(candidate=>candidate.value==="velocity-streamlines");if(input)input.checked=true;
-  setLayerVisibility({cells:false,flow:true,particles:true,section:false,grid:false,enclosure:true});selectVisualMode("velocity-streamlines");
+  setLayerVisibility({cells:false,flow:true,particles:true,section:false,grid:false,mesh:false,enclosure:true});selectVisualMode("velocity-streamlines");
 });
 document.getElementById("show-all").addEventListener("click",()=>{
   const input=modeInputs.find(candidate=>candidate.value==="combined");if(input)input.checked=true;
-  setLayerVisibility({cells:true,flow:true,particles:true,section:true,grid:true,enclosure:true});selectVisualMode("combined");
+  setLayerVisibility({cells:true,flow:true,particles:true,section:true,grid:true,mesh:true,enclosure:true});selectVisualMode("combined");
 });
 if(flow.enabled)selectVisualMode(visualMode);
 flowControls.hidden=!flow.enabled;
@@ -3915,7 +3947,10 @@ const figureUi={
   14:["가로 단면 온도","가로 온도 분포 확인"]
 };
 function figureSummary(item){const ui=figureUi[item.id]||["결과 화면","계산 결과 확인"];return `Fig. ${item.id} · ${ui[0]} — ${ui[1]}`;}
-figureGrid.innerHTML=model.figures.map(item=>`<button data-figure="${item.id}" class="${item.status.endsWith("_READY")?"ready":""}" title="${(figureUi[item.id]||["결과 화면"])[0]}">Fig ${item.id}</button>`).join("");
+// 기존 Figure 2·3 정적 비교는 UI에서 제외한다. 실제 메시 자체는 CAD 위의
+// `실제 메시` 레이어로 회전·확대하며 확인한다.
+const visibleFigures=model.figures.filter(item=>![2,3].includes(Number(item.id)));
+figureGrid.innerHTML=visibleFigures.map(item=>`<button data-figure="${item.id}" class="${item.status.endsWith("_READY")?"ready":""}" title="${(figureUi[item.id]||["결과 화면"])[0]}">Fig ${item.id}</button>`).join("");
 const initialFigure=model.figures.find(item=>item.id===1);
 if(initialFigure)figureDetail.textContent=figureSummary(initialFigure);
 figureGrid.querySelectorAll("[data-figure]").forEach(button=>button.addEventListener("click",()=>{
@@ -3925,8 +3960,6 @@ figureGrid.querySelectorAll("[data-figure]").forEach(button=>button.addEventList
   const item=model.figures.find(candidate=>String(candidate.id)===button.dataset.figure);
   figureDetail.textContent=figureSummary(item);
   const artifacts=item.viewer_artifacts||[];
-  // Figure 2는 두 실제 polyMesh 그림, Figure 3은 두 CFD 결과 비교를 연다.
-  if([2,3].includes(item.id)&&meshRuns.length>=2){showMeshResultFigure(item.id,artifacts);return;}
   const interactiveFigureModes={4:"cell-temperature",6:"xy-temperature",7:"cell-temperature",8:"combined",9:"combined",10:"velocity-streamlines",11:"xy-velocity",12:"xz-velocity",13:"xz-temperature",14:"xy-temperature"};
   if(actualOneSecond&&interactiveFigureModes[item.id]){
     const mode=interactiveFigureModes[item.id],input=modeInputs.find(candidate=>candidate.value===mode);
@@ -4292,6 +4325,7 @@ def write_viewer_bundle(
     energy_balance = (
         _energy_balance_payload(case) if case is not None else {"available": False}
     )
+    mesh_wireframes = mesh_wireframes_for_viewer(case) if case is not None else {}
     model = {
         "schema_version": 1,
         "status": status,
@@ -4304,6 +4338,7 @@ def write_viewer_bundle(
         "interactive_cfd": interactive_cfd,
         "interactive_cfd_by_mesh": interactive_cfd_by_mesh,
         "mesh_runs": mesh_runs,
+        "mesh_wireframes": mesh_wireframes,
         "convergence": convergence,
         "energy_balance": energy_balance,
         "calculation_summary": calculation_summary,

@@ -860,6 +860,16 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 현재 PPT UDF 비교조건은 overlay 파일에 냉각수 293 K와 배터리 293.15 K를
 서로 구분해 명시한다.
 
+새 Fluent 비교 재계산에서 S0 냉간 유동과 S1 정상 CHT의 상한은 각각
+9,500회다. 이는 잔차 이력을 임의로 늘리는 값이 아니라 생성되는 OpenFOAM
+`controlDict`의 실제 `endTime`이며, 두 단계는 서로 독립된 9,500회 계산이다.
+
+웹 뷰어의 기존 Figure 2·3 정적 비교 버튼은 표시하지 않는다. 대신 계산에
+사용한 split-region `polyMesh`의 배터리 계면, 외벽, 입·출구 경계 edge를
+결정론적으로 축약하여 회전 가능한 CAD 화면의 `실제 메시` 레이어에 겹친다.
+전체 체적격자를 가짜 무늬로 대체하지 않으며, 브라우저 전송량을 줄이기 위한
+경계 edge 표본화 여부와 개수도 데이터에 함께 기록한다.
+
 ```bash
 .venv/bin/cfd-twin build-production-mesh-source \
   configs/baseline_23cell.yaml \
