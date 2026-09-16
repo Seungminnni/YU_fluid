@@ -858,10 +858,12 @@ endTime {STEADY_MAXIMUM_ITERATIONS};
 deltaT 1;
 writeControl timeStep;
 writeInterval 100;
-purgeWrite 0;
+// S0/S1 convergence histories live in solver logs and function-object files.
+// Keep only two restart fields per processor, not sixty full 3D snapshots.
+purgeWrite 2;
 writeFormat ascii;
 writePrecision 12;
-writeCompression off;
+writeCompression on;
 timeFormat general;
 timePrecision 8;
 runTimeModifiable true;

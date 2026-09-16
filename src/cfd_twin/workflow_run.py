@@ -18,6 +18,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from .case_builder import _docker_command
 from .cad_import import STEP_ROLES, import_step_bundle, imported_config_overrides, inspect_imported_steps
 from .config import load_config
 from .errors import CfdTwinError
@@ -55,13 +56,8 @@ def _lock_solver_file(stream: object) -> None:
 
 
 def _compose_service(case: Path, service: str, output: object, *, environment: dict[str, str] | None = None) -> int:
-    docker = shutil.which("docker")
-    if docker is None and os.name == "nt":
-        docker = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Docker/Docker/resources/bin/docker.exe")
-    if docker is None and os.name != "nt":
-        candidate = Path("/Applications/Docker.app/Contents/Resources/bin/docker")
-        docker = str(candidate) if candidate.is_file() else None
-    if docker is None or not Path(docker).is_file():
+    docker = _docker_command()
+    if docker is None:
         raise CfdTwinError("Docker Desktop CLI가 없어 실제 CFD 단계를 실행할 수 없습니다.")
     return subprocess.run(
         [docker, "compose", "-f", str(case / "compose.yaml"), "run", "--rm", "--build", service],

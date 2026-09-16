@@ -539,6 +539,8 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertTrue((output / "system" / "coolant" / "fvSolution").is_file())
             self.assertTrue((output / "system" / "fvSchemes").is_file())
             control = (output / "system" / "controlDict").read_text()
+            self.assertIn("purgeWrite 2;", control)
+            self.assertIn("writeCompression on;", control)
             self.assertEqual(control.count("type volFieldValue;"), 46)
             self.assertEqual(control.count("type surfaceFieldValue;"), 75)
             self.assertIn("regionType cellZone;", control)
