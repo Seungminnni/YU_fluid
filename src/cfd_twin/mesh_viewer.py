@@ -45,9 +45,9 @@ HTML = """<!doctype html>
     </div>
     <div class="viewport"><canvas id="mesh" aria-label="회전 및 확대 가능한 실제 CFD 계산 메시"></canvas>
       <div id="loading" role="status">실제 계산 격자를 불러오는 중…</div>
-      <div class="legend"><span class="fluid"></span> 냉각수 영역 <span class="solid"></span> 배터리 경계</div>
+      <div class="legend"><span class="fluid"></span> 냉각수 영역 <span class="solid"></span> 배터리 영역</div>
     </div>
-    <div class="foot"><span id="detail">3D 경계는 외부 표면, 3D 내부 절개와 단면은 실제 체적 셀의 교선을 표시합니다.</span>
+    <div class="foot"><span id="detail">3D 전체 격자는 유체·고체의 모든 셀 에지를 표시합니다. 겹쳐 보일 때는 내부 절개·단면을 사용하세요.</span>
       <span>드래그: 회전 · 휠: 확대</span></div>
   </main>
   <script src="mesh-data.js"></script>
@@ -223,7 +223,7 @@ async function start(){try{if(!gl)throw Error("이 브라우저에서 WebGL을 �
 
 
 def write_mesh_only_viewer(case_dir: str | Path, output_dir: str | Path) -> dict[str, object]:
-    """Publish actual, unsampled boundary and exact centre-plane cell sections."""
+    """Publish actual boundary, sections and every unique 3D volume edge."""
 
     case = Path(case_dir).resolve()
     output = Path(output_dir).resolve()
