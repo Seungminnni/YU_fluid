@@ -81,6 +81,8 @@ TRANSIENT_DELTA_T=1 ENERGY_COUPLING_ITERATIONS=200 \
 
 호스트 사전점검 `python -m cfd_twin doctor`는 시스템 OpenFOAM과 Docker 실행을 분리해서 표시한다. macOS 실기에서는 Docker Engine 29.7.2, CAD·VTK·Pillow 의존성, 실제 격리 OpenFOAM 병렬 계산까지 확인했다. `openfoam_ready=false`는 호스트 PATH에 솔버가 없다는 뜻일 뿐이며 Docker 기반 작업의 실패를 뜻하지 않는다. Windows 경로는 같은 Python `docker compose` 드라이버와 PowerShell 실행기를 사용하도록 구성했지만, **Windows PC에서 Docker·메시·S0/S1/S2·뷰어의 종단 간 실행은 아직 실증되지 않았다**. 그 검증 전까지 Windows 완전 호환을 완료로 표시하지 않는다.
 
+공통 호스트 사전점검은 프로젝트 의존성을 설치한 뒤 `python tools/host_preflight.py --output build/host_preflight_호스트명`으로 실행한다. 기준 CAD를 실제 생성하고 `production_700k`·`production_800k` 소스와 Docker Compose 구문을 모두 확인해 `host_preflight.json`을 남긴다. 이미 존재하는 출력 디렉터리는 덮어쓰지 않는다. macOS 실기 보고서 `build/host_preflight_mac_20260917_v2/host_preflight.json`은 통과했다. 이 명령은 **실제 70만/80만 격자 생성이나 S0/S1/S2 완주를 하지 않으며**, JSON의 `full_mesh_and_cfd_verified=false`가 이를 명시한다. Windows PC에서도 같은 명령의 보고서를 받아야 호스트 준비를 비교할 수 있고, 이어서 실제 CFD와 뷰어까지 별도로 검증해야 한다.
+
 현재 포털 실행 명령은 다음과 같다. `127.0.0.1`에만 바인딩하므로 같은 컴퓨터의 브라우저에서 `http://127.0.0.1:8765/`로 연다.
 
 ```bash
