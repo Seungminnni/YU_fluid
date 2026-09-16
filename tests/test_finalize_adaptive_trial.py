@@ -5,10 +5,19 @@ import unittest
 import json
 from pathlib import Path
 
-from tools.finalize_adaptive_trial import _energy_balance_passed, finalize
+from tools.finalize_adaptive_trial import _energy_balance_passed, _thermal_comparison_stage, finalize
 
 
 class AdaptiveTrialFinalizationTests(unittest.TestCase):
+    def test_missing_optional_baseline_history_is_reported_without_failing_cfd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = _thermal_comparison_stage(
+                root / "missing-baseline", root / "trial", root / "mesh.json", root / "comparison.json"
+            )
+            self.assertEqual(stage["status"], "DIAGNOSTIC_UNAVAILABLE")
+            self.assertIn("mesh.json", stage["error"])
+
     def test_energy_balance_warning_cannot_pass_even_when_cli_exits_zero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "energy_balance.json"

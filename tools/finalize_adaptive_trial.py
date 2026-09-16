@@ -38,6 +38,22 @@ def _energy_balance_passed(report_path: Path) -> bool:
     return report.get("status") == "TRANSIENT_ENERGY_BALANCE_PASSED" and gate.get("passed") is True
 
 
+def _thermal_comparison_stage(
+    reference_run: Path, trial: Path, mesh_report: Path, output: Path
+) -> dict[str, object]:
+    """Keep baseline-versus-adaptive diagnostics separate from CFD gates."""
+
+    try:
+        comparison = compare_thermal_histories(reference_run, trial, mesh_report, output)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"status": "DIAGNOSTIC_UNAVAILABLE", "error": str(exc)}
+    return {
+        "status": comparison["status"],
+        "sample_count": comparison["sample_count"],
+        "series": comparison["series"],
+    }
+
+
 def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
     trial = trial.resolve()
     reference = reference.resolve()
@@ -156,15 +172,10 @@ def finalize(trial: Path, reference: Path, *, image: str) -> dict[str, object]:
             save()
         if failed:
             raise RuntimeError("validation stages failed: " + ", ".join(failed))
-        comparison = compare_thermal_histories(
+        result["stages"]["thermal_history_comparison"] = _thermal_comparison_stage(
             reference_run, trial, mesh_report,
             reports / "thermal_history_comparison.json",
         )
-        result["stages"]["thermal_history_comparison"] = {
-            "status": comparison["status"],
-            "sample_count": comparison["sample_count"],
-            "series": comparison["series"],
-        }
         result["status"] = "ADAPTIVE_TRIAL_VALIDATION_PASSED"
     except Exception as exc:
         result["status"] = "ADAPTIVE_TRIAL_VALIDATION_FAILED"
