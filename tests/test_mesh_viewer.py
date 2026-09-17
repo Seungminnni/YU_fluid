@@ -20,7 +20,7 @@ class MeshOnlyViewerTest(unittest.TestCase):
 
     def test_simulation_does_not_draw_sampled_mesh_overlay(self) -> None:
         self.assertIn('id="show-mesh" type="checkbox" hidden', SIMULATION_HTML)
-        self.assertIn('id="home-tab" href="../"', SIMULATION_HTML)
+        self.assertIn('id="home-tab" href="index.html"', SIMULATION_HTML)
         self.assertIn('id="mesh-tab" href="mesh.html"', SIMULATION_HTML)
         self.assertNotIn("  drawActualMeshWireframe(basis,scale,cx,cy,w,h);", SIMULATION_JS)
 
@@ -56,7 +56,9 @@ class MeshOnlyViewerTest(unittest.TestCase):
             self.assertIn("3D 내부 절개", html)
             self.assertIn("3D 전체 격자", html)
             self.assertIn('id="cut-x"', html)
-            self.assertIn('id="mesh-home" href="../"', html)
+            self.assertIn('id="mesh-home" href="index.html"', html)
+            self.assertIn('href="results.html"', html)
+            self.assertIn('href="results.html"', (root / "viewer/home.html").read_text(encoding="utf-8"))
             self.assertIn('id="save-png"', html)
             self.assertIn('canvas.toBlob(blob=>', (root / "viewer/mesh.js").read_text(encoding="utf-8"))
             self.assertNotIn("유선", html)

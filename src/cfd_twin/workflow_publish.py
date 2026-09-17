@@ -153,13 +153,13 @@ def publish_completed_run(
         or not model.get("interactive_cfd_by_mesh", {}).get("precision", {}).get(
             "actual_one_second"
         )
-        or not (viewer / "index.html").is_file()
+        or not (viewer / "results.html").is_file()
     ):
         raise ValueError("viewer build did not expose the verified precision frames")
     result = {
         "stage": "complete",
         "message": "계산·에너지 수지·1초 프레임 검증을 통과한 검토용 3D 뷰어가 준비됐습니다.",
-        "viewer": str(viewer / "index.html"),
+        "viewer": str(viewer / "results.html"),
         "publication_authorized": False,
     }
     _write_json(state_path, result)

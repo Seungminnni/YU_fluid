@@ -241,6 +241,7 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
     postprocess = _read_json(case_dir / "reports/workflow_postprocess.json")
     viewer_ready = (
         viewer_dir.joinpath("index.html").is_file()
+        and viewer_dir.joinpath("results.html").is_file()
         and manifest.get("data_status")
         in {"L0_CFD_RESULTS_READY", "CFD_PILOT_RESULTS_READY"}
         and manifest.get("actual_solver_data") is True
@@ -261,6 +262,7 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
         {"id": "transient", "label": "S2 과도 열해석", "status": "passed" if transient_passed else "needs_check" if clean_end and time_s is not None else "running" if log_recent and time_s is not None else "needs_check" if time_s is not None else "pending"},
         {"id": "publish", "label": "결과 후처리·3D 뷰어", "status": "passed" if viewer_ready else "pending"},
     ]
+    adaptive_trial = manifest.get("execution_variant") == "adaptive_energy_coupling_trial"
     return {
         "case_name": case_dir.name,
         "mesh_cells": actual.get("total_cells"),
@@ -298,7 +300,9 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
             ),
         },
         "result_slots": [
-            {"name": "현재 84.9만셀 결과", "ready": viewer_ready},
+            {"name": "적응형 84.9만셀 결과" if adaptive_trial else "현재 84.9만셀 결과", "ready": viewer_ready,
+             "battery_tmax_k": final_summary.get("battery_tmax_k") if transient_passed else None,
+             "outlet_temperature_k": final_row.get("outlet_mass_weighted_temperature_k") if transient_passed else None},
             {"name": "비교 결과 2", "ready": False},
             {"name": "비교 결과 3", "ready": False},
         ],

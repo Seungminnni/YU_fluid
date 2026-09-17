@@ -149,6 +149,7 @@ class WorkflowAppTests(unittest.TestCase):
             (case / "results").mkdir(parents=True)
             viewer.mkdir()
             (viewer / "index.html").write_text("viewer", encoding="utf-8")
+            (viewer / "results.html").write_text("results", encoding="utf-8")
             manifest = {
                 "data_status": "CFD_PILOT_RESULTS_READY",
                 "actual_solver_data": True,

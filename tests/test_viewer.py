@@ -236,6 +236,7 @@ class ViewerTests(unittest.TestCase):
             output = Path(directory)
             for name in (
                 "index.html",
+                "results.html",
                 "style.css",
                 "app.js",
                 "model.js",
@@ -243,7 +244,12 @@ class ViewerTests(unittest.TestCase):
                 "README_VIEWER.txt",
             ):
                 self.assertTrue((output / name).is_file())
-            html = (output / "index.html").read_text(encoding="utf-8")
+            landing = (output / "index.html").read_text(encoding="utf-8")
+            self.assertIn('href="results.html"', landing)
+            self.assertIn('id="go-calculate"', landing)
+            self.assertIn('id="cad-files"', landing)
+            self.assertIn("new URL(location.href)", (output / "offline-app.js").read_text(encoding="utf-8"))
+            html = (output / "results.html").read_text(encoding="utf-8")
             script = (output / "app.js").read_text(encoding="utf-8")
             self.assertRegex(html, r'href="style\.[0-9a-f]{12}\.css"')
             self.assertRegex(html, r'src="model\.[0-9a-f]{12}\.js"')

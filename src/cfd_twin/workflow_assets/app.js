@@ -82,12 +82,12 @@ function renderStatus(status) {
   status.result_slots.forEach((slot) => {
     const row = document.createElement("tr");
     textCell(row, "td", slot.name);
-    const current = slot.name.startsWith("현재");
+    const current = slot.name.startsWith("현재") || slot.name.startsWith("적응형");
     const slotState = slot.ready ? "3D 준비 완료" : current && calculationComplete ? "CFD 완료 · 3D 후처리" : current && active ? "계산 중" : "결과 없음";
     textCell(row, "td", slotState);
     const degrees = (kelvin) => typeof kelvin === "number" && Number.isFinite(kelvin) ? `${(kelvin - 273.15).toFixed(4)} °C` : "—";
-    textCell(row, "td", current && calculationComplete ? degrees(result.battery_tmax_k) : "—");
-    textCell(row, "td", current && calculationComplete ? degrees(result.outlet_temperature_k) : "—");
+    textCell(row, "td", slot.ready ? degrees(slot.battery_tmax_k) : "—");
+    textCell(row, "td", slot.ready ? degrees(slot.outlet_temperature_k) : "—");
     rows.appendChild(row);
   });
 }

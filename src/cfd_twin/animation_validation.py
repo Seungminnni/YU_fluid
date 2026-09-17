@@ -165,7 +165,7 @@ def validate_animations(
     viewer_checks: dict[str, bool] = {}
     if viewer_dir is not None:
         viewer = Path(viewer_dir).resolve()
-        html = (viewer / "index.html").read_text(encoding="utf-8")
+        html = (viewer / "results.html").read_text(encoding="utf-8")
         script = (viewer / "app.js").read_text(encoding="utf-8")
         model_text = (viewer / "model.js").read_text(encoding="utf-8")
         viewer_model = json.loads(

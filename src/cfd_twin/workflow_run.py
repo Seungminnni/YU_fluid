@@ -263,7 +263,7 @@ def imported_run_status(root: Path, run_id: str) -> dict[str, object]:
         raise ValueError("실행을 찾을 수 없습니다.")
     status = _read_json(job_dir / "status.json")
     status["id"] = run_id
-    status["viewer_url"] = f"/runs/{run_id}/viewer/index.html" if status.get("status") == "complete" else None
+    status["viewer_url"] = f"/runs/{run_id}/viewer/results.html" if status.get("status") == "complete" else None
     if (job_dir / "case").is_dir():
         # Read-only progress from the same validated reports/logs as the
         # baseline portal. Never manufacture a mesh/solver percentage.

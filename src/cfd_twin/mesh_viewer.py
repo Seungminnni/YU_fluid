@@ -20,8 +20,8 @@ HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <div class="heading"><a id="mesh-home" href="../" class="back">← 처음으로</a>
-      <a href="index.html" class="back">결과 화면</a><h1>메시 보기</h1><span id="count"></span></div>
+    <div class="heading"><a id="mesh-home" href="index.html" class="back">← 처음으로</a>
+      <a href="results.html" class="back">결과 화면</a><h1>메시 보기</h1><span id="count"></span></div>
     <div class="modes" role="group" aria-label="메시 표시 방식">
       <button type="button" data-mode="surface" aria-pressed="true">3D 경계</button>
       <button type="button" data-mode="volume" aria-pressed="false">3D 전체 격자</button>
@@ -56,6 +56,57 @@ HTML = """<!doctype html>
 </html>
 """
 
+HOME_HTML = (
+    (Path(__file__).with_name("workflow_assets") / "index.html")
+    .read_text(encoding="utf-8")
+    .replace('href="/style.css?v=import-cad-1"', 'href="portal.css"')
+    .replace('href="/viewer/index.html"', 'href="results.html"')
+    .replace('href="/viewer/results.html"', 'href="results.html"')
+    .replace('src="/app.js?v=import-cad-1"', 'src="offline-data.js"></script>\n  <script src="offline-app.js"')
+)
+
+OFFLINE_JAVASCRIPT = r'''"use strict";
+const $=id=>document.getElementById(id),summary=window.CFD_OFFLINE_SUMMARY||{};
+function show(view){$("results-view").hidden=view!=="results";$("calculate-view").hidden=view!=="calculate";
+  document.querySelector(".hero").hidden=view!=="home";
+  const here=new URL(location.href);here.hash=view==="home"?"":view;
+  try{history.replaceState(null,"",here.href);}catch(_error){/* file:// can restrict History API */}
+  window.scrollTo(0,0);}
+$("go-results").onclick=()=>show("results");$("go-calculate").onclick=()=>{
+  if(location.protocol==="file:")show("calculate");else location.href="../#calculate";};
+for(const button of document.querySelectorAll(".home"))button.onclick=()=>show("home");
+$("live-state").textContent="저장된 CFD 결과 · 오프라인";
+const ready=Boolean(summary.actual_solver_data);
+$("result-notice").textContent=ready?"저장된 CFD 결과를 열람할 수 있습니다. 이 파일 화면은 새 계산을 시작하지 않습니다.":"계산 결과 데이터가 없습니다.";
+$("result-status").textContent=ready?"저장된 3D 결과와 온도·수렴 그래프를 볼 수 있습니다.":"검증된 결과 없음";
+$("open-viewer").hidden=!ready;$("open-viewer").href="results.html";
+$("mesh-count").textContent=summary.mesh_cells?`${Number(summary.mesh_cells).toLocaleString()} cells`:"메시 대기";
+$("physical-time").textContent=ready?"1800 / 1800 s":"— / 1800 s";
+$("progress-label").textContent=ready?"100%":"—";$("transient-progress").value=ready?100:0;
+$("coupling-state").textContent="저장된 계산 기록입니다. 새 계산 진행 상황은 로컬 서버에서 확인하세요.";
+$("tank-size").textContent=summary.tank_mm?`${summary.tank_mm.join(" × ")} mm`:"—";
+$("cell-count").textContent=summary.cell_count?`${summary.cell_count}개 · 5–4–5–4–5`:"—";
+$("port-size").textContent=summary.port_diameter_mm?`Ø${summary.port_diameter_mm} / Ø${summary.port_diameter_mm} mm`:"—";
+$("cad-source").textContent="검증된 기준 CAD";$("cad-badge").textContent="저장된 형상";
+$("geometry-note").textContent="새 CAD의 형상 검증과 새 CFD 실행은 로컬 서버 실행 후 이용할 수 있습니다.";
+const stages=$("stage-list");for(const [i,label] of ["CAD 확인","메시 생성·품질","S0 냉간 유동","S1 정상 CHT","S2 과도 열해석","결과 후처리·3D 뷰어"].entries()){
+  const item=document.createElement("div");item.className=`stage ${ready?"passed":"pending"}`;
+  const strong=document.createElement("strong");strong.textContent=`${String(i+1).padStart(2,"0")} · ${label}`;
+  item.append(strong,document.createTextNode(ready?"저장된 결과":"대기"));stages.append(item);}
+const row=document.createElement("tr");for(const value of [summary.label||"저장된 결과",ready?"3D 준비 완료":"결과 없음",
+  typeof summary.tmax_c==="number"?`${summary.tmax_c.toFixed(4)} °C`:"—",
+  typeof summary.outlet_c==="number"?`${summary.outlet_c.toFixed(4)} °C`:"—"]){const cell=document.createElement("td");cell.textContent=value;row.append(cell);}$("comparison-rows").append(row);
+for(const input of document.querySelectorAll('input[name="cad-mode"]'))input.onchange=()=>{
+  $("upload-area").hidden=input.value==="baseline"&&input.checked;};
+$("cad-files").onchange=event=>{const names=Array.from(event.target.files).map(file=>`${file.name} · ${file.size.toLocaleString()} bytes`);
+  $("cad-file-results").textContent=names.join(" / ")+" · 서버에서 검증 필요";};
+$("calculation-form").onsubmit=event=>{event.preventDefault();
+  $("confirmation-details").textContent="CAD 형상 확인·메시 생성·CFD 실행은 로컬 서버에서 처리합니다.";
+  $("confirmation-message").textContent="파일로 연 화면에서는 새 계산을 시작할 수 없습니다. 실행기를 사용해 로컬 웹앱을 연 다음 같은 값을 입력하세요.";
+  $("attach-run").hidden=true;$("start-imported-run").hidden=true;$("confirm-dialog").showModal();};
+if(location.hash==="#results"||location.hash==="#calculate")show(location.hash.slice(1));
+'''
+
 CSS = """*{box-sizing:border-box}html,body{height:100%;margin:0}body{display:flex;flex-direction:column;
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef3f6;color:#1e3543}
 header{min-height:70px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 22px;
@@ -88,7 +139,6 @@ canvas{width:100%;height:100%;display:block;cursor:grab;touch-action:none}canvas
 
 JAVASCRIPT = r'''"use strict";
 const canvas=document.getElementById("mesh"),loading=document.getElementById("loading");
-document.getElementById("mesh-home").hidden=window.location.protocol==="file:";
 const gl=canvas.getContext("webgl",{antialias:true,alpha:false,preserveDrawingBuffer:true});
 let mesh=null,mode="surface",yaw=0.55,pitch=0.70,zoom=1,baseScale=1,dragging=false,lastX=0,lastY=0;
 let geometry=[],centre=[0,0,0],bounds=[],program,attribute,uniforms;
@@ -242,6 +292,11 @@ def write_mesh_only_viewer(case_dir: str | Path, output_dir: str | Path) -> dict
     output.mkdir(parents=True, exist_ok=True)
     # Script assets work both via the local workflow server and directly on file://.
     (output / "mesh.html").write_text(HTML, encoding="utf-8")
+    (output / "home.html").write_text(HOME_HTML, encoding="utf-8")
+    (output / "portal.css").write_text(
+        (Path(__file__).with_name("workflow_assets") / "style.css").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (output / "offline-app.js").write_text(OFFLINE_JAVASCRIPT, encoding="utf-8")
     (output / "mesh.css").write_text(CSS, encoding="utf-8")
     (output / "mesh.js").write_text(JAVASCRIPT, encoding="utf-8")
     (output / "mesh-data.js").write_text(

@@ -21,7 +21,7 @@ from .config import ResolvedConfig
 from .geometry import cell_placements, geometry_report
 from .heat_source import source_from_config
 from .mesh_wireframe import mesh_wireframes_for_viewer
-from .mesh_viewer import write_mesh_only_viewer
+from .mesh_viewer import HOME_HTML, OFFLINE_JAVASCRIPT, write_mesh_only_viewer
 from .openfoam_cold_flow_validation import parse_cold_flow_log
 from .openfoam_results import (
     LEGACY_DISPLAY_TEMPERATURE_OFFSET_C,
@@ -1634,7 +1634,7 @@ HTML = '''<!doctype html>
       <h1>CFD 결과 뷰어</h1>
       <span>DIGITAL TWIN · SIMULATION REPLAY</span>
     </div>
-    <div class="header-actions"><a id="home-tab" href="../">← 처음으로</a>
+    <div class="header-actions"><a id="home-tab" href="index.html">← 처음으로</a>
       <a id="mesh-tab" href="mesh.html" hidden>메시 보기 ↗</a>
       <div id="status" class="status">GEOMETRY PREVIEW · CFD 미실행</div></div>
   </header>
@@ -2111,7 +2111,6 @@ footer { min-height:32px; padding:6px 19px 8px; color:#617d91; font-size:10px; o
 JAVASCRIPT = r'''
 "use strict";
 const model = window.CFD_TWIN_MODEL;
-document.getElementById("home-tab").hidden=window.location.protocol==="file:";
 document.getElementById("mesh-tab").hidden=!model.mesh_only_ready;
 const initialParams=new URLSearchParams(window.location.search);
 if(initialParams.get("capture")==="1")document.documentElement.classList.add("capture-mode");
@@ -4096,7 +4095,7 @@ def write_viewer_bundle(
     *,
     case_dir: str | Path | None = None,
 ) -> dict[str, object]:
-    """검증 보고서와 CFD 필드를 읽어 최종 index.html과 데이터 파일을 만든다.
+    """검증 보고서와 CFD 필드를 읽어 첫 화면, 결과 및 데이터 파일을 만든다.
 
     결과가 없거나 gate가 실패하면 완료 상태로 표시하지 않는다. 준비된 경우에만
     셀 온도, 단면, 유선, 압력강하, 1초 그래프와 수렴 이력을 UI에 연결한다.
@@ -4559,6 +4558,22 @@ def write_viewer_bundle(
     rendered_html = HTML.replace("__STYLE_ASSET__", style_asset).replace(
         "__APP_ASSET__", app_asset
     ).replace("__MODEL_ASSET__", model_asset)
+    precision = model.get("interactive_cfd_by_mesh", {}).get("precision", {})
+    graphs = precision.get("temperature_graphs", {})
+    def last_temperature(key: str) -> float | None:
+        series = graphs.get(key, [])
+        return float(series[-1]) if isinstance(series, list) and series else None
+
+    offline_summary = {
+        "actual_solver_data": actual_solver_data,
+        "label": "적응형 84.9만셀 결과" if model.get("execution_variant") == "adaptive_energy_coupling_trial" else "현재 결과",
+        "mesh_cells": next((run.get("counts", {}).get("total_cells") for run in mesh_runs if run.get("data_ready")), None),
+        "tank_mm": [model["enclosure_mm"][axis] for axis in ("x", "y", "z")],
+        "cell_count": len(placements),
+        "port_diameter_mm": model["port_diameter_mm"],
+        "tmax_c": last_temperature("battery_mesh_maximum_c"),
+        "outlet_c": last_temperature("outlet_mass_weighted_average_c"),
+    }
     for obsolete in (
         *output.glob("style.*.css"),
         *output.glob("app.*.js"),
@@ -4566,7 +4581,12 @@ def write_viewer_bundle(
     ):
         if obsolete.name not in {style_asset, app_asset, model_asset}:
             obsolete.unlink()
-    _atomic_write(output / "index.html", rendered_html)
+    _atomic_write(output / "index.html", HOME_HTML)
+    _atomic_write(output / "home.html", HOME_HTML)
+    _atomic_write(output / "results.html", rendered_html)
+    _atomic_write(output / "offline-data.js", "window.CFD_OFFLINE_SUMMARY=" + json.dumps(offline_summary, ensure_ascii=False) + ";\n")
+    _atomic_write(output / "offline-app.js", OFFLINE_JAVASCRIPT)
+    _atomic_write(output / "portal.css", (Path(__file__).with_name("workflow_assets") / "style.css").read_text(encoding="utf-8"))
     _atomic_write(output / "style.css", CSS)
     _atomic_write(output / "app.js", JAVASCRIPT)
     _atomic_write(output / style_asset, CSS)
@@ -4581,7 +4601,7 @@ def write_viewer_bundle(
         output / "README_VIEWER.txt",
         "CFD 결과 뷰어\n\n"
         "이 폴더 전체를 같은 구조로 유지한 뒤 index.html을 더블클릭하십시오.\n"
-        "메시 보기: index.html 위쪽의 '메시 보기' 또는 mesh.html을 여십시오.\n"
+        "첫 화면의 결과 보기에서 results.html을 열고, 상단 메시 보기에서 mesh.html을 엽니다.\n"
         "실제 polyMesh의 경계면과 중앙 XY/XZ 절단면 에지를 메시 전용으로 표시하며\n"
         "mesh-data.js를 포함해 이 폴더 전체를 함께 보관해야 합니다.\n"
         "가로와 세로 단면 위치는 계산에 사용한 15%, 32.5%, 50%, 67.5%, 85%만 선택합니다.\n"
