@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>최종 계산 CAD 상면도·측면도</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">YU FLUID <small>CALCULATED CAD · ORTHOGRAPHIC VIEWS</small></div>
+    <nav aria-label="화면 이동">
+      <a href="../index.html">← 처음으로</a>
+      <a href="../results.html">CFD 결과</a>
+      <a href="../mesh.html">메시 보기</a>
+      <div class="language-switch" role="group" aria-label="Language / 언어"><button type="button" data-language="ko" aria-pressed="true">한국어</button><button type="button" data-language="en" aria-pressed="false">English</button></div>
+    </nav>
+  </header>
+  <main>
+    <p class="eyebrow">최종 계산 형상</p>
+    <h1>CAD 상면도 · 측면도</h1>
+    <p class="intro" id="case-description"></p>
+    <label class="case-picker" for="case-select"><span id="case-picker-label">결과 선택</span><select id="case-select" aria-label="결과 선택"></select></label>
+    <div class="specs" aria-label="최종 계산 형상 치수">
+      <span id="tank-spec">탱크 114 × 121 × 82 mm</span>
+      <span id="battery-spec">배터리 23개 · Ø19 × 68 mm</span>
+      <span>배열 5–4–5–4–5</span>
+      <span id="port-spec">포트 Ø23 × 32 mm</span>
+    </div>
+    <section class="drawings" aria-label="상면 및 측면 도면">
+      <article class="card">
+        <div class="card-title"><div><small>XY PLANE</small><h2>상면도</h2></div><a id="top-download" href="cad_exact_phi23_top.svg" download>도면 저장 ↧</a></div>
+        <a id="top-link" class="drawing" href="cad_exact_phi23_top.svg" target="_blank" rel="noopener"><img id="top-image" src="cad_exact_phi23_top.svg" alt="선택한 결과의 CAD 상면도"></a>
+        <details><summary>실제 CAD 투영 이미지</summary><a id="top-projection-link" href="actual_phi23_top_XY.png" target="_blank" rel="noopener"><img id="top-projection" class="projection" src="actual_phi23_top_XY.png" alt="실제 CAD 상면 투영"></a></details>
+      </article>
+      <article class="card">
+        <div class="card-title"><div><small>XZ PLANE</small><h2>측면도</h2></div><a id="side-download" href="cad_exact_phi23_side.svg" download>도면 저장 ↧</a></div>
+        <a id="side-link" class="drawing" href="cad_exact_phi23_side.svg" target="_blank" rel="noopener"><img id="side-image" src="cad_exact_phi23_side.svg" alt="선택한 결과의 CAD 측면도"></a>
+        <details><summary>실제 CAD 투영 이미지</summary><a id="side-projection-link" href="actual_phi23_side_XZ.png" target="_blank" rel="noopener"><img id="side-projection" class="projection" src="actual_phi23_side_XZ.png" alt="실제 CAD 측면 투영"></a></details>
+      </article>
+    </section>
+    <p class="footnote" id="case-footnote"></p>
+  </main>
+  <script src="../four_case_data.js"></script>
+  <script src="../i18n.js?v=diameter-case-1"></script>
+  <script>
+    (() => {
+      const runs = (window.CFD_FOUR_CASE_MANIFEST?.runs || [])
+        .filter(run => run.data_ready !== false && Number.isFinite(Number(run.diameter_mm)));
+      const select = document.getElementById("case-select");
+      const params = new URLSearchParams(location.search);
+      const chosen = params.get("mesh") === "single" ? "exact_phi23" : params.get("mesh");
+      select.replaceChildren(...runs.map(run => {
+        const option = document.createElement("option");
+        option.value = run.id;
+        return option;
+      }));
+      select.value = runs.some(run => run.id === chosen) ? chosen : (runs[0]?.id || "");
+      const english = () => (window.CFDTwinI18n?.getLanguage() || params.get("lang") || "ko") === "en";
+      function render() {
+        const run = runs.find(item => item.id === select.value) || runs[0];
+        if (!run) return;
+        const diameter = Number(run.diameter_mm);
+        const outletDiameter = Number(run.outlet_diameter_mm ?? run.diameter_mm);
+        const portLabel = diameter === outletDiameter ? `Ø${diameter}` : `Ø${diameter} / Ø${outletDiameter}`;
+        for (const option of select.options) {
+          const item = runs.find(candidate => candidate.id === option.value);
+          option.textContent = english() ? item.label_en : item.label;
+        }
+        document.getElementById("case-picker-label").textContent = english() ? "Select result" : "결과 선택";
+        document.getElementById("case-description").textContent = english()
+          ? `CAD top and side projections for the selected ${portLabel} mm CFD result.`
+          : `선택한 ${portLabel} mm CFD 결과에 해당하는 CAD 상면·측면 투영입니다.`;
+        const tank = run.tank_mm || [];
+        document.getElementById("tank-spec").textContent = `${english() ? "Tank" : "탱크"} ${tank.join(" × ")} mm`;
+        document.getElementById("battery-spec").textContent = english()
+          ? `${run.battery_count} batteries · Ø${run.battery_diameter_mm} × ${run.battery_height_mm} mm`
+          : `배터리 ${run.battery_count}개 · Ø${run.battery_diameter_mm} × ${run.battery_height_mm} mm`;
+        document.getElementById("port-spec").textContent = `${english() ? "Ports" : "포트"} ${portLabel} × ${run.port_length_mm} mm`;
+        document.getElementById("case-footnote").textContent = run.id === "precision"
+          ? (english() ? "The preserved Ø19 CFD geometry is displayed with its documented rigid Y reflection. The source simulation was not rerun." : "기존 Ø19 계산 형상을 Y축으로 반사해 표시했습니다. 원본 계산은 다시 돌리지 않았습니다.")
+          : (english() ? "CAD geometry used for this validated calculation." : "이 검증된 계산에 사용한 CAD 형상입니다.");
+        for (const [view, projection] of [["top", run.projection_top], ["side", run.projection_side]]) {
+          const drawing = `cad_${run.id}_${view}${english()?".en":""}.svg`;
+          document.getElementById(`${view}-image`).src = drawing;
+          document.getElementById(`${view}-link`).href = drawing;
+          document.getElementById(`${view}-download`).href = drawing;
+          const projectionLink = document.getElementById(`${view}-projection-link`);
+          projectionLink.closest("details").hidden = !projection;
+          if (projection) {
+            document.getElementById(`${view}-projection`).src = projection;
+            projectionLink.href = projection;
+          }
+        }
+        const query = new URLSearchParams({lang:english()?"en":"ko", mesh:run.id, autoplay:"0"});
+        document.querySelector('nav a[href^="../results.html"]').href = `../results.html?${query}`;
+        document.querySelector('nav a[href^="../mesh.html"]').href = `../mesh.html?${query}`;
+      }
+      select.addEventListener("change", () => {
+        const url = new URL(location.href);
+        url.searchParams.set("mesh", select.value);
+        history.replaceState(null, "", url);
+        render();
+      });
+      window.addEventListener("cfdtwin:languagechange", render);
+      render();
+    })();
+  </script>
+</body>
+</html>

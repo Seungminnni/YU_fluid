@@ -173,6 +173,21 @@ def _probe_specs(run_dir: Path) -> dict[str, dict[str, object]]:
             "rows": xz_rows,
             "label": label,
         }
+    yz_columns = math.ceil(0.121 / 0.001)
+    for name, label in (
+        ("yz15", "X = 17.1 mm"),
+        ("yz33", "X = 37.1 mm"),
+        ("yz50", "X = 57.0 mm"),
+        ("yz68", "X = 77.0 mm"),
+        ("yz85", "X = 96.9 mm"),
+    ):
+        specs[name] = {
+            "path": root / f"actual_{name}_temperature_1s/coolant/0/T",
+            "kind": "yz",
+            "columns": yz_columns,
+            "rows": xz_rows,
+            "label": label,
+        }
     return specs
 
 
@@ -209,7 +224,7 @@ def build_actual_one_second_bundle(
     end_time_s: int = 1800,
     mesh_case_dir: str | Path | None = None,
 ) -> dict[str, object]:
-    """11개 직접 probe 데이터셋을 총 1,801개의 uint16 프레임으로 만든다."""
+    """16개 직접 probe 데이터셋을 총 1,801개의 uint16 프레임으로 만든다."""
 
     run = Path(run_dir).resolve()
     output = Path(output_dir).resolve()

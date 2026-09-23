@@ -10,6 +10,7 @@ from cfd_twin.config import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
+CELL_ALIGNED = ROOT / "configs" / "user_confirmed_cell_aligned_outlet_top_20260922.yaml"
 
 
 class CadSourceTests(unittest.TestCase):
@@ -22,11 +23,18 @@ class CadSourceTests(unittest.TestCase):
             script = (output / "build_cad.py").read_text(encoding="utf-8")
             self.assertEqual(manifest["cell_count"], 23)
             self.assertEqual(manifest["port_diameter_mm"], 19.0)
+            self.assertEqual(manifest["inlet_diameter_mm"], 19.0)
+            self.assertEqual(manifest["outlet_diameter_mm"], 19.0)
+            self.assertEqual(manifest["port_centers_xy_mm"]["inlet"], [100.3, 107.5])
+            self.assertEqual(manifest["port_centers_xy_mm"]["outlet"], [13.5, 13.5])
+            self.assertEqual(manifest["port_placement"], "corner_4mm_clearance")
             self.assertEqual(manifest["status"], "CAD_SOURCE_CREATED_NOT_EXECUTED")
             self.assertIn('"enclosure_profile": "pptx_measured_v1"', model)
             self.assertIn('"cell_diameter_mm": 19.0', model)
             self.assertIn('"coolant_volume_mm3"', model)
             self.assertIn("outer_with_ports = enclosure.union(inlet).union(outlet)", script)
+            self.assertIn('inlet_radius = MODEL["ports"]["inlet_diameter_mm"] / 2', script)
+            self.assertIn('outlet_radius = MODEL["ports"]["outlet_diameter_mm"] / 2', script)
             self.assertIn("coolant = coolant.cut(solid)", script)
             self.assertIn('"coolant_is_one_connected_solid"', script)
             self.assertIn('"volumes_and_areas_within_relative_1e_6"', script)
@@ -41,6 +49,20 @@ class CadSourceTests(unittest.TestCase):
             self.assertIn('result["file_sha256"]', script)
             self.assertGreater(manifest["analytic_expectations"]["inlet_area_mm2"], 283.0)
             self.assertFalse(manifest["production_cad_ready"])
+
+    def test_cad_source_honours_swapped_top_bottom_port_faces(self) -> None:
+        config = load_config(BASELINE, overlay_paths=(CELL_ALIGNED,))
+        with tempfile.TemporaryDirectory() as directory:
+            write_cad_source_bundle(config, directory)
+            output = Path(directory)
+            model = (output / "cad_model.json").read_text(encoding="utf-8")
+            script = (output / "build_cad.py").read_text(encoding="utf-8")
+            self.assertIn('"face": "bottom"', model)
+            self.assertIn('"face": "top"', model)
+            self.assertIn('if face == "top":', script)
+            self.assertIn('elif face == "bottom":', script)
+            self.assertIn("inlet, inlet_end_z = build_port", script)
+            self.assertIn("outlet, outlet_end_z = build_port", script)
 
 
 if __name__ == "__main__":

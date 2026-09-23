@@ -9,6 +9,7 @@ from pathlib import Path
 
 from cfd_twin.config import load_config
 from cfd_twin.viewer import (
+    JAVASCRIPT,
     _convergence_payload,
     _energy_balance_payload,
     _mesh_runs_payload,
@@ -23,6 +24,11 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class ViewerTests(unittest.TestCase):
+    def test_shared_temperature_display_range_is_19_to_21_044_c(self) -> None:
+        self.assertIn("return [19.000,21.044]", JAVASCRIPT)
+        self.assertIn("const t=clamp(value)", JAVASCRIPT)
+        self.assertIn("return sharedTemperatureRange()", JAVASCRIPT)
+
     def test_archived_result_with_different_regional_initials_is_excluded(self) -> None:
         config = load_config(
             BASELINE,
@@ -77,6 +83,39 @@ class ViewerTests(unittest.TestCase):
             self.assertEqual(precision["label"], "80만급 생산 결과 · 849,284셀")
             self.assertEqual(precision["counts"]["points"], 945_483)
             self.assertIn("90.223% hexahedra", precision["element_family"])
+
+    def test_comparison_manifest_overrides_run_labels_and_port_diameters(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            case = Path(directory)
+            (case / "comparison_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "runs": [
+                            {
+                                "id": "precision",
+                                "label": "Ø19 비교 계산 · 603,634셀",
+                                "label_en": "Ø19 Comparison · 603,634 cells",
+                                "inlet_diameter_mm": 19,
+                                "outlet_diameter_mm": 19,
+                            },
+                            {
+                                "id": "single",
+                                "label": "Ø23 비교 계산 · 611,869셀",
+                                "label_en": "Ø23 Comparison · 611,869 cells",
+                                "inlet_diameter_mm": 23,
+                                "outlet_diameter_mm": 23,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runs = _mesh_runs_payload(case, precision_data_ready=True)
+            self.assertEqual(runs[0]["label_en"], "Ø19 Comparison · 603,634 cells")
+            self.assertEqual(runs[0]["inlet_diameter_mm"], 19)
+            self.assertEqual(runs[1]["label"], "Ø23 비교 계산 · 611,869셀")
+            self.assertEqual(runs[1]["outlet_diameter_mm"], 23)
 
     def test_energy_balance_payload_preserves_persisted_samples(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -246,8 +285,16 @@ class ViewerTests(unittest.TestCase):
                 self.assertTrue((output / name).is_file())
             landing = (output / "index.html").read_text(encoding="utf-8")
             self.assertIn('href="results.html"', landing)
-            self.assertIn('id="go-calculate"', landing)
+            self.assertIn('id="go-start"', landing)
+            self.assertIn('id="go-graphics"', landing)
+            self.assertNotIn('id="menu-view"', landing)
             self.assertIn('id="cad-files"', landing)
+            self.assertIn('href="cad/index.html"', landing)
+            self.assertTrue((output / "cad/index.html").is_file())
+            self.assertTrue((output / "cad/dimensioned_top.svg").is_file())
+            self.assertTrue((output / "cad/dimensioned_side.svg").is_file())
+            self.assertTrue((output / "cad/step_top.png").is_file())
+            self.assertTrue((output / "cad/step_side.png").is_file())
             self.assertIn("new URL(location.href)", (output / "offline-app.js").read_text(encoding="utf-8"))
             html = (output / "results.html").read_text(encoding="utf-8")
             script = (output / "app.js").read_text(encoding="utf-8")
@@ -260,14 +307,25 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("CFD 미실행", html)
             self.assertIn('data-view="px"', html)
             self.assertIn('data-view="nz"', html)
-            self.assertIn("포트는 A-04", html)
+            self.assertNotIn("포트는 A-04", html)
             self.assertIn("CFD 결과 뷰어", html)
             self.assertIn("DIGITAL TWIN · SIMULATION REPLAY", html)
+            self.assertIn('id="cad-tab" href="cad/index.html"', html)
             self.assertIn("현재 결과", html)
             self.assertIn("주요 CFD 결과", html)
-            self.assertIn("운전 조건", html)
+            self.assertIn("경계 조건", html)
             self.assertIn("계산 메시 선택", html)
             self.assertIn('id="mesh-run-select"', html)
+            self.assertIn(
+                "const selectableMeshRuns=meshRuns.filter(run=>run.mesh_ready||run.data_ready)",
+                script,
+            )
+            self.assertIn("meshRunSelect.innerHTML=selectableMeshRuns.map", script)
+            self.assertIn("const meshRunText=(run,key)=>", script)
+            self.assertIn("model.convergence_by_mesh", script)
+            self.assertIn("model.energy_balance_by_mesh", script)
+            self.assertIn('context.fillStyle="#ffffff";context.fillRect(0,0,width,height)', script)
+            self.assertIn('"#c62828","#1565c0","#2e7d32","#7b1fa2","#00838f"', script)
             self.assertIn("CFD 수렴 모니터", html)
             self.assertIn('id="convergence-chart-open"', html)
             self.assertIn('<option value="energy-balance">6. 에너지 수지</option>', html)
@@ -390,6 +448,10 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("Fig 6 실제 냉각수 T(x,t) + 고정 U(x)", script)
             self.assertIn("고정 U(x)의 긴 유선을 따라 이동 헤드가 방향 표시 · 과도속도 아님", script)
             self.assertIn("drawFlow(flow.streamlines", script)
+            self.assertIn("ctx.lineWidth=2", script)
+            self.assertIn("const streamlineDisplayLimit=260", script)
+            self.assertIn("displayedFlowPaths(paths)", script)
+            self.assertIn('window.CFDTwinI18n?.getLanguage()||new URLSearchParams(window.location.search).get("lang")', script)
             self.assertIn("const section=horizontalSection()", script)
             self.assertIn("function horizontalSection", script)
             self.assertIn("function updateHorizontalSection", script)
@@ -432,6 +494,10 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("function portMetrics", script)
             self.assertIn("function updateDashboardMetrics", script)
             self.assertIn("function drawPortCallout", script)
+            self.assertIn("function fluentSurfaceShadow", script)
+            self.assertIn("meshRuns.filter(run=>run.mesh_ready||run.data_ready)", script)
+            self.assertIn("[activeMeshRunId]||{enabled:false}", script)
+            self.assertIn("Shade the rendered solid like Fluent", script)
             self.assertIn("area_average_pressure_pa", script)
             self.assertIn("pressure_drop_pa", script)
             self.assertIn("temperature_display_offset_c", script)
@@ -476,22 +542,39 @@ class ViewerTests(unittest.TestCase):
             )
             self.assertIn("function drawActualMeshWireframe", script)
             self.assertIn('id="show-mesh"', html)
+            self.assertIn('id="show-temperature-legend"', html)
+            self.assertIn('id="show-velocity-legend"', html)
+            self.assertNotIn('id="show-legend"', html)
             self.assertIn("배터리 최고 온도 상승", script)
             self.assertIn("표준 − 정밀", script)
             self.assertIn("각 계산에 사용된 실제 polyMesh", script)
             self.assertIn("const groups=new Map()", script)
             self.assertNotIn("function eraseOverlayInsideCells", script)
-            self.assertNotIn(
-                'if(visibility.flow&&visualMode==="combined")drawFlow', script
-            )
+            self.assertIn('if(visualMode==="combined")drawFlow', script)
             self.assertIn(
-                'if(["combined","velocity-streamlines"].includes(visualMode))drawFlow',
-                script,
+                'if(visualMode==="velocity-streamlines")drawFlow', script
             )
-            self.assertIn('ctx.strokeStyle="rgba(100,123,237,.72)"', script)
+            self.assertIn("function rayHitsCell", script)
+            self.assertIn("function flowPointOccluded", script)
+            self.assertIn("if(flowPointOccluded(midpoint,basis))continue", script)
+            self.assertIn("if(flowPointOccluded(sample.point,basis))continue", script)
+            self.assertNotIn('globalCompositeOperation="destination-out"', script)
+            self.assertIn('ctx.strokeStyle=`rgba(${r},${g},${bColor},.86)`', script)
+            self.assertIn('"velocity-legend","left"', script)
+            self.assertIn('"temperature-legend","right"', script)
+            self.assertIn("function sharedTemperatureRange", script)
+            self.assertIn("return [19.000,21.044]", script)
+            self.assertIn('preferredIntervals=unit==="C"?10:9', script)
+            self.assertIn("const activeGeometry=(model.geometry_by_mesh||{})", script)
+            self.assertIn('visibility.temperatureLegend', script)
+            self.assertIn('visibility.velocityLegend', script)
+            self.assertIn('smoothSectionInput.checked?thermalFaceGradient', script)
             self.assertNotIn('ctx.strokeStyle="rgba(4,12,31,.78)"', script)
             self.assertNotIn('ctx.strokeStyle="rgba(139,174,255,.94)"', script)
             self.assertIn("const sectionRasterCache=new WeakMap()", script)
+            self.assertIn("const flipRow=section.row_step_mm[1]<0", script)
+            self.assertIn("const flipColumn=section.column_step_mm[0]>0", script)
+            self.assertIn("model.spatial_transform_by_mesh", script)
             self.assertIn("Math.sqrt(3200000/cssPixels)", script)
             self.assertIn("const overlayTargetFps=90", script)
             self.assertIn(
@@ -539,10 +622,22 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("showCellNotification", script)
             self.assertIn('6:"xy-temperature"', script)
             self.assertIn('11:"xy-velocity"', script)
-            self.assertIn('const intervals=unit==="C"?18:9', script)
-            self.assertIn("PAPER REF", script)
+            self.assertIn('preferredIntervals=unit==="C"?10:9', script)
+            self.assertIn('Math.floor(height/Math.max(18,tickFontPx*1.7))', script)
+            self.assertNotIn("PAPER REF", script)
             self.assertIn("requestAnimationFrame(animate)", script)
+            self.assertIn("let yaw = -0.96, pitch = 0.52", script)
             self.assertFalse(model["interactive_cfd"]["enabled"])
+
+    def test_imported_cad_result_does_not_show_baseline_drawings(self) -> None:
+        config = load_config(BASELINE)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            write_viewer_bundle(config, output, include_reference_cad=False)
+            self.assertFalse((output / "cad/index.html").exists())
+            html = (output / "results.html").read_text(encoding="utf-8")
+            self.assertIn('id="cad-tab" href="cad/index.html" hidden', html)
+            self.assertIn('"reference_cad_ready": false', (output / "offline-data.js").read_text(encoding="utf-8"))
 
     def test_ppt_bernardi_heat_range_is_exposed_to_the_ui(self) -> None:
         config = load_config(

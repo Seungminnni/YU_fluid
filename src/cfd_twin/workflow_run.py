@@ -31,9 +31,17 @@ SOURCE_ROOT = Path(__file__).resolve().parents[2]
 BASE_CONFIG = SOURCE_ROOT / "configs/baseline_23cell.yaml"
 THERMAL_OVERLAY = SOURCE_ROOT / "configs/ppt_bernardi_udf.yaml"
 TOKEN_RE = re.compile(r"^[0-9a-f]{64}\.(?:step|stp)$")
-# The completed 849k baseline currently occupies about 41 GiB. Leave enough
-# headroom for a comparable isolated case and a safety margin before launch.
+# Reserve enough free space for one isolated CFD case and its publication.
 MIN_FREE_GIB = 55
+
+
+class RunCancelled(CfdTwinError):
+    """A user requested that this isolated CFD job stop without publication."""
+
+
+def _check_cancel(cancel_path: Path | None) -> None:
+    if cancel_path is not None and cancel_path.is_file():
+        raise RunCancelled("사용자 요청으로 계산을 중지했습니다. 부분 결과는 작업 폴더에 남겨뒀습니다.")
 
 
 def _lock_solver_file(stream: object) -> None:
@@ -65,33 +73,84 @@ def _worker_process_options(platform_name: str | None = None) -> dict[str, objec
     return {"start_new_session": True}
 
 
-def _compose_service(case: Path, service: str, output: object, *, environment: dict[str, str] | None = None) -> int:
+def _compose_service(
+    case: Path, service: str, output: object, *, environment: dict[str, str] | None = None,
+    cancel_path: Path | None = None,
+) -> int:
+    _check_cancel(cancel_path)
     docker = _docker_command()
     if docker is None:
         raise CfdTwinError("Docker Desktop CLI가 없어 실제 CFD 단계를 실행할 수 없습니다.")
-    return subprocess.run(
-        [docker, "compose", "-f", str(case / "compose.yaml"), "run", "--rm", "--build", service],
-        cwd=case, env=environment, stdout=output, stderr=subprocess.STDOUT, check=False,
-    ).returncode
+    command = [docker, "compose", "-f", str(case / "compose.yaml"), "run", "--rm", "--build"]
+    if cancel_path is None:
+        return subprocess.run(
+            [*command, service], cwd=case, env=environment,
+            stdout=output, stderr=subprocess.STDOUT, check=False,
+        ).returncode
+
+    # A unique container name lets cancellation target this job, never a
+    # baseline run or a different Docker Compose project on the same host.
+    container = f"cfd-twin-{cancel_path.parent.name[:12]}-{uuid.uuid4().hex[:8]}"
+    process = subprocess.Popen(
+        [*command, "--name", container, service], cwd=case, env=environment,
+        stdout=output, stderr=subprocess.STDOUT,
+    )
+    while True:
+        try:
+            result = process.wait(timeout=0.5)
+            _check_cancel(cancel_path)
+            return result
+        except subprocess.TimeoutExpired:
+            if not cancel_path.is_file():
+                continue
+            # Stop only the container started for this particular service. If
+            # Docker is still building, terminate its client below instead.
+            try:
+                subprocess.run(
+                    [docker, "stop", "--time", "10", container],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=20,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            # Handles a container created just after the first stop attempt.
+            try:
+                subprocess.run(
+                    [docker, "rm", "-f", container],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=20,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            _check_cancel(cancel_path)
 
 
-def _run_steady_stages(case: Path, output: object) -> None:
+def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None = None) -> None:
     """Run S0/S1 with the same measured, bounded gate on Mac and Windows."""
 
     for stage, run_name, pilot, continuation, report_name, env_name in (
         ("cold", "steady_cold_flow", "cold-flow-pilot", "cold-flow-continue", "cold_flow_validation.json", "COLD_FLOW_ADDITIONAL_ITERATIONS"),
         ("cht", "steady_cht", "steady-pilot", "steady-continue", "steady_cht_validation.json", "STEADY_ADDITIONAL_ITERATIONS"),
     ):
+        _check_cancel(cancel_path)
         run_dir = case / "runs" / run_name
         report_path = run_dir / "reports/solver" / report_name
         decision_path = run_dir / "reports/solver/convergence_decision.json"
         if not run_dir.exists():
-            status = _compose_service(case, pilot, output)
+            status = _compose_service(case, pilot, output, **({"cancel_path": cancel_path} if cancel_path else {}))
             if status and not report_path.is_file():
                 raise CfdTwinError(f"{run_name}: solver stopped without validation report")
         elif not report_path.is_file():
             raise CfdTwinError(f"{run_name}: existing run has no validation report")
         while True:
+            _check_cancel(cancel_path)
             decision = continuation_decision(_read_json(report_path), stage=stage)
             _write_json(decision_path, decision)
             if decision["action"] == "pass":
@@ -100,7 +159,10 @@ def _run_steady_stages(case: Path, output: object) -> None:
                 raise CfdTwinError(f"{run_name}: {decision.get('reason', 'non-retryable gate failure')}")
             environment = os.environ.copy()
             environment[env_name] = str(decision["additional_iterations"])
-            status = _compose_service(case, continuation, output, environment=environment)
+            status = _compose_service(
+                case, continuation, output, environment=environment,
+                **({"cancel_path": cancel_path} if cancel_path else {}),
+            )
             current = _read_json(report_path).get("final_iteration")
             if status and not report_path.is_file():
                 raise CfdTwinError(f"{run_name}: continuation failed with {status}")
@@ -170,7 +232,7 @@ def _operating_inputs(raw: object) -> dict[str, object]:
         "inlet_temperature_k": (250.0, 370.0),
         "inlet_velocity_m_s": (0.001, 5.0),
         "outlet_pressure_pa": (50_000.0, 300_000.0),
-        "mesh_target_cells": (700_000.0, 900_000.0),
+        "mesh_target_cells": (600_000.0, 900_000.0),
     }
     values: dict[str, object] = {"coolant": "deionized_water"}
     for name, (lower, upper) in ranges.items():
@@ -181,8 +243,8 @@ def _operating_inputs(raw: object) -> dict[str, object]:
         if not math.isfinite(value) or not lower <= value <= upper:
             raise ValueError(f"{name}: 허용 범위 {lower:g}–{upper:g} 밖입니다.")
         values[name] = int(value) if name == "mesh_target_cells" and value.is_integer() else value
-    if values["mesh_target_cells"] not in {700_000, 800_000}:
-        raise ValueError("메시 등급은 검증된 70만급 또는 80만급 중 하나여야 합니다.")
+    if values["mesh_target_cells"] not in {600_000, 700_000, 800_000}:
+        raise ValueError("메시 등급은 60만급, 70만급 또는 80만급 중 하나여야 합니다.")
     return values
 
 
@@ -196,18 +258,48 @@ def _operation_overrides(inputs: dict[str, object]) -> tuple[str, ...]:
     )
 
 
-def prepare_imported_run(root: Path, selected: object, raw_inputs: object) -> dict[str, object]:
-    files = _source_files(root, selected)
+def prepare_solver_inputs(root: Path, raw_inputs: object) -> dict[str, object]:
+    """Validate operating inputs and storage before any expensive CAD work."""
+
     inputs = _operating_inputs(raw_inputs)
-    base = load_config(BASE_CONFIG, overlay_paths=(THERMAL_OVERLAY,))
+    free_gib = shutil.disk_usage(root).free / 1024**3
+    return {
+        "inputs": inputs,
+        "disk_free_gib": round(free_gib, 1),
+        "disk_minimum_gib": MIN_FREE_GIB,
+        "can_start_new_solver": free_gib >= MIN_FREE_GIB,
+    }
+
+
+def _validated_geometry_overrides(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or not all(
+        isinstance(item, str) and 0 < len(item) <= 4096 for item in value
+    ):
+        raise ValueError("형상 설정 재현 정보가 올바르지 않습니다.")
+    return tuple(value)
+
+
+def prepare_imported_run(
+    root: Path, selected: object, raw_inputs: object, *,
+    geometry_overrides: object = None,
+) -> dict[str, object]:
+    files = _source_files(root, selected)
+    preflight = prepare_solver_inputs(root, raw_inputs)
+    inputs = preflight["inputs"]
+    overrides = _validated_geometry_overrides(geometry_overrides)
+    base = load_config(
+        BASE_CONFIG, overlay_paths=(THERMAL_OVERLAY,), overrides=overrides,
+    )
     geometry = inspect_imported_steps(files, base)
     identity = {
         "files": {role: files[role].name for role in STEP_ROLES},
         "inputs": inputs,
         "geometry": geometry,
+        "geometry_overrides": list(overrides),
     }
     confirmation = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    free_gib = shutil.disk_usage(root).free / 1024**3
     return {
         "status": "READY_FOR_EXPLICIT_CONFIRMATION",
         "confirmation": confirmation,
@@ -215,16 +307,21 @@ def prepare_imported_run(root: Path, selected: object, raw_inputs: object) -> di
         "inputs": inputs,
         "scope": "same 23-cell tank/battery family; changed circular top/bottom ports supported",
         "mesh_note": f"{inputs['mesh_target_cells']//1000}k-calibrated profile; actual count and quality must pass after meshing",
-        "disk_free_gib": round(free_gib, 1),
-        "disk_minimum_gib": MIN_FREE_GIB,
-        "can_start_new_solver": free_gib >= MIN_FREE_GIB,
+        "disk_free_gib": preflight["disk_free_gib"],
+        "disk_minimum_gib": preflight["disk_minimum_gib"],
+        "can_start_new_solver": preflight["can_start_new_solver"],
     }
 
 
 def create_imported_run(
-    root: Path, selected: object, raw_inputs: object, confirmation: str
+    root: Path, selected: object, raw_inputs: object, confirmation: str, *,
+    geometry_overrides: object = None,
+    source_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    prepared = prepare_imported_run(root, selected, raw_inputs)
+    overrides = _validated_geometry_overrides(geometry_overrides)
+    prepared = prepare_imported_run(
+        root, selected, raw_inputs, geometry_overrides=overrides,
+    )
     if confirmation != prepared["confirmation"]:
         raise ValueError("CAD 또는 입력값이 확인 화면 이후 변경됐습니다. 다시 확인하십시오.")
     if not prepared["can_start_new_solver"]:
@@ -243,7 +340,10 @@ def create_imported_run(
         "inputs": prepared["inputs"],
         "confirmation": confirmation,
         "geometry": prepared["geometry"],
+        "geometry_overrides": list(overrides),
     }
+    if source_metadata:
+        manifest["source"] = source_metadata
     _write_json(job_dir / "job.json", manifest)
     _write_json(job_dir / "status.json", {"status": "queued", "stage": "cad", "message": "검증된 STEP에서 계산 케이스를 준비합니다."})
     with (job_dir / "worker.log").open("ab") as output:
@@ -262,8 +362,23 @@ def imported_run_status(root: Path, run_id: str) -> dict[str, object]:
     if not (job_dir / "job.json").is_file():
         raise ValueError("실행을 찾을 수 없습니다.")
     status = _read_json(job_dir / "status.json")
+    if (job_dir / "cancel.request").is_file() and status.get("status") in {"queued", "running"}:
+        status["status"] = "stopping"
+        status["message"] = "중지 요청을 받았습니다. 현재 작업을 안전하게 종료하고 있습니다."
     status["id"] = run_id
     status["viewer_url"] = f"/runs/{run_id}/viewer/results.html" if status.get("status") == "complete" else None
+    if status.get("status") == "failed":
+        layer_report = _read_json(job_dir / "case/reports/production_mesh/layer_coverage.json")
+        layer_error = layer_report.get("error")
+        if isinstance(layer_error, str) and layer_error:
+            compressed_owner = job_dir / "case/constant/polyMesh/owner.gz"
+            if "polyMesh/owner'" in layer_error and compressed_owner.is_file():
+                status["diagnostic"] = (
+                    "메시 생성 후 격자가 압축된 owner.gz로 저장됐지만 검증기가 "
+                    "비압축 owner 파일을 찾았습니다. 메시 품질 합격 여부는 아직 확인 전입니다."
+                )
+            else:
+                status["diagnostic"] = f"메시 검증 오류: {layer_error}"
     if (job_dir / "case").is_dir():
         # Read-only progress from the same validated reports/logs as the
         # baseline portal. Never manufacture a mesh/solver percentage.
@@ -271,6 +386,20 @@ def imported_run_status(root: Path, run_id: str) -> dict[str, object]:
 
         status["progress"] = workflow_status(job_dir / "case", job_dir / "cad", job_dir / "viewer")
     return status
+
+
+def request_imported_run_cancel(root: Path, run_id: str) -> dict[str, object]:
+    """Request cooperative cancellation of one known, unfinished job."""
+
+    current = imported_run_status(root, run_id)
+    if current.get("status") in {"queued", "running", "stopping"}:
+        marker = root / "runs" / run_id / "cancel.request"
+        try:
+            with marker.open("xb") as stream:
+                stream.write(b"user requested stop\n")
+        except FileExistsError:
+            pass
+    return imported_run_status(root, run_id)
 
 
 def _gate(path: Path, expected: str) -> None:
@@ -284,12 +413,16 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
 
     job = _read_json(job_dir / "job.json")
     files = {role: Path(job["files"][role]) for role in STEP_ROLES}
-    imported = import_step_bundle(files, BASE_CONFIG, THERMAL_OVERLAY, job_dir / "cad")
+    base_overrides = _validated_geometry_overrides(job.get("geometry_overrides"))
+    imported = import_step_bundle(
+        files, BASE_CONFIG, THERMAL_OVERLAY, job_dir / "cad",
+        base_overrides=base_overrides,
+    )
     inputs = job["inputs"]
     geometry_overrides = imported_config_overrides(imported["report"])
     config = load_config(
         BASE_CONFIG, overlay_paths=(THERMAL_OVERLAY,),
-        overrides=geometry_overrides + _operation_overrides(inputs),
+        overrides=base_overrides + geometry_overrides + _operation_overrides(inputs),
     )
     case = job_dir / "case"
     profile = f"production_{inputs['mesh_target_cells']//1000}k"
@@ -300,16 +433,20 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
 
 def run_imported_case(job_manifest: Path) -> None:
     job_dir = job_manifest.resolve().parent
+    cancel_path = job_dir / "cancel.request"
     root = job_dir.parent.parent
     lock_path = root / "active_solver.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    current_stage = "cad"
 
     def update(status: str, stage: str, message: str) -> None:
         _write_json(job_dir / "status.json", {"status": status, "stage": stage, "message": message, "pid": os.getpid()})
 
     try:
+        _check_cancel(cancel_path)
         update("running", "cad", "STEP 형상과 입·출구를 검증하고 STL로 내보내는 중")
         built = build_imported_case(job_dir)
+        _check_cancel(cancel_path)
         case, config = built["case"], built["config"]
         with lock_path.open("a+b") as lock:
             try:
@@ -322,18 +459,27 @@ def run_imported_case(job_manifest: Path) -> None:
                 ("transient", "frozen-flow-actual-1s", "1초 간격 S2 동적 발열 계산"),
             )
             for stage, service, message in stages:
+                _check_cancel(cancel_path)
+                current_stage = stage
                 update("running", stage, message)
                 environment = os.environ.copy()
                 if stage == "transient":
                     environment.update(TRANSIENT_DELTA_T="1", ENERGY_COUPLING_ITERATIONS="200")
                 with (job_dir / "worker.log").open("ab") as output:
                     if stage == "steady":
-                        _run_steady_stages(case, output)
+                        _run_steady_stages(case, output, cancel_path=cancel_path)
                         result_code = 0
                     else:
-                        result_code = _compose_service(case, service, output, environment=environment)
+                        result_code = _compose_service(
+                            case, service, output, environment=environment,
+                            cancel_path=cancel_path,
+                        )
+                _check_cancel(cancel_path)
                 if result_code:
-                    raise CfdTwinError(f"{stage}: {service} exited with {result_code}; worker.log 참조")
+                    detail = _read_json(case / "reports/production_mesh/layer_coverage.json") if stage == "mesh" else {}
+                    reason = detail.get("error") if detail.get("status") == "LAYER_VALIDATION_FAILED" else None
+                    suffix = f"; {reason}" if reason else "; worker.log 참조"
+                    raise CfdTwinError(f"{stage}: {service} exited with {result_code}{suffix}")
                 if stage == "mesh":
                     _gate(case / "reports/production_mesh/production_mesh_gate.json", "PRODUCTION_MESH_GATE_PASSED")
                     composition = _read_json(case / "reports/production_mesh/mesh_target_composition.json")
@@ -348,11 +494,39 @@ def run_imported_case(job_manifest: Path) -> None:
                 if stage == "transient":
                     _gate(case / "runs/frozen_flow_actual_1s/reports/solver/frozen_flow_validation.json", "FROZEN_FLOW_VALIDATION_PASSED")
                     _gate(case / "runs/frozen_flow_actual_1s/reports/solver/energy_balance.json", "TRANSIENT_ENERGY_BALANCE_PASSED")
+            _check_cancel(cancel_path)
+            current_stage = "publish"
             update("running", "publish", "검증된 결과를 3D 뷰어에 연결 중")
-            publish_completed_run(case, job_dir / "viewer", config=config)
-            update("complete", "publish", "메시·S0·S1·S2·후처리 검증을 통과했습니다. 단일 메시 검토용 결과입니다.")
+            publish_completed_run(case, job_dir / "viewer", config=config, include_reference_cad=False)
+            _check_cancel(cancel_path)
+            current_stage = "release"
+            update("running", "release", "서버 뷰어와 오프라인 데모 ZIP을 함께 갱신 중")
+            try:
+                from .mesh_viewer import write_mesh_only_viewer
+                from .viewer_release import publish_experiment_and_demo
+
+                write_mesh_only_viewer(case, job_dir / "viewer")
+                project_root = Path(__file__).resolve().parents[2]
+                publish_experiment_and_demo(
+                    project_root / "viewer",
+                    project_root / "YU_fluid_데모.zip",
+                    source_viewer=job_dir / "viewer",
+                    run_id=f"run_{job_dir.name}",
+                )
+            except Exception as exc:
+                _write_json(job_dir / "status.json", {
+                    "status": "complete",
+                    "stage": "release",
+                    "message": "CFD 계산·검증은 완료됐지만 서버/ZIP 동시 배포에 실패했습니다.",
+                    "release_error": str(exc),
+                    "pid": os.getpid(),
+                })
+                return
+            update("complete", "release", "CFD 검증 완료 · 서버 뷰어와 데모 ZIP 동시 갱신 완료")
+    except RunCancelled as exc:
+        update("cancelled", "stopped", str(exc))
     except Exception as exc:
-        update("failed", "validation", str(exc))
+        update("failed", current_stage, str(exc))
         raise
 
 

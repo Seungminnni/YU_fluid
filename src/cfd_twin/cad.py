@@ -24,10 +24,12 @@ def _cad_model(config: ResolvedConfig) -> dict[str, object]:
     report = geometry_report(config)
     cell_radius_mm = config.cells.diameter_m * 500
     cell_length_mm = config.cells.length_m * 1000
-    port_radius_mm = config.ports.inlet_diameter_m * 500
+    inlet_radius_mm = config.ports.inlet_diameter_m * 500
+    outlet_radius_mm = config.ports.outlet_diameter_m * 500
     port_length_mm = config.ports.external_length_m * 1000
     cell_volume_mm3 = math.pi * cell_radius_mm**2 * cell_length_mm
-    port_volume_mm3 = math.pi * port_radius_mm**2 * port_length_mm
+    inlet_volume_mm3 = math.pi * inlet_radius_mm**2 * port_length_mm
+    outlet_volume_mm3 = math.pi * outlet_radius_mm**2 * port_length_mm
     enclosure_volume_mm3 = report["enclosure_profile"]["gross_extruded_volume_m3"] * 1e9
     return {
         "units": "mm",
@@ -42,7 +44,11 @@ def _cad_model(config: ResolvedConfig) -> dict[str, object]:
             for item in placements
         ],
         "ports": {
+            # ``diameter_mm`` is retained for old manifests. New CAD scripts
+            # always use the independent inlet/outlet values below.
             "diameter_mm": config.ports.inlet_diameter_m * 1000,
+            "inlet_diameter_mm": config.ports.inlet_diameter_m * 1000,
+            "outlet_diameter_mm": config.ports.outlet_diameter_m * 1000,
             "external_length_mm": config.ports.external_length_m * 1000,
             "inlet": {
                 "face": config.ports.inlet_face,
@@ -57,11 +63,11 @@ def _cad_model(config: ResolvedConfig) -> dict[str, object]:
         "geometry_sha256": config.geometry_sha256,
         "resolved_input_sha256": config.resolved_input_sha256,
         "expected": {
-            "outer_with_ports_volume_mm3": enclosure_volume_mm3 + 2 * port_volume_mm3,
+            "outer_with_ports_volume_mm3": enclosure_volume_mm3 + inlet_volume_mm3 + outlet_volume_mm3,
             "battery_total_volume_mm3": config.cells.count * cell_volume_mm3,
-            "coolant_volume_mm3": enclosure_volume_mm3 + 2 * port_volume_mm3 - config.cells.count * cell_volume_mm3,
-            "inlet_area_mm2": math.pi * port_radius_mm**2,
-            "outlet_area_mm2": math.pi * port_radius_mm**2,
+            "coolant_volume_mm3": enclosure_volume_mm3 + inlet_volume_mm3 + outlet_volume_mm3 - config.cells.count * cell_volume_mm3,
+            "inlet_area_mm2": math.pi * inlet_radius_mm**2,
+            "outlet_area_mm2": math.pi * outlet_radius_mm**2,
             "battery_interface_area_mm2": config.cells.count
             * (2 * math.pi * cell_radius_mm * cell_length_mm + 2 * math.pi * cell_radius_mm**2),
         },
@@ -91,21 +97,35 @@ height = MODEL["height_mm"]
 cell_radius = MODEL["cell_diameter_mm"] / 2
 cell_length = MODEL["cell_length_mm"]
 cell_base_z = MODEL["cell_base_z_mm"]
-port_radius = MODEL["ports"]["diameter_mm"] / 2
+inlet_radius = MODEL["ports"]["inlet_diameter_mm"] / 2
+outlet_radius = MODEL["ports"]["outlet_diameter_mm"] / 2
 port_length = MODEL["ports"]["external_length_mm"]
 
 # 22점 상면을 z 방향으로 압출하고 상·하 원형 포트를 합쳐 외부 용기를 만든다.
 enclosure = cq.Workplane("XY").polyline(outline).close().extrude(height)
 inlet_x, inlet_y = MODEL["ports"]["inlet"]["center_xy_mm"]
 outlet_x, outlet_y = MODEL["ports"]["outlet"]["center_xy_mm"]
-inlet = (
-    cq.Workplane("XY", origin=(0, 0, height))
-    .center(inlet_x, inlet_y).circle(port_radius).extrude(port_length)
-)
-outlet = (
-    cq.Workplane("XY").center(outlet_x, outlet_y)
-    .circle(port_radius).extrude(-port_length)
-)
+def build_port(port, radius):
+    face = port["face"]
+    if face == "top":
+        origin_z = height
+        extrusion = port_length
+        end_z = height + port_length
+    elif face == "bottom":
+        origin_z = 0
+        extrusion = -port_length
+        end_z = -port_length
+    else:
+        raise ValueError(f"unsupported port face: {{face}}")
+    center_x, center_y = port["center_xy_mm"]
+    solid = (
+        cq.Workplane("XY", origin=(0, 0, origin_z))
+        .center(center_x, center_y).circle(radius).extrude(extrusion)
+    )
+    return solid, end_z
+
+inlet, inlet_end_z = build_port(MODEL["ports"]["inlet"], inlet_radius)
+outlet, outlet_end_z = build_port(MODEL["ports"]["outlet"], outlet_radius)
 outer_with_ports = enclosure.union(inlet).union(outlet)
 
 # 냉각수 영역 = 포트를 포함한 탱크 체적 - 23개 배터리 원통 체적.
@@ -122,8 +142,6 @@ for cell in MODEL["cells"]:
 
 cells_compound = cq.Compound.makeCompound(cell_solids)
 outer_faces = outer_with_ports.faces().vals()
-inlet_end_z = height + port_length
-outlet_end_z = -port_length
 inlet_end_faces = [face for face in outer_faces if abs(face.Center().z - inlet_end_z) <= 1e-7]
 outlet_end_faces = [face for face in outer_faces if abs(face.Center().z - outlet_end_z) <= 1e-7]
 end_face_hashes = {{face.hashCode() for face in inlet_end_faces + outlet_end_faces}}
@@ -218,6 +236,11 @@ result = {{
     "geometry_sha256": MODEL["geometry_sha256"],
     "cad_geometry_checks_passed": True,
     "production_mesh_ready": False,
+    "port_centers_xy_mm": {{
+        "inlet": MODEL["ports"]["inlet"]["center_xy_mm"],
+        "outlet": MODEL["ports"]["outlet"]["center_xy_mm"],
+    }},
+    "port_placement_source": MODEL["ports"]["source"],
     "checks": checks,
     "measured": measured,
     "expected": MODEL["expected"],
@@ -272,6 +295,13 @@ def write_cad_source_bundle(config: ResolvedConfig, output_dir: str | Path) -> d
         "resolved_input_sha256": config.resolved_input_sha256,
         "cell_count": config.cells.count,
         "port_diameter_mm": config.ports.inlet_diameter_m * 1000,
+        "inlet_diameter_mm": config.ports.inlet_diameter_m * 1000,
+        "outlet_diameter_mm": config.ports.outlet_diameter_m * 1000,
+        "port_centers_xy_mm": {
+            "inlet": [value * 1000 for value in config.ports.inlet_center_xy_m],
+            "outlet": [value * 1000 for value in config.ports.outlet_center_xy_m],
+        },
+        "port_placement": config.ports.placement,
         "enclosure_profile": config.enclosure.profile,
         "port_source": config.ports.center_source,
         "geometry_definition_ready": True,
@@ -334,7 +364,7 @@ def execute_cad_source(config: ResolvedConfig, output_dir: str | Path) -> dict[s
             "status": result["status"],
             "cad_geometry_checks_passed": result["cad_geometry_checks_passed"],
             "production_cad_ready": True,
-            "nonblocking_assumption": "A-04 baseline port placement; sensitivity profiles remain available",
+            "port_placement_basis": config.ports.center_source,
             "result_file": "cad_result.json",
             "exported_files": result["files"],
         }

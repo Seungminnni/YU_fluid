@@ -1,7 +1,8 @@
-"""Local baseline viewer and explicitly confirmed imported-STEP CFD jobs.
+"""Local viewer, parametric CAD generation, and confirmed STEP-based CFD jobs.
 
-Uploads are inert until the user reviews detected geometry and operating
-conditions, then explicitly starts an isolated mesh/S0/S1/S2 worker.
+Uploads and parametric edits remain inert until the user reviews geometry and
+boundary conditions.  One explicit confirmation then freezes the STEP sources
+and starts the isolated mesh/S0/S1/S2 worker.
 """
 
 from __future__ import annotations
@@ -19,10 +20,18 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .errors import CfdTwinError
+from .parametric_cad import (
+    generate_parametric_cad,
+    parametric_config_overrides,
+    preview_parametric_cad,
+    resolve_parametric_spec,
+)
 from .workflow_run import (
     create_imported_run,
     imported_run_status,
     prepare_imported_run,
+    prepare_solver_inputs,
+    request_imported_run_cancel,
     stage_uploaded_step,
 )
 
@@ -42,6 +51,76 @@ CAD_ROLES = {
     "coolant.step": "냉각수 유체 영역",
     "battery_cells.step": "23개 배터리 고체 영역",
 }
+
+
+def prepare_parametric_run(root: Path, payload: object) -> dict[str, object]:
+    """Validate parametric geometry, boundary inputs, and disk without exporting CAD."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("파라메트릭 계산 입력은 JSON 객체여야 합니다.")
+    preview = preview_parametric_cad(payload.get("parameters"))
+    solver = prepare_solver_inputs(root, payload.get("inputs"))
+    identity = {
+        "parameters": preview["spec"],
+        "geometry_sha256": preview["geometry_sha256"],
+        "inputs": solver["inputs"],
+    }
+    confirmation = hashlib.sha256(
+        json.dumps(identity, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return {
+        **preview, **solver,
+        "status": "READY_FOR_EXPLICIT_CONFIRMATION",
+        "confirmation": confirmation,
+    }
+
+
+def start_parametric_run(root: Path, payload: object) -> dict[str, object]:
+    """Export the confirmed CAD and start the normal real CFD worker."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("파라메트릭 계산 입력은 JSON 객체여야 합니다.")
+    if payload.get("geometry_confirmed") is not True:
+        raise ValueError("검증된 형상·경계 조건을 확인해야 새 계산을 시작할 수 있습니다.")
+    parameters = payload.get("parameters")
+    raw_inputs = payload.get("inputs")
+    preflight = prepare_parametric_run(root, payload)
+    if payload.get("confirmation") != preflight["confirmation"]:
+        raise ValueError("CAD 또는 입력값이 확인 화면 이후 변경됐습니다. 다시 확인하십시오.")
+    if not preflight["can_start_new_solver"]:
+        raise ValueError(
+            f"새 CFD 계산에는 안전 여유를 포함해 최소 {preflight['disk_minimum_gib']} GiB의 "
+            f"빈 공간이 필요합니다. 현재 {preflight['disk_free_gib']} GiB입니다. "
+            "기존 결과는 자동 삭제하지 않습니다."
+        )
+
+    spec = resolve_parametric_spec(parameters)
+    geometry_overrides = parametric_config_overrides(spec)
+    generated = generate_parametric_cad(root, parameters)
+    generation_dir = root / "parametric" / str(generated["id"])
+    selected = {
+        role: stage_uploaded_step(root, role, (generation_dir / role).read_bytes())
+        for role in CAD_ROLES
+    }
+    prepared = prepare_imported_run(
+        root, selected, raw_inputs, geometry_overrides=geometry_overrides,
+    )
+    started = create_imported_run(
+        root, selected, raw_inputs, str(prepared["confirmation"]),
+        geometry_overrides=geometry_overrides,
+        source_metadata={
+            "kind": "parametric_template",
+            "generation_id": generated["id"],
+            "geometry_sha256": generated["geometry_sha256"],
+            "parameters": spec.to_dict(),
+        },
+    )
+    generated.update({
+        "calculation_started": True,
+        "next_stage": "메시 생성",
+        "message": "STEP/STL 생성과 형상 검사가 끝났고 실제 CFD 계산을 대기열에 등록했습니다.",
+    })
+    return {**started, "parametric": generated}
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -143,7 +222,7 @@ def baseline_geometry(cad_dir: Path) -> dict[str, object]:
         "note": (
             "입·출구 구경과 중심을 첨부 STEP에서 검증했습니다."
             if result.get("imported_step") else
-            "포트 중심은 A-04 기준 가정입니다. 업로드된 새 CAD의 포트 위치를 자동 확정하지 않습니다."
+            "기준 형상의 포트 중심을 새 CAD에 자동 적용하지 않습니다. 새 CAD의 포트 위치를 확인해야 합니다."
         ),
     }
 
@@ -161,7 +240,7 @@ def prepare_inputs(value: object, *, run_active: bool) -> dict[str, object]:
         "inlet_temperature_k": (250.0, 370.0),
         "inlet_velocity_m_s": (0.001, 5.0),
         "outlet_pressure_pa": (50_000.0, 300_000.0),
-        "mesh_target_cells": (700_000.0, 900_000.0),
+        "mesh_target_cells": (600_000.0, 900_000.0),
     }
     for key, (lower, upper) in ranges.items():
         try:
@@ -171,8 +250,8 @@ def prepare_inputs(value: object, *, run_active: bool) -> dict[str, object]:
         if not math.isfinite(number) or not lower <= number <= upper:
             raise ValueError(f"{key}: 허용 범위 {lower:g}–{upper:g} 밖입니다.")
         numeric[key] = number
-    if numeric["mesh_target_cells"] not in {700_000, 800_000}:
-        raise ValueError("메시 등급은 검증된 70만급 또는 80만급 중 하나여야 합니다.")
+    if numeric["mesh_target_cells"] not in {600_000, 700_000, 800_000}:
+        raise ValueError("메시 등급은 60만급, 70만급 또는 80만급 중 하나여야 합니다.")
     cad_mode = value.get("cad_mode")
     if cad_mode not in {"baseline", "exact_baseline_upload"}:
         raise ValueError("검증되지 않은 CAD는 아직 계산에 연결할 수 없습니다.")
@@ -196,6 +275,21 @@ def prepare_inputs(value: object, *, run_active: bool) -> dict[str, object]:
 
 
 def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str, object]:
+    published = _read_json(viewer_dir / "four_case_manifest.json")
+    published_runs = published.get("runs", [])
+    published_ready = bool(
+        isinstance(published_runs, list)
+        and published_runs
+        and published.get("status") in {
+            "THREE_CASE_VIEWER_ASSEMBLED",
+            "FOUR_CASE_VIEWER_ASSEMBLED",
+            "MULTI_CASE_VIEWER_ASSEMBLED",
+        }
+        and published.get("solver_validation_passed") is True
+        and published.get("energy_balance_passed") is True
+        and all(isinstance(run, dict) and run.get("data_ready") is True for run in published_runs)
+        and all((viewer_dir / name).is_file() for name in ("index.html", "results.html", "mesh.html", "cad/index.html"))
+    )
     mesh = _read_json(case_dir / "reports/production_mesh/production_mesh_gate.json")
     composition = _read_json(
         case_dir / "reports/production_mesh/mesh_target_composition.json"
@@ -238,8 +332,9 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
     if not isinstance(final_row, dict):
         final_row = {}
     manifest = _read_json(case_dir / "results/result_manifest.json")
+    published_only = published_ready and not manifest
     postprocess = _read_json(case_dir / "reports/workflow_postprocess.json")
-    viewer_ready = (
+    base_viewer_ready = (
         viewer_dir.joinpath("index.html").is_file()
         and viewer_dir.joinpath("results.html").is_file()
         and manifest.get("data_status")
@@ -251,20 +346,92 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
             or postprocess.get("stage") == "complete"
         )
     )
+    comparison = _read_json(case_dir / "comparison_manifest.json")
+
+    def comparison_slot(run: object) -> dict[str, object]:
+        if not isinstance(run, dict):
+            return {"name": "비교 결과", "ready": False}
+        run_id = str(run.get("id", ""))
+        run_case = case_dir if run_id == "precision" else case_dir / "production/single"
+        validation = _read_json(
+            run_case / "runs/frozen_flow_actual_1s/reports/solver/frozen_flow_validation.json"
+        )
+        energy = _read_json(
+            run_case / "runs/frozen_flow_actual_1s/reports/solver/energy_balance.json"
+        )
+        result_manifest = _read_json(run_case / "results/result_manifest.json")
+        summary = validation.get("final_summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        rows = validation.get("final_window_rows", [])
+        row = rows[-1] if isinstance(rows, list) and rows else {}
+        if not isinstance(row, dict):
+            row = {}
+        ready = (
+            str(validation.get("status", "")).endswith("_PASSED")
+            and energy.get("status") == "TRANSIENT_ENERGY_BALANCE_PASSED"
+            and result_manifest.get("actual_solver_data") is True
+            and str(result_manifest.get("validation_status", "")).endswith("_PASSED")
+        )
+        return {
+            "name": run.get("label", "비교 결과"),
+            "name_en": run.get("label_en", "Comparison Result"),
+            "ready": ready,
+            "battery_tmax_k": summary.get("battery_tmax_k") if ready else None,
+            "outlet_temperature_k": (
+                row.get("outlet_mass_weighted_temperature_k") if ready else None
+            ),
+        }
+
+    comparison_slots = [
+        comparison_slot(run) for run in comparison.get("runs", [])
+    ] if isinstance(comparison.get("runs"), list) else []
+    comparison_mode = len(comparison_slots) == 2 and not published_only
+    viewer_ready = (
+        published_ready or (
+        base_viewer_ready
+        and (
+            not comparison_mode
+            or (
+                comparison.get("status") == "COMPARISON_RESULTS_READY"
+                and all(bool(slot.get("ready")) for slot in comparison_slots)
+            )
+        )
+        )
+    )
     actual = composition.get("actual", {})
     if not isinstance(actual, dict):
         actual = {}
+    if published_only:
+        first_run = published_runs[0]
+        actual = {"total_cells": first_run.get("cells")}
+        time_s = END_TIME_S
+        clean_end = True
+        transient_passed = True
+        energy_passed = True
+        final_summary = {"battery_tmax_k": first_run.get("battery_tmax_k")}
+        final_row = {"outlet_mass_weighted_temperature_k": first_run.get("outlet_temperature_k")}
     stages = [
         {"id": "cad", "label": "CAD 확인", "status": "passed" if baseline_geometry(cad_dir)["verified"] else "pending"},
-        {"id": "mesh", "label": "메시 생성·품질", "status": "passed" if mesh.get("status") == "PRODUCTION_MESH_GATE_PASSED" else "pending"},
-        {"id": "cold_flow", "label": "S0 냉간 유동", "status": "passed" if cold.get("status") == "COLD_FLOW_VALIDATION_PASSED" else "pending"},
-        {"id": "steady_cht", "label": "S1 정상 CHT", "status": "passed" if steady.get("status") == "STEADY_CHT_VALIDATION_PASSED" else "pending"},
+        {"id": "mesh", "label": "메시 생성·품질", "status": "passed" if published_only or mesh.get("status") == "PRODUCTION_MESH_GATE_PASSED" else "pending"},
+        {"id": "cold_flow", "label": "S0 냉간 유동", "status": "passed" if published_only or cold.get("status") == "COLD_FLOW_VALIDATION_PASSED" else "pending"},
+        {"id": "steady_cht", "label": "S1 정상 CHT", "status": "passed" if published_only or steady.get("status") == "STEADY_CHT_VALIDATION_PASSED" else "pending"},
         {"id": "transient", "label": "S2 과도 열해석", "status": "passed" if transient_passed else "needs_check" if clean_end and time_s is not None else "running" if log_recent and time_s is not None else "needs_check" if time_s is not None else "pending"},
         {"id": "publish", "label": "결과 후처리·3D 뷰어", "status": "passed" if viewer_ready else "pending"},
     ]
-    adaptive_trial = manifest.get("execution_variant") == "adaptive_energy_coupling_trial"
+    published_slots = [
+        {
+            "id": run["id"],
+            "name": run.get("label", run["id"]),
+            "name_en": run.get("label_en", run.get("label", run["id"])),
+            "ready": True,
+            "battery_tmax_k": run.get("battery_tmax_k"),
+            "outlet_temperature_k": run.get("outlet_temperature_k"),
+        }
+        for run in published_runs
+    ] if published_only else []
     return {
-        "case_name": case_dir.name,
+        "case_name": "published_cfd_results" if published_only else case_dir.name,
         "mesh_cells": actual.get("total_cells"),
         "stages": stages,
         "transient": {
@@ -280,9 +447,15 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
             "log_age_s": log_age_s,
             "solver_clean_end": clean_end,
             "validation_status": transient_report.get("status"),
-            "note": "퍼센트는 완료 물리시간 비율이며 수렴률이나 남은 시간 예측이 아닙니다.",
+            "note": (
+                "보존된 검증 결과의 최종 물리시간입니다. 현재 솔버가 실행 중이라는 뜻은 아닙니다."
+                if published_only else
+                "퍼센트는 완료 물리시간 비율이며 수렴률이나 남은 시간 예측이 아닙니다."
+            ),
         },
         "viewer_ready": viewer_ready,
+        "comparison_mode": comparison_mode,
+        "reference_cad_ready": viewer_ready and viewer_dir.joinpath("cad/index.html").is_file(),
         "postprocess": postprocess,
         "result_summary": {
             "solver_validation_passed": transient_passed,
@@ -299,25 +472,33 @@ def workflow_status(case_dir: Path, cad_dir: Path, viewer_dir: Path) -> dict[str
                 "publication_results_authorized", False
             ),
         },
-        "result_slots": [
-            {"name": "적응형 84.9만셀 결과" if adaptive_trial else "현재 84.9만셀 결과", "ready": viewer_ready,
+        "result_slots": published_slots if published_only else comparison_slots if comparison_mode else [
+            {"name": "현재 계산 결과", "name_en": "Current Calculation", "ready": viewer_ready,
              "battery_tmax_k": final_summary.get("battery_tmax_k") if transient_passed else None,
              "outlet_temperature_k": final_row.get("outlet_mass_weighted_temperature_k") if transient_passed else None},
-            {"name": "비교 결과 2", "ready": False},
-            {"name": "비교 결과 3", "ready": False},
         ],
     }
 
 
 def serve_workflow(
-    *, case_dir: Path, cad_dir: Path, viewer_dir: Path, port: int = 8765
+    *,
+    case_dir: Path,
+    cad_dir: Path,
+    viewer_dir: Path,
+    imported_root: Path | None = None,
+    port: int = 8765,
 ) -> None:
     """Serve baseline status and user-confirmed isolated CAD jobs on loopback."""
 
     case_dir, cad_dir, viewer_dir = (
         case_dir.resolve(), cad_dir.resolve(), viewer_dir.resolve()
     )
-    imported_root = case_dir.parent / "imported_runs"
+    imported_root = (
+        imported_root.resolve()
+        if imported_root is not None
+        else case_dir.parent / "imported_runs"
+    )
+    imported_root.mkdir(parents=True, exist_ok=True)
     monitor_stop = threading.Event()
 
     def monitor_completed_run() -> None:
@@ -367,6 +548,15 @@ def serve_workflow(
             content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
+            # Local UI sources change frequently during review. Do not let an
+            # unchanged URL make the browser revive an older interface. Large
+            # content-addressed viewer assets keep their long-lived cache.
+            if re.search(r"\.[0-9a-f]{12}\.(?:js|css)$", target.name):
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            elif target.suffix.lower() in {".html", ".css"} or target.name in {
+                "app.js", "offline-app.js", "i18n.js", "portal.css"
+            }:
+                self.send_header("Cache-Control", "no-store, max-age=0")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -382,10 +572,15 @@ def serve_workflow(
                     self._json(HTTPStatus.OK, imported_run_status(imported_root, path[len("/api/runs/"):]))
                 except ValueError as exc:
                     self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            elif re.fullmatch(r"/parametric/[0-9a-f]{32}/[^/]+", path):
+                _, _, generation_id, filename = path.split("/", 3)
+                self._file(imported_root / "parametric" / generation_id, filename)
             elif path in {"/", "/index.html"}:
                 self._file(ASSETS, "index.html")
-            elif path in {"/app.js", "/style.css"}:
+            elif path in {"/app.js", "/style.css", "/i18n.js", "/cheoma-logo.png"}:
                 self._file(ASSETS, path.lstrip("/"))
+            elif path == "/viewer/i18n.js":
+                self._file(ASSETS, "i18n.js")
             elif path.startswith("/viewer/") and workflow_status(case_dir, cad_dir, viewer_dir)["viewer_ready"]:
                 self._file(viewer_dir, path[len("/viewer/"):])
             elif path.startswith("/runs/"):
@@ -446,18 +641,37 @@ def serve_workflow(
                     result = prepare_imported_run(imported_root, selected, payload)
                     result["files"] = selected
                     result["built_in_baseline"] = True
+                elif path == "/api/parametric/preview":
+                    payload = json.loads(data.decode("utf-8"))
+                    result = preview_parametric_cad(payload)
+                elif path == "/api/parametric/prepare":
+                    payload = json.loads(data.decode("utf-8"))
+                    result = prepare_parametric_run(imported_root, payload)
+                elif path == "/api/parametric/generate":
+                    payload = json.loads(data.decode("utf-8"))
+                    result = generate_parametric_cad(imported_root, payload)
+                elif path == "/api/parametric/start":
+                    payload = json.loads(data.decode("utf-8"))
+                    current = workflow_status(case_dir, cad_dir, viewer_dir)
+                    if any(stage["id"] == "transient" and stage["status"] == "running" for stage in current["stages"]):
+                        raise ValueError("현재 기준 CFD 계산 중입니다. 자원 충돌을 막기 위해 완료 후 새 계산을 시작하십시오.")
+                    result = start_parametric_run(imported_root, payload)
                 elif path == "/api/import/start":
                     payload = json.loads(data.decode("utf-8"))
                     if not isinstance(payload, dict):
                         raise ValueError("입력은 JSON 객체여야 합니다.")
                     if payload.get("geometry_confirmed") is not True:
-                        raise ValueError("검증된 형상·운전 조건을 확인해야 새 계산을 시작할 수 있습니다.")
+                        raise ValueError("검증된 형상·경계 조건을 확인해야 새 계산을 시작할 수 있습니다.")
                     current = workflow_status(case_dir, cad_dir, viewer_dir)
                     if any(stage["id"] == "transient" and stage["status"] == "running" for stage in current["stages"]):
                         raise ValueError("현재 기준 CFD 계산 중입니다. 자원 충돌을 막기 위해 완료 후 새 계산을 시작하십시오.")
                     result = create_imported_run(
                         imported_root, payload.get("files"), payload.get("inputs"),
                         payload.get("confirmation", ""),
+                    )
+                elif re.fullmatch(r"/api/runs/[0-9a-f]{32}/cancel", path):
+                    result = request_imported_run_cancel(
+                        imported_root, path.split("/")[3]
                     )
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)

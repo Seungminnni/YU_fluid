@@ -1,0 +1,12 @@
+# 사용자 확정 상하 반전 CAD · 입출구 모두 Ø19 mm · 600k급 비교 계산.
+geometry:
+  ports:
+    inlet_diameter: "19 mm"
+    outlet_diameter: "19 mm"
+    inlet_face: top
+    outlet_face: bottom
+    inlet_center_xy_mm: [13.6, 15.2]
+    outlet_center_xy_mm: [89.6, 105.2]
+    inlet_column: 1
+    placement: end_cell_center
+    center_source: USER_CONFIRMED_VERTICAL_FLIP_PHI19_600K_20260922

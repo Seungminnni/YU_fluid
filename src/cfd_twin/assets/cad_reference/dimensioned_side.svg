@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="852" height="843"
+     viewBox="0 0 852.200 842.800">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5"
+    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#435d70" /></marker></defs>
+  <rect width="100%" height="100%" fill="white" />
+  <text x="145.000" y="28" font-family="sans-serif" font-size="17"
+    font-weight="700" fill="#17324d">측면도 · X–Z 정투영</text>
+  <rect x="145.000" y="211.600" width="547.200"
+    height="393.600" fill="#f7fbfd" stroke="#111" stroke-width="2.2" />
+  <rect x="164.680" y="245.200" width="91.200" height="326.400" rx="5" fill="#dcecff" stroke="#17324d" stroke-width="1.8" /><line x1="210.280" y1="245.200" x2="210.280" y2="571.600" stroke="#7794ab" stroke-dasharray="6 4" /><text x="210.280" y="403.400" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#17324d">C01–C05</text><text x="210.280" y="418.400" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#516a7e">5 cells</text><rect x="255.880" y="245.200" width="91.200" height="326.400" rx="5" fill="#dcecff" stroke="#17324d" stroke-width="1.8" /><line x1="301.480" y1="245.200" x2="301.480" y2="571.600" stroke="#7794ab" stroke-dasharray="6 4" /><text x="301.480" y="403.400" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#17324d">C06–C09</text><text x="301.480" y="418.400" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#516a7e">4 cells</text><rect x="347.080" y="245.200" width="91.200" height="326.400" rx="5" fill="#dcecff" stroke="#17324d" stroke-width="1.8" /><line x1="392.680" y1="245.200" x2="392.680" y2="571.600" stroke="#7794ab" stroke-dasharray="6 4" /><text x="392.680" y="403.400" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#17324d">C10–C14</text><text x="392.680" y="418.400" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#516a7e">5 cells</text><rect x="438.280" y="245.200" width="91.200" height="326.400" rx="5" fill="#dcecff" stroke="#17324d" stroke-width="1.8" /><line x1="483.880" y1="245.200" x2="483.880" y2="571.600" stroke="#7794ab" stroke-dasharray="6 4" /><text x="483.880" y="403.400" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#17324d">C15–C18</text><text x="483.880" y="418.400" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#516a7e">4 cells</text><rect x="529.480" y="245.200" width="91.200" height="326.400" rx="5" fill="#dcecff" stroke="#17324d" stroke-width="1.8" /><line x1="575.080" y1="245.200" x2="575.080" y2="571.600" stroke="#7794ab" stroke-dasharray="6 4" /><text x="575.080" y="403.400" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#17324d">C19–C23</text><text x="575.080" y="418.400" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#516a7e">5 cells</text>
+  <rect x="150.280" y="58.000" width="120.000" height="153.600" fill="#dceeff" stroke="#0067c5" stroke-width="2.5" /><rect x="155.080" y="58.000" width="110.400" height="153.600" fill="none" stroke="#0067c5" stroke-width="1.5" stroke-dasharray="7 4" /><text x="210.280" y="131.800" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#004b93">INLET</text><text x="210.280" y="145.800" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#004b93">Ø23/25 × 32</text>
+  <rect x="515.080" y="605.200" width="120.000" height="153.600" fill="#ffe3e3" stroke="#d62828" stroke-width="2.5" /><rect x="519.880" y="605.200" width="110.400" height="153.600" fill="none" stroke="#d62828" stroke-width="1.5" stroke-dasharray="7 4" /><text x="575.080" y="679.000" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#a31d1d">OUTLET</text><text x="575.080" y="693.000" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#a31d1d">Ø23/25 × 32</text>
+  <line x1="145.000" y1="794.800" x2="692.200"
+    y2="794.800" stroke="#435d70" stroke-width="1.2"
+    marker-start="url(#arrow)" marker-end="url(#arrow)" />
+  <text x="418.600" y="787.800"
+    text-anchor="middle" font-family="sans-serif" font-size="12"
+    font-weight="700" fill="#263f52">114 mm</text>
+  <line x1="734.200" y1="211.600" x2="734.200"
+    y2="605.200" stroke="#435d70" stroke-width="1.2"
+    marker-start="url(#arrow)" marker-end="url(#arrow)" />
+  <text x="748.200" y="408.400"
+    font-family="sans-serif" font-size="12" font-weight="700"
+    fill="#263f52">82 mm</text>
+  <line x1="115.000" y1="245.200"
+    x2="115.000" y2="571.600"
+    stroke="#435d70" stroke-width="1.2" marker-start="url(#arrow)"
+    marker-end="url(#arrow)" />
+  <text x="108.000"
+    y="408.400"
+    text-anchor="end" font-family="sans-serif" font-size="11"
+    font-weight="700" fill="#263f52">Cell 68 mm</text>
+  <text x="145.000" y="818.800" font-family="sans-serif"
+    font-size="10" fill="#667b89">동일 X열의 4/5개 셀은 측면 정투영에서 겹쳐 표시됨</text>
+</svg>

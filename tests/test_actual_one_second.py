@@ -58,7 +58,8 @@ class ActualOneSecondTests(unittest.TestCase):
                 name: {"path": first, "kind": "xy", "columns": 3, "rows": 1}
                 for name in (
                     "xy15", "xy33", "xy", "xy68", "xy85",
-                    "xz15", "xz33", "xz50", "xz68", "xz85", "cell_surface",
+                    "xz15", "xz33", "xz50", "xz68", "xz85",
+                    "yz15", "yz33", "yz50", "yz68", "yz85", "cell_surface",
                 )
             }
             with (
@@ -105,7 +106,8 @@ class ActualOneSecondTests(unittest.TestCase):
                 }
                 for name in (
                     "xy15", "xy33", "xy", "xy68", "xy85",
-                    "xz15", "xz33", "xz50", "xz68", "xz85", "cell_surface",
+                    "xz15", "xz33", "xz50", "xz68", "xz85",
+                    "yz15", "yz33", "yz50", "yz68", "yz85", "cell_surface",
                 )
             }
             with (

@@ -644,40 +644,39 @@ def write_heat_source_bundle(
     )
     _atomic_write(output / "Fluent" / "battery_heat_source.c", render_fluent_udf(source))
     write_engineering_judgements(output / "engineering_judgements.json")
-    if isinstance(
-        source,
-        (PenekliogluExpandedFirstOrderSource, PenekliogluBernardi2C293KSource),
-    ):
-        if isinstance(source, PenekliogluBernardi2C293KSource):
-            sample_times = list(source.breakpoints())
-            rows = [
-                "time_s,SOC,Ri_Ohm,DeltaS_J_molK,"
-                "q_irreversible_W,q_reversible_W,q_cell_W,qvol_W_m3"
-            ]
-            for time_s in sample_times:
-                q_irreversible, q_reversible, q_cell = source.heat_terms_w(time_s)
-                rows.append(
-                    f"{time_s:.12g},{source.soc(time_s):.12g},"
-                    f"{source.resistance_ohm(time_s):.12g},"
-                    f"{source.entropy_j_molk(time_s):.12g},"
-                    f"{q_irreversible:.12g},{q_reversible:.12g},"
-                    f"{q_cell:.12g},{source.qvol(time_s):.12g}"
-                )
-        else:
-            sample_times = sorted(
-                set(
-                    [0.0, source.discharge_end_s]
-                    + [
-                        float(time_s)
-                        for time_s in range(0, int(source.discharge_end_s) + 1, 60)
-                    ]
-                )
-            )
-            rows = ["time_s,SOC,q_cell_W,qvol_W_m3"]
-            rows.extend(
+    # The transient energy-balance validator consumes one source sample at
+    # every persisted integer second.  Emit that complete audit table for
+    # every source mode, including the constant baseline.  Previously only
+    # the two Peneklioglu modes wrote this file, which let a valid constant
+    # run finish 1,800 time steps and then fail publication on a missing
+    # ``heat_source_samples.csv`` artifact.
+    sample_times = [float(time_s) for time_s in range(0, 1801)]
+    if isinstance(source, PenekliogluBernardi2C293KSource):
+        rows = [
+            "time_s,SOC,Ri_Ohm,DeltaS_J_molK,"
+            "q_irreversible_W,q_reversible_W,q_cell_W,qvol_W_m3"
+        ]
+        for time_s in sample_times:
+            q_irreversible, q_reversible, q_cell = source.heat_terms_w(time_s)
+            rows.append(
                 f"{time_s:.12g},{source.soc(time_s):.12g},"
-                f"{source.qcell(time_s):.12g},{source.qvol(time_s):.12g}"
-                for time_s in sample_times
+                f"{source.resistance_ohm(time_s):.12g},"
+                f"{source.entropy_j_molk(time_s):.12g},"
+                f"{q_irreversible:.12g},{q_reversible:.12g},"
+                f"{q_cell:.12g},{source.qvol(time_s):.12g}"
             )
-        _atomic_write(output / "heat_source_samples.csv", "\n".join(rows) + "\n")
+    elif isinstance(source, PenekliogluExpandedFirstOrderSource):
+        rows = ["time_s,SOC,q_cell_W,qvol_W_m3"]
+        rows.extend(
+            f"{time_s:.12g},{source.soc(time_s):.12g},"
+            f"{source.qcell(time_s):.12g},{source.qvol(time_s):.12g}"
+            for time_s in sample_times
+        )
+    else:
+        rows = ["time_s,qvol_W_m3"]
+        rows.extend(
+            f"{time_s:.12g},{source.qvol(time_s):.12g}"
+            for time_s in sample_times
+        )
+    _atomic_write(output / "heat_source_samples.csv", "\n".join(rows) + "\n")
     return manifest

@@ -1,8 +1,7 @@
-# A-04 sensitivity: place each port with nominal 4 mm corner clearance.
+# Compatibility overlay for the 2026-09-21 user-confirmed corner placement.
 geometry:
   ports:
     inlet_center_xy_mm: [100.3, 107.5]
     outlet_center_xy_mm: [13.5, 13.5]
     placement: corner_4mm_clearance
-    center_source: ASSUMPTION_A04_CORNER_CLEARANCE
-
+    center_source: USER_CONFIRMED_PPT_PHOTO_20260921

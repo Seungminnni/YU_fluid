@@ -41,7 +41,20 @@ class GeometryTests(unittest.TestCase):
         self.assertGreater(report["ports"]["opening_to_outline_clearance_m"]["inlet"], 0)
         self.assertGreater(report["ports"]["opening_to_outline_clearance_m"]["outlet"], 0)
         self.assertTrue(report["ports"]["centers_resolved"])
-        self.assertEqual(report["ports"]["centers_status"], "ASSUMPTION_A04")
+        self.assertEqual(report["ports"]["centers_status"], "USER_CONFIRMED_REFERENCE")
+        self.assertEqual(
+            [value * 1000 for value in self.config.ports.inlet_center_xy_m],
+            [100.3, 107.5],
+        )
+        self.assertEqual(
+            [value * 1000 for value in self.config.ports.outlet_center_xy_m],
+            [13.5, 13.5],
+        )
+        self.assertEqual(
+            self.config.ports.placement,
+            "corner_4mm_clearance",
+        )
+        self.assertEqual(report["nonblocking_assumptions"], [])
         self.assertFalse(report["production_cad_ready"])
 
     def test_preview_artifacts_are_written_without_claiming_production_cad(self) -> None:
@@ -57,7 +70,9 @@ class GeometryTests(unittest.TestCase):
             self.assertIn("상면도 · X–Y 정투영", top_view)
             self.assertIn("114 mm", top_view)
             self.assertIn("121 mm", top_view)
-            self.assertIn("포트 중심은 A-04 기준 위치", top_view)
+            self.assertIn("#0067c5", top_view)
+            self.assertIn("#d62828", top_view)
+            self.assertNotIn("A-04", top_view)
             side_view = (output / "side_view_xz.svg").read_text()
             self.assertIn("측면도 · X–Z 정투영", side_view)
             self.assertIn("114 mm", side_view)
@@ -65,6 +80,8 @@ class GeometryTests(unittest.TestCase):
             self.assertIn("Cell 68 mm", side_view)
             self.assertIn("C01–C05", side_view)
             self.assertIn("C19–C23", side_view)
+            self.assertIn('fill="#004b93">INLET', side_view)
+            self.assertIn('fill="#a31d1d">OUTLET', side_view)
 
 
 if __name__ == "__main__":

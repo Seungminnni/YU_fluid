@@ -354,10 +354,9 @@ def validate_animations(
                 and "area_average_pressure_pa" in script
                 and "pressure_drop_pa" in script
             ),
-            "dense_temperature_legend_with_paper_reference": (
+            "dense_temperature_legend_without_paper_caption": (
                 'const intervals=unit==="C"?18:9' in script
-                and "PAPER REF" in script
-                and "paper_temperature_ranges_c" in script
+                and "PAPER REF" not in script
             ),
             "raw_temperature_datum_is_disclosed": (
                 "temperature_display_offset_c" in script

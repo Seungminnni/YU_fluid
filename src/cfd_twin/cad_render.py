@@ -16,7 +16,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _polydata(path: Path, *, scale: float = 1.0):
+def _polydata(path: Path, *, scale: float = 1.0, reflect_y_mm: float | None = None):
     import vtk
 
     reader = vtk.vtkSTLReader()
@@ -31,6 +31,17 @@ def _polydata(path: Path, *, scale: float = 1.0):
         transformed.SetInputConnection(source)
         transformed.Update()
         source = transformed.GetOutputPort()
+    if reflect_y_mm is not None:
+        matrix = vtk.vtkMatrix4x4()
+        matrix.SetElement(1, 1, -1.0)
+        matrix.SetElement(1, 3, reflect_y_mm)
+        transform = vtk.vtkTransform()
+        transform.SetMatrix(matrix)
+        reflected = vtk.vtkTransformPolyDataFilter()
+        reflected.SetTransform(transform)
+        reflected.SetInputConnection(source)
+        reflected.Update()
+        source = reflected.GetOutputPort()
     normals = vtk.vtkPolyDataNormals()
     normals.SetInputConnection(source)
     normals.ConsistencyOn()
@@ -135,7 +146,9 @@ def _render(
     window.Finalize()
 
 
-def render_actual_cad(source_dir: Path, output_dir: Path) -> dict[str, object]:
+def render_actual_cad(
+    source_dir: Path, output_dir: Path, *, reflect_y_mm: float | None = None
+) -> dict[str, object]:
     """검증된 CAD STL을 직접 읽어 상면·측면·등각 이미지를 만든다."""
 
     source_dir = source_dir.resolve()
@@ -159,8 +172,8 @@ def render_actual_cad(source_dir: Path, output_dir: Path) -> dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     # production surface STL은 OpenFOAM용 metre 단위이므로 CAD 작업 단위인
     # millimetre로 되돌린다. 형상은 CadQuery outer_with_ports와 동일하다.
-    enclosure = _polydata(enclosure_stl, scale=1000.0)
-    cells = _polydata(battery_stl)
+    enclosure = _polydata(enclosure_stl, scale=1000.0, reflect_y_mm=reflect_y_mm)
+    cells = _polydata(battery_stl, reflect_y_mm=reflect_y_mm)
     views = {
         "actual_CAD_top_XY.png": ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
         "actual_CAD_side_XZ.png": ((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
@@ -194,6 +207,7 @@ def render_actual_cad(source_dir: Path, output_dir: Path) -> dict[str, object]:
         ),
         "bounds_mm": list(enclosure.GetBounds()),
         "battery_polydata_cells": cells.GetNumberOfCells(),
+        "display_reflection_y_mm": reflect_y_mm,
     }
     (output_dir / "render_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
@@ -206,10 +220,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("source_dir", type=Path)
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--reflect-y-mm", type=float)
     args = parser.parse_args()
     print(
         json.dumps(
-            render_actual_cad(args.source_dir, args.output_dir),
+            render_actual_cad(args.source_dir, args.output_dir, reflect_y_mm=args.reflect_y_mm),
             indent=2,
             ensure_ascii=False,
         )

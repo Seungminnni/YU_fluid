@@ -189,14 +189,20 @@ def imported_config_overrides(report: dict[str, object]) -> tuple[str, ...]:
 
 
 def import_step_bundle(
-    files: dict[str, Path], base_config_path: Path, overlay_path: Path, output: Path
+    files: dict[str, Path], base_config_path: Path, overlay_path: Path, output: Path,
+    *, base_overrides: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Verify STEP solids and export their actual surfaces for OpenFOAM."""
 
-    base = load_config(base_config_path, overlay_paths=(overlay_path,))
+    base = load_config(
+        base_config_path, overlay_paths=(overlay_path,), overrides=base_overrides,
+    )
     report = inspect_imported_steps(files, base)
     overrides = imported_config_overrides(report)
-    config = load_config(base_config_path, overlay_paths=(overlay_path,), overrides=overrides)
+    config = load_config(
+        base_config_path, overlay_paths=(overlay_path,),
+        overrides=base_overrides + overrides,
+    )
     cq, objects = _load_steps(files)
     outer = objects["enclosure_with_ports.step"]
     ordered = _battery_order(objects["battery_cells.step"], config)

@@ -39,6 +39,16 @@ ALLOWED_MODES = {
     "imported_23cell",
 }
 
+# Non-baseline port diameters remain fail-closed.  Each accepted sensitivity
+# geometry must carry the exact review/provenance tag that fixes both the port
+# size and the inlet/outlet placement used for the calculation.
+REVIEWED_PORT_DIAMETERS_BY_SOURCE = {
+    "USER_CONFIRMED_VERTICAL_FLIP_PHI23_600K_20260922": 0.023,
+    "C05_TOP_INLET_C19_BOTTOM_OUTLET_PHI23_600K_20260922": 0.023,
+    "C05_TOP_INLET_C19_BOTTOM_OUTLET_PHI25_600K_20260922": 0.025,
+    "C05_TOP_INLET_C19_BOTTOM_OUTLET_PHI21_600K_20260923": 0.021,
+}
+
 
 def _mapping(value: object, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -475,8 +485,10 @@ def load_config(
         placement_options=tuple(str(value) for value in placement_options_raw),
         center_source=str(_required(ports_raw, "center_source", "geometry.ports")),
     )
-    if ports.inlet_face != "top" or ports.outlet_face != "bottom":
-        raise ConfigError("final-design ports require inlet_face=top and outlet_face=bottom")
+    if {ports.inlet_face, ports.outlet_face} != {"top", "bottom"}:
+        raise ConfigError(
+            "final-design ports must occupy opposite top/bottom faces"
+        )
     if ports.inlet_column not in ports.inlet_column_options:
         raise ConfigError("geometry.ports.inlet_column must be listed in inlet_column_options")
     if ports.placement not in ports.placement_options:
@@ -484,16 +496,25 @@ def load_config(
     for label, actual, expected in (
         ("cell diameter", cells.diameter_m, 0.019),
         ("cell length", cells.length_m, 0.068),
-        ("inlet diameter", ports.inlet_diameter_m, 0.019),
-        ("outlet diameter", ports.outlet_diameter_m, 0.019),
     ):
-        # Imported STEP geometry may change the port sizes. The current
-        # OpenFOAM/23-cell source contract still fixes battery dimensions;
-        # unsupported topology must fail before meshing.
-        if mode == "imported_23cell" and label in {"inlet diameter", "outlet diameter"}:
-            continue
         if not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-12):
             raise ConfigError(f"final-design {label} must be {expected} m")
+    if mode != "imported_23cell":
+        # Keep arbitrary port sizes fail-closed.  The sole non-baseline pair is
+        # the user-reviewed phi-23 sensitivity run identified by its explicit
+        # provenance tag; this prevents an unrelated overlay from silently
+        # changing the production geometry.
+        reviewed_diameter = REVIEWED_PORT_DIAMETERS_BY_SOURCE.get(
+            ports.center_source,
+            0.019,
+        )
+        reviewed_port_pair = (reviewed_diameter, reviewed_diameter)
+        for label, actual, expected in (
+            ("inlet diameter", ports.inlet_diameter_m, reviewed_port_pair[0]),
+            ("outlet diameter", ports.outlet_diameter_m, reviewed_port_pair[1]),
+        ):
+            if not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-12):
+                raise ConfigError(f"final-design {label} must be {expected} m")
     notch_expectations = {
         "pptx_measured_v1": (0.019, 0.011, 0.01125),
         "paper_fig8_digitized": (0.023, 0.0097, 0.0115),
@@ -507,7 +528,7 @@ def load_config(
         expected_notch,
         strict=True,
     ):
-        if not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-12):
+        if mode != "imported_23cell" and not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-12):
             raise ConfigError(f"{enclosure.profile} {label} must be {expected} m")
 
     fluid_raw = _mapping(_required(root, "fluid", "root"), "fluid")

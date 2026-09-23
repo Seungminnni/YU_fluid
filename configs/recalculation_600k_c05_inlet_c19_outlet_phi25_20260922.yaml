@@ -1,0 +1,13 @@
+# 새 계산용 확정 CAD: C05 상부 입수구 / C19 하부 출수구, Ø25 mm.
+# Ø23 케이스와 나머지 경계 조건·물성·열원·메시 목표를 동일하게 둔다.
+geometry:
+  ports:
+    inlet_diameter: "25 mm"
+    outlet_diameter: "25 mm"
+    inlet_face: top
+    outlet_face: bottom
+    inlet_center_xy_mm: [13.6, 105.2]
+    outlet_center_xy_mm: [89.6, 15.2]
+    inlet_column: 1
+    placement: end_cell_center
+    center_source: C05_TOP_INLET_C19_BOTTOM_OUTLET_PHI25_600K_20260922

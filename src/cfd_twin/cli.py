@@ -13,6 +13,7 @@ from .geometry import write_geometry_bundle
 from .heat_source import source_from_config, write_heat_source_bundle
 from .production_mesh import SUPPORTED_LEVELS, write_production_mesh_source_bundle
 from .animation_validation import validate_animations
+from .comparison import prepare_comparison_case, publish_comparison_results
 from .viewer import write_viewer_bundle
 from .workflow_app import serve_workflow
 
@@ -134,8 +135,35 @@ def _serve_workflow(args: argparse.Namespace) -> int:
         case_dir=Path(args.case_dir),
         cad_dir=Path(args.cad_dir),
         viewer_dir=Path(args.viewer_dir),
+        imported_root=(Path(args.imported_root) if args.imported_root else None),
         port=args.port,
     )
+    return 0
+
+
+def _prepare_comparison_case(args: argparse.Namespace) -> int:
+    manifest = prepare_comparison_case(
+        Path(args.phi19_case),
+        Path(args.phi23_case),
+        Path(args.output),
+        require_results=args.require_results,
+    )
+    _json({**manifest, "output": str(Path(args.output).resolve())})
+    return 0
+
+
+def _publish_comparison_results(args: argparse.Namespace) -> int:
+    phi19_config = load_config(args.config, overlay_paths=tuple(args.phi19_overlay))
+    phi23_config = load_config(args.config, overlay_paths=tuple(args.phi23_overlay))
+    result = publish_comparison_results(
+        Path(args.phi19_case),
+        Path(args.phi23_case),
+        Path(args.comparison_case),
+        Path(args.viewer_output),
+        phi19_config=phi19_config,
+        phi23_config=phi23_config,
+    )
+    _json(result)
     return 0
 
 
@@ -204,6 +232,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="single",
         help=(
             "single=validated 207,390-cell contract; "
+            "production_600k=~600,000-cell calibration profile; "
+            "production_600k_phi23=Ø23-specific ~600,000-cell 8 µm profile; "
+            "production_600k_phi25=Ø25 initial ~600,000-cell 8 µm profile; "
             "production_700k=~700,000-cell validation profile; "
             "production_800k=calibrated ~800,000-cell high-quality profile"
         ),
@@ -224,8 +255,49 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--case-dir", required=True)
     workflow.add_argument("--cad-dir", required=True)
     workflow.add_argument("--viewer-dir", required=True)
+    workflow.add_argument(
+        "--imported-root",
+        help="directory for uploaded CAD, generated geometry, and calculation jobs",
+    )
     workflow.add_argument("--port", type=int, default=8765)
     workflow.set_defaults(func=_serve_workflow)
+
+    comparison = subparsers.add_parser(
+        "prepare-comparison-case",
+        help="assemble independent validated Ø19 and Ø23 cases for one viewer",
+    )
+    comparison.add_argument("--phi19-case", required=True)
+    comparison.add_argument("--phi23-case", required=True)
+    comparison.add_argument("--output", required=True)
+    comparison.add_argument(
+        "--require-results",
+        action="store_true",
+        help="fail until both transient and energy validations have passed",
+    )
+    comparison.set_defaults(func=_prepare_comparison_case)
+
+    comparison_publish = subparsers.add_parser(
+        "publish-comparison-results",
+        help="publish and verify independent Ø19/Ø23 results in one portable viewer",
+    )
+    comparison_publish.add_argument("config")
+    comparison_publish.add_argument(
+        "--phi19-overlay",
+        action="append",
+        required=True,
+        help="overlay for Ø19; repeat to apply shared physics and geometry overlays in order",
+    )
+    comparison_publish.add_argument(
+        "--phi23-overlay",
+        action="append",
+        required=True,
+        help="overlay for Ø23; repeat to apply shared physics and geometry overlays in order",
+    )
+    comparison_publish.add_argument("--phi19-case", required=True)
+    comparison_publish.add_argument("--phi23-case", required=True)
+    comparison_publish.add_argument("--comparison-case", required=True)
+    comparison_publish.add_argument("--viewer-output", required=True)
+    comparison_publish.set_defaults(func=_publish_comparison_results)
 
     doctor = subparsers.add_parser("doctor")
     doctor.set_defaults(func=_doctor)

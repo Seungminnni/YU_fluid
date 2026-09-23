@@ -239,6 +239,15 @@ def framework_judgement_manifest() -> dict[str, object]:
                 "future_gate": "if an actual Fluent setup is supplied, compare its time step, internal iterations, and monitor definitions; assess time-step sensitivity on a short identical interval before selecting a finer production step",
                 "status": "PRODUCTION_POLICY_CORRECTED",
             },
+            {
+                "id": "EJ-024",
+                "subject": "production_600k first-layer y+ recalibration",
+                "observation": "the common 3.19 millimetre background with a 12 micrometre first layer produced 603634 Ø19 cells and missed the unchanged 0.95 y+ area gate at 0.9462843386; the first Ø23 10 micrometre attempt likewise missed narrowly at 0.94381040 despite passing all other S0 gates",
+                "decision": "retain the 0.95 y+ area gate, use a 10 micrometre first layer for Ø19, and use a separately declared 8 micrometre first layer for Ø23 while keeping the common background grid and all physics inputs unchanged",
+                "reason": "the misses were near-wall-resolution issues rather than convergence failures; diameter-specific first-layer heights add y+ margin without weakening acceptance criteria or changing the target cell-count class",
+                "evidence": "the executed Ø19 mesh has 611313 cells and 0.95887156 of battery area below y+=1; the executed Ø23 mesh has 621273 cells and 0.9595285671 below y+=1; both production-mesh and S0 compound gates passed",
+                "status": "DIAMETER_SPECIFIC_RECALIBRATION_EXECUTED_AND_PASSED",
+            },
         ],
     }
 

@@ -1,0 +1,84 @@
+{
+  "analytic_expectations": {
+    "battery_interface_area_mm2": 106397.88919545231,
+    "battery_total_volume_mm3": 443438.9446468529,
+    "coolant_volume_mm3": 655138.3155731311,
+    "inlet_area_mm2": 415.4756284372501,
+    "outer_with_ports_volume_mm3": 1098577.260219984,
+    "outlet_area_mm2": 415.4756284372501
+  },
+  "backend": "CadQuery/OpenCascade",
+  "cad_geometry_checks_passed": true,
+  "cell_count": 23,
+  "enclosure_profile": "pptx_measured_v1",
+  "exported_files": [
+    "enclosure_with_ports.step",
+    "coolant.step",
+    "battery_cells.step",
+    "coolant.stl",
+    "battery_cells.stl",
+    "production_surfaces/outerDomain.stl",
+    "production_surfaces/inlet.stl",
+    "production_surfaces/outlet.stl",
+    "production_surfaces/outerWall.stl",
+    "production_surfaces/battery_C01.stl",
+    "production_surfaces/battery_C02.stl",
+    "production_surfaces/battery_C03.stl",
+    "production_surfaces/battery_C04.stl",
+    "production_surfaces/battery_C05.stl",
+    "production_surfaces/battery_C06.stl",
+    "production_surfaces/battery_C07.stl",
+    "production_surfaces/battery_C08.stl",
+    "production_surfaces/battery_C09.stl",
+    "production_surfaces/battery_C10.stl",
+    "production_surfaces/battery_C11.stl",
+    "production_surfaces/battery_C12.stl",
+    "production_surfaces/battery_C13.stl",
+    "production_surfaces/battery_C14.stl",
+    "production_surfaces/battery_C15.stl",
+    "production_surfaces/battery_C16.stl",
+    "production_surfaces/battery_C17.stl",
+    "production_surfaces/battery_C18.stl",
+    "production_surfaces/battery_C19.stl",
+    "production_surfaces/battery_C20.stl",
+    "production_surfaces/battery_C21.stl",
+    "production_surfaces/battery_C22.stl",
+    "production_surfaces/battery_C23.stl"
+  ],
+  "geometry_definition_ready": true,
+  "geometry_report_summary": {
+    "minimum_cell_gap_m": 0.0030808174667515363,
+    "minimum_outline_gap_m": 0.0040999999999999995
+  },
+  "geometry_sha256": "390a68ad06d745d24d2fcc0edae5074ff1c6e997fd5615329aa8c7a22ae34520",
+  "inlet_diameter_mm": 23.0,
+  "outlet_diameter_mm": 23.0,
+  "port_centers_xy_mm": {
+    "inlet": [
+      13.6,
+      105.2
+    ],
+    "outlet": [
+      89.6,
+      15.2
+    ]
+  },
+  "port_diameter_mm": 23.0,
+  "port_placement": "end_cell_center",
+  "port_placement_basis": "C05_TOP_INLET_C19_BOTTOM_OUTLET_PHI23_600K_20260922",
+  "port_source": "C05_TOP_INLET_C19_BOTTOM_OUTLET_PHI23_600K_20260922",
+  "production_cad_ready": true,
+  "required_checks": [
+    "CadQuery export completes",
+    "coolant is one connected solid",
+    "23 battery solids are present",
+    "fluid-solid interface areas match analytic cylinders",
+    "inlet/outlet areas match pi*D^2/4",
+    "production blockMesh/snappyHexMesh and checkMesh gates pass"
+  ],
+  "resolved_input_sha256": "17802cc8743273bc19bd51e890389c5db77e3f66022f1bdf7ea75820e0d00ac3",
+  "result_file": "cad_result.json",
+  "schema_version": 1,
+  "status": "CAD_EXPORTED_GEOMETRY_CHECKS_PASSED",
+  "units": "mm"
+}

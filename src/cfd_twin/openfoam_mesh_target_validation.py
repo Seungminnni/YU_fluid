@@ -42,12 +42,15 @@ def validate_mesh_target(
     target_solid_cells: int | None = None,
     target_fluid_cells: int | None = None,
     target_points: int | None = None,
+    minimum_total_cells: int | None = None,
     total_tolerance_fraction: float = 0.10,
     component_tolerance_fraction: float = 0.20,
     minimum_hexahedron_fraction: float = 0.80,
 ) -> dict[str, object]:
     if target_total_cells <= 0:
         raise ValueError("target total cells must be positive")
+    if minimum_total_cells is not None and minimum_total_cells <= 0:
+        raise ValueError("minimum total cells must be positive")
     if not 0 <= total_tolerance_fraction < 1:
         raise ValueError("total tolerance fraction must be in [0, 1)")
     if not 0 <= component_tolerance_fraction < 1:
@@ -86,6 +89,9 @@ def validate_mesh_target(
         "points": target_points,
     }
     checks = {
+        "total_cell_count_at_least_configured_minimum_if_set": (
+            minimum_total_cells is None or total_cells >= minimum_total_cells
+        ),
         "total_cell_count_within_configured_tolerance": _within(
             total_cells, target_total_cells, total_tolerance_fraction
         ),
@@ -122,6 +128,7 @@ def validate_mesh_target(
             "total_tolerance_fraction": total_tolerance_fraction,
             "component_tolerance_fraction": component_tolerance_fraction,
             "minimum_hexahedron_fraction": minimum_hexahedron_fraction,
+            "minimum_total_cells": minimum_total_cells,
         },
         "checks": checks,
     }
@@ -135,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-solid-cells", type=int)
     parser.add_argument("--target-fluid-cells", type=int)
     parser.add_argument("--target-points", type=int)
+    parser.add_argument("--minimum-total-cells", type=int)
     parser.add_argument("--total-tolerance-fraction", type=float, default=0.10)
     parser.add_argument("--component-tolerance-fraction", type=float, default=0.20)
     parser.add_argument("--minimum-hexahedron-fraction", type=float, default=0.80)
@@ -148,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             target_solid_cells=args.target_solid_cells,
             target_fluid_cells=args.target_fluid_cells,
             target_points=args.target_points,
+            minimum_total_cells=args.minimum_total_cells,
             total_tolerance_fraction=args.total_tolerance_fraction,
             component_tolerance_fraction=args.component_tolerance_fraction,
             minimum_hexahedron_fraction=args.minimum_hexahedron_fraction,

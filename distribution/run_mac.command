@@ -2,7 +2,7 @@
 set -e
 cd "$(dirname "$0")"
 if ! command -v python3.12 >/dev/null 2>&1; then
-  echo "Python 3.12 이상을 설치한 뒤 다시 실행하세요."
+  echo "Python 3.12 명령(python3.12)을 설치한 뒤 다시 실행하세요."
   read -r "?Enter를 누르면 닫습니다. "
   exit 1
 fi

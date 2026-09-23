@@ -60,6 +60,8 @@ class MeshOnlyViewerTest(unittest.TestCase):
             self.assertIn('href="results.html"', html)
             self.assertIn('href="results.html"', (root / "viewer/home.html").read_text(encoding="utf-8"))
             self.assertIn('id="save-png"', html)
+            self.assertIn('<script src="mesh-volume-data.js"></script>', html)
+            self.assertLess(html.index('src="mesh-volume-data.js"'), html.index('src="mesh.js"'))
             self.assertIn('canvas.toBlob(blob=>', (root / "viewer/mesh.js").read_text(encoding="utf-8"))
             self.assertNotIn("유선", html)
             self.assertNotIn("이동 헤드", html)

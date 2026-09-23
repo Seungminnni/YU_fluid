@@ -7,6 +7,7 @@ y+<1이어야 cold-flow gate를 통과한다.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import re
@@ -52,7 +53,16 @@ def _balanced_block(text: str, opening_brace: int) -> str:
 
 
 def parse_scalar_boundary_field(path: str | Path) -> dict[str, list[float]]:
-    text = _ascii(Path(path))
+    source = Path(path)
+    if not source.is_file() and source.with_name(source.name + ".gz").is_file():
+        source = source.with_name(source.name + ".gz")
+    if source.suffix == ".gz":
+        raw = gzip.open(source, "rb").read()
+        if b"format      binary" in raw or b"format binary" in raw:
+            raise ValueError(f"{source}: binary field unsupported; use writeFormat ascii")
+        text = raw.decode("utf-8")
+    else:
+        text = _ascii(source)
     boundary_match = re.search(r"\bboundaryField\s*\{", text)
     if not boundary_match:
         raise ValueError("boundaryField block not found")

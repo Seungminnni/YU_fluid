@@ -223,6 +223,60 @@ class ProductionMeshTests(unittest.TestCase):
             "CALIBRATED_EXECUTED_849284_YPLUS_PASSED",
         )
 
+    def test_600k_profile_is_recalibrated_above_the_minimum(self) -> None:
+        preset = MESH_PRESETS["production_600k"]
+        self.assertEqual(preset.target_cells, 600_000)
+        self.assertEqual(preset.background_cell_m, 0.00319)
+        self.assertEqual(preset.first_layer_thickness_m, 10e-6)
+        self.assertEqual(preset.minimum_total_cells, 600_000)
+        self.assertEqual(
+            preset.calibration_status,
+            "CALIBRATED_EXECUTED_611313_YPLUS_PASSED",
+        )
+
+    def test_600k_phi23_profile_keeps_count_grid_and_uses_8um_layer(self) -> None:
+        preset = MESH_PRESETS["production_600k_phi23"]
+        self.assertEqual(preset.target_cells, 600_000)
+        self.assertEqual(preset.background_cell_m, 0.00319)
+        self.assertEqual(preset.first_layer_thickness_m, 8e-6)
+        self.assertEqual(preset.minimum_total_cells, 600_000)
+        self.assertEqual(
+            preset.calibration_status,
+            "CALIBRATED_EXECUTED_621273_YPLUS_PASSED",
+        )
+
+    def test_600k_phi25_profile_requires_fresh_execution(self) -> None:
+        preset = MESH_PRESETS["production_600k_phi25"]
+        self.assertEqual(preset.target_cells, 600_000)
+        self.assertEqual(preset.background_cell_m, 0.00319)
+        self.assertEqual(preset.first_layer_thickness_m, 8e-6)
+        self.assertEqual(preset.minimum_total_cells, 600_000)
+        self.assertEqual(
+            preset.calibration_status,
+            "INITIAL_C05_C19_PHI25_600K_FROM_PHI23_8UM",
+        )
+
+    def test_600k_phi23_adds_local_level2_port_cap_refinement(self) -> None:
+        config = load_config(
+            BASELINE,
+            overlay_paths=(
+                ROOT / "configs" / "recalculation_600k_phi23_vertical_flip_20260922.yaml",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "production"
+            write_production_mesh_source_bundle(
+                config,
+                _fake_cad(config, root),
+                output,
+                mesh_level="production_600k",
+            )
+            snappy = (output / "system" / "snappyHexMeshDict").read_text()
+            self.assertIn("inletCapRefinement", snappy)
+            self.assertIn("outletCapRefinement", snappy)
+            self.assertEqual(snappy.count("levels ((1e15 2));"), 2)
+
     def test_800k_bundle_encodes_numeric_gates_and_no_ai_decision(self) -> None:
         config = load_config(BASELINE)
         with tempfile.TemporaryDirectory() as directory:
@@ -235,6 +289,10 @@ class ProductionMeshTests(unittest.TestCase):
                 mesh_level="production_800k",
             )
             allmesh = (output / "AllmeshProduction").read_text()
+            self.assertIn(
+                'cp "$case_dir/system/controlDict.mesh-only" "$case_dir/system/controlDict"',
+                allmesh,
+            )
             self.assertIn("--target-total-cells 800000", allmesh)
             self.assertIn("--minimum-hexahedron-fraction 0.9", allmesh)
             self.assertIn("--max-non-orthogonality 70", allmesh)
@@ -542,7 +600,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("purgeWrite 2;", control)
             self.assertIn("writeCompression on;", control)
             self.assertEqual(control.count("type volFieldValue;"), 46)
-            self.assertEqual(control.count("type surfaceFieldValue;"), 75)
+            self.assertEqual(control.count("type surfaceFieldValue;"), 77)
             self.assertIn("regionType cellZone;", control)
             self.assertIn("regionType patch;", control)
             self.assertIn('names (".*battery_C23_interface.*");', control)
@@ -550,6 +608,9 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("type yPlus;", control)
             self.assertIn("coolant_inlet_mass_flow", control)
             self.assertIn("coolant_outlet_mass_flow", control)
+            self.assertIn("coolant_inlet_normal_velocity_avg", control)
+            self.assertIn("coolant_outlet_normal_velocity_avg", control)
+            self.assertIn("operation areaNormalAverage;", control)
             self.assertIn("coolant_inlet_pressure_avg", control)
             self.assertIn("coolant_outlet_pressure_avg", control)
             self.assertIn("coolant_inlet_mass_weighted_temperature", control)
@@ -634,8 +695,10 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("actual_xy_temperature_1s", actual_control)
             self.assertIn("actual_xy15_temperature_1s", actual_control)
             self.assertIn("actual_xy85_temperature_1s", actual_control)
+            self.assertIn("actual_yz15_temperature_1s", actual_control)
+            self.assertIn("actual_yz85_temperature_1s", actual_control)
             self.assertIn("actual_battery_near_surface_temperature_1s", actual_control)
-            self.assertEqual(actual_control.count("interpolationScheme cell;"), 11)
+            self.assertEqual(actual_control.count("interpolationScheme cell;"), 16)
             self.assertIn("coolant_temperature_volume_integral", actual_control)
             self.assertIn("batterySolid_temperature_volume_integral", actual_control)
             self.assertEqual(actual_control.count("operation volIntegrate;"), 2)
@@ -735,6 +798,12 @@ class ProductionMeshTests(unittest.TestCase):
             steady_script = (output / "AllrunSteadyPilot").read_text()
             self.assertIn("COLD_FLOW_VALIDATION_PASSED", steady_script)
             self.assertIn("validate_steady_cht.py", steady_script)
+            self.assertIn('elif [ -f "$source_field.gz" ]', steady_script)
+            self.assertIn('cp "$source_field.gz" "$target_field.gz"', steady_script)
+            self.assertIn('elif [ -f "$source_field.gz" ]', frozen_actual_script)
+            self.assertIn(
+                'cp "$source_field.gz" "$target_field.gz"', frozen_actual_script
+            )
             cold_source = (
                 output
                 / "profiles"
@@ -757,7 +826,8 @@ class ProductionMeshTests(unittest.TestCase):
                 output / "profiles" / "steady" / "system" / "controlDict"
             ).read_text()
             self.assertIn("endTime 6000;", steady_control)
-            self.assertEqual(cold_control.count("type surfaceFieldValue;"), 6)
+            self.assertEqual(cold_control.count("type surfaceFieldValue;"), 8)
+            self.assertIn("operation areaNormalAverage;", cold_control)
             self.assertNotIn("type volFieldValue;", cold_control)
             self.assertIn("type fieldMinMax;", cold_control)
 
@@ -908,6 +978,48 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertFalse(failed["checks"]["cell_labels_unique_across_zones"])
             self.assertFalse(failed["checks"]["all_mesh_cells_covered"])
 
+    def test_mesh_target_can_require_an_asymmetric_minimum(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            zone_report = root / "zones.json"
+            zone_report.write_text(
+                json.dumps(
+                    {
+                        "status": "CELLZONE_VALIDATION_PASSED",
+                        "mesh_cell_count": 569_542,
+                        "zone_cell_counts": {
+                            "coolant": 364_484,
+                            "battery_C01": 205_058,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            checkmesh = root / "checkMesh.log"
+            checkmesh.write_text(
+                "points: 645248\n"
+                "cells: 569542\n"
+                "    hexahedra: 502444\n"
+                "    prisms: 0\n"
+                "    wedges: 0\n"
+                "    pyramids: 0\n"
+                "    tet wedges: 0\n"
+                "    tetrahedra: 0\n"
+                "    polyhedra: 67098\n",
+                encoding="utf-8",
+            )
+            report = validate_mesh_target(
+                zone_report,
+                checkmesh,
+                target_total_cells=600_000,
+                minimum_total_cells=600_000,
+                minimum_hexahedron_fraction=0.88,
+            )
+            self.assertEqual(report["status"], "MESH_TARGET_VALIDATION_FAILED")
+            self.assertFalse(
+                report["checks"]["total_cell_count_at_least_configured_minimum_if_set"]
+            )
+
     def test_battery_region_allows_only_empty_retained_coolant_zone(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             mesh = Path(directory) / "polyMesh"
@@ -1056,6 +1168,29 @@ boundaryField
                 report["battery_surface"]["area_fraction_below_1"], 22 / 23
             )
             self.assertEqual(report["battery_surface"]["maximum"], 2.0)
+
+    def test_yplus_validator_reads_openfoam_gzip_field_via_plain_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            import gzip
+
+            root = Path(directory)
+            mesh = root / "polyMesh"
+            _write_24_cube_polymesh(mesh, interface_boundaries=True)
+            blocks = [
+                f"battery_C{index:02d}_interface "
+                "{ type calculated; value uniform 0.5; }"
+                for index in range(1, 24)
+            ]
+            payload = (
+                "FoamFile\n{\n    format ascii;\n    class volScalarField;\n"
+                "    object yPlus;\n}\ninternalField uniform 0;\nboundaryField\n{\n"
+                + "\n".join(blocks)
+                + "\n}\n"
+            ).encode("utf-8")
+            with gzip.open(root / "yPlus.gz", "wb") as stream:
+                stream.write(payload)
+            report = validate_yplus(mesh, root / "yPlus")
+            self.assertEqual(report["status"], "YPLUS_VALIDATION_PASSED")
 
     def test_layer_parser_requires_coverage_for_every_battery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -50,6 +50,38 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "inlet diameter must be 0.019 m"):
                 load_config(self._write(raw, directory))
 
+    def test_reviewed_phi23_sensitivity_overlay_is_accepted(self) -> None:
+        changed = load_config(
+            BASELINE,
+            overlay_paths=(
+                ROOT / "configs" / "recalculation_600k_phi23_vertical_flip_20260922.yaml",
+            ),
+        )
+        self.assertAlmostEqual(changed.ports.inlet_diameter_m, 0.023)
+        self.assertAlmostEqual(changed.ports.outlet_diameter_m, 0.023)
+
+    def test_reviewed_c05_c19_phi23_and_phi25_overlays_are_accepted(self) -> None:
+        for diameter_mm in (23, 25):
+            with self.subTest(diameter_mm=diameter_mm):
+                changed = load_config(
+                    BASELINE,
+                    overlay_paths=(
+                        ROOT
+                        / "configs"
+                        / f"recalculation_600k_c05_inlet_c19_outlet_phi{diameter_mm}_20260922.yaml",
+                    ),
+                )
+                self.assertAlmostEqual(
+                    changed.ports.inlet_diameter_m,
+                    diameter_mm / 1000,
+                )
+                self.assertAlmostEqual(
+                    changed.ports.outlet_diameter_m,
+                    diameter_mm / 1000,
+                )
+                self.assertEqual(changed.ports.inlet_center_xy_m, (0.0136, 0.1052))
+                self.assertEqual(changed.ports.outlet_center_xy_m, (0.0896, 0.0152))
+
     def test_overrides_change_physics_and_provenance(self) -> None:
         base = load_config(BASELINE)
         changed = load_config(

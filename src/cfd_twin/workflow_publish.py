@@ -33,7 +33,7 @@ def _write_json(path: Path, value: dict[str, object]) -> None:
 
 
 def publish_completed_run(
-    case_dir: Path, viewer_dir: Path, *, config=None
+    case_dir: Path, viewer_dir: Path, *, config=None, include_reference_cad: bool = True
 ) -> dict[str, object]:
     """Gate, pack, verify, and display one completed single-mesh run."""
 
@@ -147,7 +147,7 @@ def publish_completed_run(
                 "에너지 잔차 목표를 충족하지 못했습니다."
             ]
     _write_json(case / "results/result_manifest.json", result_manifest)
-    model = write_viewer_bundle(config, viewer, case_dir=case)
+    model = write_viewer_bundle(config, viewer, case_dir=case, include_reference_cad=include_reference_cad)
     if (
         not model.get("actual_solver_data")
         or not model.get("interactive_cfd_by_mesh", {}).get("precision", {}).get(

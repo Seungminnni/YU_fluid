@@ -61,20 +61,21 @@ geometry:
     paper_nominal_surface_gap: "3.5 mm"
     regular_triangular_alternative_pitch_x: "19.48557 mm"
   ports:
-    # 포트 직경과 길이는 형상 입력이고, 중심 위치는 A-04 가정으로 추적한다.
+    # 2026-09-21 사용자 확정 PPT/완성 모델 사진 기준이다. 입구는 우측 상단,
+    # 출구는 반대편 좌측 하단 코너에 두고 원통 표면과 외곽 사이에 약 4 mm를 둔다.
     # inlet은 탱크 상면에서 -z 방향, outlet은 하면에서 외부로 연결된다.
     inlet_diameter: "19 mm"
     outlet_diameter: "19 mm"
     external_length: "32 mm"
     inlet_face: top
     outlet_face: bottom
-    inlet_center_xy_mm: [89.6, 105.2]
-    outlet_center_xy_mm: [13.6, 15.2]
-    placement: end_cell_center
+    inlet_center_xy_mm: [100.3, 107.5]
+    outlet_center_xy_mm: [13.5, 13.5]
+    placement: corner_4mm_clearance
     inlet_column: 5
     inlet_column_options: [5, 1]
     placement_options: [end_cell_center, corner_4mm_clearance]
-    center_source: ASSUMPTION_A04
+    center_source: USER_CONFIRMED_PPT_PHOTO_20260921
 
 fluid:
   # 탈이온수의 상수 물성. 온도에 따른 밀도/점도 변화는 현재 모델에 없다.

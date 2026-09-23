@@ -29,7 +29,15 @@ EXPECTED_BATTERY_FILES = tuple(
     f"battery_C{index:02d}.stl" for index in range(1, 24)
 )
 DEFAULT_MESH_PROFILE = "single"
-SUPPORTED_LEVELS = (DEFAULT_MESH_PROFILE, "production_700k", "production_800k")
+SUPPORTED_LEVELS = (
+    DEFAULT_MESH_PROFILE,
+    "production_600k",
+    "production_600k_phi21",
+    "production_600k_phi23",
+    "production_600k_phi25",
+    "production_700k",
+    "production_800k",
+)
 DEFAULT_MPI_RANKS = DEFAULT_SOLVER_MPI_RANKS
 DEFAULT_MESH_MPI_RANKS = 1
 # 10은 요청 layer 수다. snappyHexMesh가 품질을 위해 국부적으로 층을
@@ -63,6 +71,7 @@ class MeshPreset:
     target_solid_cells: int | None = None
     target_fluid_cells: int | None = None
     target_points: int | None = None
+    minimum_total_cells: int | None = None
     total_tolerance_fraction: float = 0.10
     component_tolerance_fraction: float = 0.20
     minimum_hexahedron_fraction: float = 0.80
@@ -87,6 +96,84 @@ MESH_PRESETS = {
         target_solid_cells=SINGLE_MESH_TARGET_COUNTS["solid_cells"],
         target_fluid_cells=SINGLE_MESH_TARGET_COUNTS["fluid_cells"],
         target_points=SINGLE_MESH_TARGET_COUNTS["points"],
+    ),
+    # The first executed 3.20 mm attempt produced 569,542 cells.  A 3.175 mm
+    # attempt crossed all three integer block-grid thresholds at once and
+    # jumped to 667,329 cells.  3.19 mm crosses only the Y threshold, producing
+    # 39x42x49 divisions; this is the closest discrete step above the original
+    # grid and produced 603,634 cells with every production-mesh gate passing.
+    # Its computed cold-flow field put 94.6284% of battery area below y+=1,
+    # narrowly missing the unchanged 95% result gate.  Reducing only the first
+    # prism height to 10 um retained 611,313 cells and raised that fraction to
+    # 95.8872%; the complete Ø19 calculation then passed every result gate.
+    "production_600k": MeshPreset(
+        target_cells=600_000,
+        background_cell_m=0.00319,
+        surface_min_level=0,
+        surface_max_level=1,
+        battery_inside_level=1,
+        first_layer_thickness_m=10e-6,
+        minimum_total_cells=600_000,
+        minimum_hexahedron_fraction=0.88,
+        maximum_non_orthogonality=70.0,
+        maximum_skewness=5.0,
+        generation_max_non_orthogonality=69.5,
+        calibration_status="CALIBRATED_EXECUTED_611313_YPLUS_PASSED",
+    ),
+    # The executed Ø23 case is a distinct hydraulic calibration.  Its 10 um
+    # layer retained 619,886 cells and passed every mesh/solver gate except the
+    # unchanged y+ area gate (94.3810% below y+=1).  Keep the same background
+    # grid and topology, and reduce only the absolute first-layer height to
+    # 8 um.  The executed mesh retained 621,273 cells and its cold-flow field
+    # put 95.9529% of battery area below y+=1.  Do not reuse this
+    # diameter-specific correction for Ø19.
+    "production_600k_phi23": MeshPreset(
+        target_cells=600_000,
+        background_cell_m=0.00319,
+        surface_min_level=0,
+        surface_max_level=1,
+        battery_inside_level=1,
+        first_layer_thickness_m=8e-6,
+        minimum_total_cells=600_000,
+        minimum_hexahedron_fraction=0.88,
+        maximum_non_orthogonality=70.0,
+        maximum_skewness=5.0,
+        generation_max_non_orthogonality=69.5,
+        calibration_status="CALIBRATED_EXECUTED_621273_YPLUS_PASSED",
+    ),
+    # Ø21 uses the same 3.19 mm background grid and 8 µm initial prism layer
+    # as the new Ø23/Ø25 runs. Its actual mesh and y+ must pass fresh gates.
+    "production_600k_phi21": MeshPreset(
+        target_cells=600_000,
+        background_cell_m=0.00319,
+        surface_min_level=0,
+        surface_max_level=1,
+        battery_inside_level=1,
+        first_layer_thickness_m=8e-6,
+        minimum_total_cells=600_000,
+        minimum_hexahedron_fraction=0.88,
+        maximum_non_orthogonality=70.0,
+        maximum_skewness=5.0,
+        generation_max_non_orthogonality=69.5,
+        calibration_status="INITIAL_C05_C19_PHI21_600K_FROM_PHI23_8UM",
+    ),
+    # The new Ø25 C05/C19 case starts from the proven Ø23 block grid and 8 um
+    # prism layer.  It is intentionally marked as a first execution rather
+    # than inheriting the Ø23 validation claim; its actual cell count and y+
+    # distribution must pass the generated gates before publication.
+    "production_600k_phi25": MeshPreset(
+        target_cells=600_000,
+        background_cell_m=0.00319,
+        surface_min_level=0,
+        surface_max_level=1,
+        battery_inside_level=1,
+        first_layer_thickness_m=8e-6,
+        minimum_total_cells=600_000,
+        minimum_hexahedron_fraction=0.88,
+        maximum_non_orthogonality=70.0,
+        maximum_skewness=5.0,
+        generation_max_non_orthogonality=69.5,
+        calibration_status="INITIAL_C05_C19_PHI25_600K_FROM_PHI23_8UM",
     ),
     # A 3.00 mm source produced 732,766 actual cells. Curved surface snapping
     # gives 89.35% hexes here, so the separately declared 700k-class contract
@@ -287,7 +374,19 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
     )
 
     port_refinement_regions: list[str] = []
+    port_refinement_level: int | None = None
     if preset.background_cell_m <= 0.0027:
+        port_refinement_level = 3
+    elif (
+        preset.minimum_total_cells == 600_000
+        and max(config.ports.inlet_diameter_m, config.ports.outlet_diameter_m) >= 0.023
+    ):
+        # At the calibrated 39x42x49 background grid the 23 mm outlet cap was
+        # under-resolved by 4.02%.  Force level 2 only in the two short port-cap
+        # volumes; the 19 mm mesh already resolves both caps within 1% and is
+        # deliberately left unchanged for the closest possible 600k count.
+        port_refinement_level = 2
+    if port_refinement_level is not None:
         refinement_depth = 0.004
         for name, center, diameter, end_z, inward_sign in (
             (
@@ -320,7 +419,7 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
                 f'''        {name}
         {{
             mode inside;
-            levels ((1e15 3));
+            levels ((1e15 {port_refinement_level}));
         }}'''
             )
 
@@ -785,6 +884,8 @@ def _allmesh_production(config: ResolvedConfig, preset: MeshPreset) -> str:
         - battery_volume
     )
     target_options = []
+    if preset.minimum_total_cells is not None:
+        target_options.append(f"--minimum-total-cells {preset.minimum_total_cells}")
     if preset.target_solid_cells is not None:
         target_options.append(f"--target-solid-cells {preset.target_solid_cells}")
     if preset.target_fluid_cells is not None:
@@ -812,6 +913,12 @@ case "$foam_version" in
     v2512|2512) ;;
     *) echo "OpenCFD OpenFOAM v2512 required; WM_PROJECT_VERSION=$foam_version" >&2; exit 2 ;;
 esac
+
+# The solver bundle's top-level controlDict enables gzip for large solution
+# fields. Meshing validators read ASCII polyMesh and snappy layer fields, so
+# activate the mesh-only dictionary before blockMesh/snappyHexMesh. Solver
+# launchers later copy their own controlDict into each isolated run directory.
+cp "$case_dir/system/controlDict.mesh-only" "$case_dir/system/controlDict"
 
 surfaceCheck -case "$case_dir" "$case_dir/constant/triSurface/outerDomain.stl" \
     >"$log_dir/surfaceCheck_outerDomain.log" 2>&1
@@ -1684,6 +1791,7 @@ def write_production_mesh_source_bundle(
         "calibration_status": preset.calibration_status,
         "target_composition": {
             "total_cells": preset.target_cells,
+            "minimum_total_cells": preset.minimum_total_cells,
             "solid_cells": preset.target_solid_cells,
             "fluid_cells": preset.target_fluid_cells,
             "points": preset.target_points,
@@ -1699,6 +1807,7 @@ def write_production_mesh_source_bundle(
             "maximum_non_orthogonality": preset.maximum_non_orthogonality,
             "maximum_skewness": preset.maximum_skewness,
             "total_cell_tolerance_fraction": preset.total_tolerance_fraction,
+            "minimum_total_cells": preset.minimum_total_cells,
             "component_tolerance_fraction": preset.component_tolerance_fraction,
             "visual_quality_status": "MANUAL_REVIEW_REQUIRED",
             "ai_decision_allowed": False,

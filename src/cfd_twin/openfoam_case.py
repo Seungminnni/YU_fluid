@@ -729,6 +729,22 @@ def _functions(
     }}'''
         )
         entries.append(
+            f'''    coolant_{patch}_normal_velocity_avg
+    {{
+        type surfaceFieldValue;
+        libs (fieldFunctionObjects);
+        region coolant;
+        regionType patch;
+        name {patch};
+        operation areaNormalAverage;
+        fields (U);
+        empty-surface strict;
+        writeControl {sample_control};
+        writeInterval {sample_interval};
+        writeFields false;
+    }}'''
+        )
+        entries.append(
             f'''    coolant_{patch}_pressure_avg
     {{
         type surfaceFieldValue;
@@ -972,6 +988,30 @@ def _actual_one_second_sampling(config: ResolvedConfig) -> str:
                 interval_s=1.0,
             )
         )
+    # YZ cuts pass through the alternating five/four-cell columns.  These
+    # must be sampled for every saved second as well; deriving them only from
+    # the final 1800 s volume field left the coolant blank at earlier times.
+    for label, fraction in (
+        ("yz15", 0.15),
+        ("yz33", 0.325),
+        ("yz50", 0.5),
+        ("yz68", 0.675),
+        ("yz85", 0.85),
+    ):
+        points = [
+            (fraction * config.enclosure.width_x_m, y, z)
+            for z in z_values
+            for y in y_values
+        ]
+        entries.append(
+            _probe_function(
+                f"actual_{label}_temperature_1s",
+                region="coolant",
+                field="T",
+                points=points,
+                interval_s=1.0,
+            )
+        )
 
     radius = 0.5 * config.cells.diameter_m
     half_length = 0.5 * config.cells.length_m
@@ -1140,8 +1180,17 @@ case "$cold_time" in
 esac
 for field in U p p_rgh k omega nut alphat phi; do
     source_field="$cold_dir/$cold_time/coolant/$field"
-    [ -f "$source_field" ] || { echo "missing cold-flow field: $source_field" >&2; exit 2; }
-    cp "$source_field" "$run_dir/0/coolant/$field"
+    target_field="$run_dir/0/coolant/$field"
+    if [ -f "$source_field" ]; then
+        rm -f "$target_field.gz"
+        cp "$source_field" "$target_field"
+    elif [ -f "$source_field.gz" ]; then
+        rm -f "$target_field" "$target_field.gz"
+        cp "$source_field.gz" "$target_field.gz"
+    else
+        echo "missing cold-flow field: $source_field or $source_field.gz" >&2
+        exit 2
+    fi
 done
 echo "$cold_time" >"$run_dir/reports/solver/source_cold_flow_time.txt"
 '''
@@ -1593,8 +1642,17 @@ done
 # Preserve the converged steady flow and turbulence state. Do not copy steady T.
 for field in U p p_rgh k omega nut alphat phi; do
     source_field="$steady_dir/$latest_time/coolant/$field"
-    [ -f "$source_field" ] || {{ echo "missing steady field: $source_field" >&2; exit 2; }}
-    cp "$source_field" "$run_dir/0/coolant/$field"
+    target_field="$run_dir/0/coolant/$field"
+    if [ -f "$source_field" ]; then
+        rm -f "$target_field.gz"
+        cp "$source_field" "$target_field"
+    elif [ -f "$source_field.gz" ]; then
+        rm -f "$target_field" "$target_field.gz"
+        cp "$source_field.gz" "$target_field.gz"
+    else
+        echo "missing steady field: $source_field or $source_field.gz" >&2
+        exit 2
+    fi
 done
 
 grep -Eq 'internalField[[:space:]]+uniform[[:space:]]+{initial_fluid_temperature:.12g};' \
@@ -1931,7 +1989,12 @@ def write_openfoam_solver_bundle(
                 "native_parallel_temperature_storage": "all integer seconds",
                 "reconstructed_field_storage": "latest time only for UI spatial field",
                 "static_flow_field_policy": "reuse validated time-zero flow at every display second",
-                "section_probe_spacing_mm": {"xy": 1.0, "xz": 1.5},
+                "section_probe_spacing_mm": {
+                    "xy": 1.0,
+                    "xz_horizontal": 1.0,
+                    "yz_horizontal": 1.0,
+                    "vertical": 1.5,
+                },
                 "cell_surface_probe_lattice": "32-angle by 16-height plus caps",
                 "interpolation_scheme": "cell",
                 "invalid_point_policy": "preserve_invalid_no_padding",

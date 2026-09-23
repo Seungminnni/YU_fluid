@@ -11,6 +11,7 @@ env/
 node_modules/
 *.egg-info/
 build/
+viewer/
 dist/
 tmp/
 output/

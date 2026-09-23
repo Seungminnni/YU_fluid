@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 py -3.12 --version >nul 2>nul
 if errorlevel 1 (
-  echo Python 3.12 이상을 설치한 뒤 다시 실행하세요.
+  echo Python 3.12 명령(py -3.12)을 설치한 뒤 다시 실행하세요.
   pause
   exit /b 1
 )

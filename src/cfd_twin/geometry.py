@@ -175,7 +175,7 @@ def geometry_report(config: ResolvedConfig) -> dict[str, object]:
         ),
     }
     if min(port_clearances.values()) <= 0:
-        raise ConfigError("an A-04 port opening intersects the measured enclosure outline")
+        raise ConfigError("a port opening intersects the measured enclosure outline")
 
     inlet_area = math.pi * config.ports.inlet_diameter_m**2 / 4
     outlet_area = math.pi * config.ports.outlet_diameter_m**2 / 4
@@ -213,7 +213,7 @@ def geometry_report(config: ResolvedConfig) -> dict[str, object]:
             "inlet_column": config.ports.inlet_column,
             "center_source": config.ports.center_source,
             "centers_resolved": True,
-            "centers_status": "ASSUMPTION_A04",
+            "centers_status": "USER_CONFIRMED_REFERENCE",
             "opening_to_outline_clearance_m": port_clearances,
         },
         "enclosure_profile": {
@@ -227,15 +227,17 @@ def geometry_report(config: ResolvedConfig) -> dict[str, object]:
         },
         "source_evidence": {
             "port_diameter": "PPT side-view labels and 300-dpi measurement",
+            "port_centres": (
+                "User-confirmed 2026-09-21 PPT and completion-model images; "
+                "opposite corners with nominal 4 mm opening-to-outline clearance"
+            ),
             "port_24mm_hypothesis": "rejected_land_width_not_diameter",
             "column_pitch": "drawing_measurement_default_with_19.48557mm_alternative",
             "notch_geometry": "PPT/300-dpi contour: mouth 19, inner 11, depth 11.25 mm",
         },
         "production_cad_ready": False,
         "blocking_assumptions": [],
-        "nonblocking_assumptions": [
-            "A-04 port y-coordinate and inlet-column assignment require sensitivity/approval",
-        ],
+        "nonblocking_assumptions": [],
     }
 
 
@@ -270,18 +272,31 @@ def _svg(config: ResolvedConfig, placements: tuple[CellPlacement, ...]) -> str:
         for x_m, y_m in config.enclosure.outline_polygon_m
     )
     port_circles = []
-    for label, center in (
-        ("IN", config.ports.inlet_center_xy_m),
-        ("OUT", config.ports.outlet_center_xy_m),
+    for label, center, diameter_m, stroke, text_colour in (
+        (
+            "IN",
+            config.ports.inlet_center_xy_m,
+            config.ports.inlet_diameter_m,
+            "#0067c5",
+            "#004b93",
+        ),
+        (
+            "OUT",
+            config.ports.outlet_center_xy_m,
+            config.ports.outlet_diameter_m,
+            "#d62828",
+            "#a31d1d",
+        ),
     ):
         x = margin_x + center[0] * 1000 * scale
         y = margin_y + drawing_h - center[1] * 1000 * scale
+        port_radius = diameter_m * 1000 * scale / 2
         port_circles.append(
-            f'<circle cx="{x:.3f}" cy="{y:.3f}" r="{radius:.3f}" '
-            'fill="none" stroke="#e66b00" stroke-width="2" stroke-dasharray="7 4" />'
-            f'<text x="{x:.3f}" y="{y - radius - 4:.3f}" text-anchor="middle" '
-            'font-family="sans-serif" font-size="9" fill="#b24700">'
-            f'{label} A-04</text>'
+            f'<circle cx="{x:.3f}" cy="{y:.3f}" r="{port_radius:.3f}" '
+            f'fill="none" stroke="{stroke}" stroke-width="2" stroke-dasharray="7 4" />'
+            f'<text x="{x:.3f}" y="{y - port_radius - 4:.3f}" text-anchor="middle" '
+            f'font-family="sans-serif" font-size="9" fill="{text_colour}">'
+            f'{label}</text>'
         )
     width_dimension_y = margin_y + drawing_h + 25
     length_dimension_x = margin_x + drawing_w + 25
@@ -312,8 +327,8 @@ def _svg(config: ResolvedConfig, placements: tuple[CellPlacement, ...]) -> str:
         font-family="sans-serif" font-size="12" font-weight="700"
         fill="#263f52">121 mm</text>
   <text x="{margin_x:.3f}" y="{canvas_h - 10:.3f}"
-        font-family="sans-serif" font-size="10" fill="#b24700">
-    포트 중심은 A-04 기준 위치 · 포트 및 셀 직경 Ø19 mm
+        font-family="sans-serif" font-size="10" fill="#435d70">
+    파랑: 입수구 · 빨강: 출수구 · 셀 직경 Ø19 mm
   </text>
 </svg>
 '''
@@ -331,7 +346,6 @@ def _side_view_svg(
     cell_d = config.cells.diameter_m * 1000
     cell_h = config.cells.length_m * 1000
     cell_z0 = (tank_h - cell_h) / 2
-    port_d = config.ports.inlet_diameter_m * 1000
     port_h = config.ports.external_length_m * 1000
     maximum_z, minimum_z = tank_h + port_h, -port_h
     canvas_w = left + tank_w * scale + 160
@@ -368,13 +382,60 @@ def _side_view_svg(
             f'fill="#516a7e">{len(cells)} cells</text>'
         )
 
-    inlet_x = config.ports.inlet_center_xy_m[0] * 1000
-    outlet_x = config.ports.outlet_center_xy_m[0] * 1000
     tank_left, tank_right = sx(0), sx(tank_w)
     tank_top, tank_bottom = sy(tank_h), sy(0)
     width_y = sy(minimum_z) + 36
     height_x = tank_right + 42
     cell_dimension_x = tank_left - 30
+
+    def port_shape(
+        label: str,
+        center_x_m: float,
+        diameter_m: float,
+        face: str,
+        fill: str,
+        stroke: str,
+        text_colour: str,
+    ) -> str:
+        center_x = center_x_m * 1000
+        diameter = diameter_m * 1000
+        if face == "top":
+            y = sy(maximum_z)
+        elif face == "bottom":
+            y = tank_bottom
+        else:
+            raise ValueError(f"unsupported port face: {face}")
+        center_y = y + port_h * scale / 2
+        return (
+            f'<rect x="{sx(center_x - diameter / 2):.3f}" y="{y:.3f}" '
+            f'width="{diameter * scale:.3f}" height="{port_h * scale:.3f}" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="2" />'
+            f'<text x="{sx(center_x):.3f}" y="{center_y - 3:.3f}" '
+            'text-anchor="middle" font-family="sans-serif" font-size="10" '
+            f'font-weight="700" fill="{text_colour}">{label}</text>'
+            f'<text x="{sx(center_x):.3f}" y="{center_y + 11:.3f}" '
+            'text-anchor="middle" font-family="sans-serif" font-size="9" '
+            f'fill="{text_colour}">Ø{diameter:g} × {port_h:g}</text>'
+        )
+
+    inlet_shape = port_shape(
+        "INLET",
+        config.ports.inlet_center_xy_m[0],
+        config.ports.inlet_diameter_m,
+        config.ports.inlet_face,
+        "#dceeff",
+        "#0067c5",
+        "#004b93",
+    )
+    outlet_shape = port_shape(
+        "OUTLET",
+        config.ports.outlet_center_xy_m[0],
+        config.ports.outlet_diameter_m,
+        config.ports.outlet_face,
+        "#ffe3e3",
+        "#d62828",
+        "#a31d1d",
+    )
 
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_w:.0f}" height="{canvas_h:.0f}"
      viewBox="0 0 {canvas_w:.3f} {canvas_h:.3f}">
@@ -387,24 +448,8 @@ def _side_view_svg(
   <rect x="{tank_left:.3f}" y="{tank_top:.3f}" width="{tank_w * scale:.3f}"
     height="{tank_h * scale:.3f}" fill="#f7fbfd" stroke="#111" stroke-width="2.2" />
   {''.join(cell_shapes)}
-  <rect x="{sx(inlet_x - port_d / 2):.3f}" y="{sy(maximum_z):.3f}"
-    width="{port_d * scale:.3f}" height="{port_h * scale:.3f}"
-    fill="#fff1dd" stroke="#e66b00" stroke-width="2" />
-  <text x="{sx(inlet_x):.3f}" y="{sy(maximum_z) + port_h * scale / 2 - 3:.3f}"
-    text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700"
-    fill="#b24700">INLET</text>
-  <text x="{sx(inlet_x):.3f}" y="{sy(maximum_z) + port_h * scale / 2 + 11:.3f}"
-    text-anchor="middle" font-family="sans-serif" font-size="9"
-    fill="#b24700">Ø19 × 32</text>
-  <rect x="{sx(outlet_x - port_d / 2):.3f}" y="{tank_bottom:.3f}"
-    width="{port_d * scale:.3f}" height="{port_h * scale:.3f}"
-    fill="#e5f8fb" stroke="#168ca5" stroke-width="2" />
-  <text x="{sx(outlet_x):.3f}" y="{tank_bottom + port_h * scale / 2 - 3:.3f}"
-    text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700"
-    fill="#0c7389">OUTLET</text>
-  <text x="{sx(outlet_x):.3f}" y="{tank_bottom + port_h * scale / 2 + 11:.3f}"
-    text-anchor="middle" font-family="sans-serif" font-size="9"
-    fill="#0c7389">Ø19 × 32</text>
+  {inlet_shape}
+  {outlet_shape}
   <line x1="{tank_left:.3f}" y1="{width_y:.3f}" x2="{tank_right:.3f}"
     y2="{width_y:.3f}" stroke="#435d70" stroke-width="1.2"
     marker-start="url(#arrow)" marker-end="url(#arrow)" />
@@ -426,7 +471,7 @@ def _side_view_svg(
     text-anchor="end" font-family="sans-serif" font-size="11"
     font-weight="700" fill="#263f52">Cell 68 mm</text>
   <text x="{tank_left:.3f}" y="{canvas_h - 24:.3f}" font-family="sans-serif"
-    font-size="10" fill="#667b89">동일 X열의 4/5개 셀은 측면 정투영에서 겹쳐 표시됨 · 포트 위치 A-04 기준</text>
+    font-size="10" fill="#667b89">동일 X열의 4/5개 셀은 측면 정투영에서 겹쳐 표시됨</text>
 </svg>
 '''
 

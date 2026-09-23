@@ -78,9 +78,15 @@ class HeatSourceTests(unittest.TestCase):
     def test_bundle_marks_original_udf_unavailable(self) -> None:
         config = load_config(BASELINE)
         with tempfile.TemporaryDirectory() as directory:
-            manifest = write_heat_source_bundle(config, directory)
+            output = Path(directory)
+            manifest = write_heat_source_bundle(config, output)
             self.assertFalse(manifest["original_paper_udf_available"])
             self.assertEqual(manifest["qvol_W_m3"], 16325.0)
+            samples = (output / "heat_source_samples.csv").read_text().splitlines()
+            self.assertEqual(len(samples), 1802)
+            self.assertEqual(samples[0], "time_s,qvol_W_m3")
+            self.assertEqual(samples[1], "0,16325")
+            self.assertEqual(samples[-1], "1800,16325")
 
     def test_dynamic_overlay_loads_profiles_relative_to_baseline(self) -> None:
         config = load_config(
