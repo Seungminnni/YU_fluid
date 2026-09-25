@@ -149,6 +149,7 @@ def validate_frozen_flow(
     mesh_integral_report_path: str | Path,
     qvol_w_m3: float,
     qvol_samples_path: str | Path | None = None,
+    energy_balance_report_path: str | Path | None = None,
     coolant_cp_j_kgk: float,
     initial_temperature_k: float,
     steady_initial_temperature_k: float | None = None,
@@ -275,6 +276,32 @@ def validate_frozen_flow(
         abs(sample_qvol - qvol_samples[0][1]) > 1e-12
         for _, sample_qvol in qvol_samples[1:]
     )
+    balance_report = (
+        json.loads(Path(energy_balance_report_path).read_text(encoding="utf-8"))
+        if energy_balance_report_path is not None
+        else None
+    )
+    balance_final = balance_report.get("final", {}) if balance_report else {}
+    balance_gate = balance_report.get("energy_balance_gate", {}) if balance_report else {}
+    final_telemetry = telemetry_rows[-1] if telemetry_rows else {}
+    storage_corrected_energy_valid = bool(
+        balance_report
+        and balance_report.get("status") == "TRANSIENT_ENERGY_BALANCE_PASSED"
+        and balance_gate.get("passed") is True
+        and float(balance_gate.get("maximum_fraction", math.inf)) <= 0.02
+        and float(balance_report.get("last_time_s", -1)) == final_time
+        and int(balance_report.get("sample_count", -1)) == expected_telemetry_count
+        and math.isclose(
+            float(balance_final.get("generated_W", math.nan)),
+            float(final_telemetry.get("mesh_integrated_heat_power_w", math.nan)),
+            rel_tol=1e-7,
+        )
+        and math.isclose(
+            float(balance_final.get("removed_W", math.nan)),
+            float(final_telemetry.get("coolant_net_enthalpy_out_w", math.nan)),
+            rel_tol=1e-5,
+        )
+    )
     # With the configured constant properties and zero gravity, the steady
     # temperature rise is linear in source power.  Scale the t=0 steady
     # reference to the final table value instead of comparing a dynamic-source
@@ -338,10 +365,27 @@ def validate_frozen_flow(
         "final_window_has_at_least_61_samples": len(final_rows)
         >= int(round(final_window_s / telemetry_interval_s)) + 1,
         "mass_imbalance_below_0p1_percent": bool(mass) and max(mass) < 0.001,
-        "mean_final_energy_imbalance_below_2_percent": bool(energy)
-        and sum(energy) / len(energy) < 0.02,
-        "maximum_final_energy_imbalance_below_5_percent": bool(energy)
-        and max(energy) < 0.05,
+        # Q_source-Q_out includes energy accumulating in fluid and solid. It is
+        # not a numerical residual while the source varies. For those runs,
+        # require the separate, storage-corrected 2% conservation gate and
+        # cross-check it against this run's final solver telemetry.
+        (
+            "storage_corrected_energy_balance_below_2_percent"
+            if source_is_time_varying
+            else "mean_final_energy_imbalance_below_2_percent"
+        ): (
+            storage_corrected_energy_valid
+            if source_is_time_varying
+            else bool(energy) and sum(energy) / len(energy) < 0.02
+        ),
+        **(
+            {}
+            if source_is_time_varying
+            else {
+                "maximum_final_energy_imbalance_below_5_percent": bool(energy)
+                and max(energy) < 0.05
+            }
+        ),
         # Monotonic heating is a valid gate only for a constant positive heat
         # source.  The Peneklioglu source decreases first and rises later, so a
         # real thermal maximum followed by a temporary decline is expected and
@@ -402,6 +446,11 @@ def validate_frozen_flow(
                 "abs(Q_source-Q_coolant_out)/Q_source; includes fluid/solid "
                 "storage and is not a pure numerical conservation residual"
             ),
+            "storage_corrected_energy_balance_report": (
+                None
+                if energy_balance_report_path is None
+                else str(Path(energy_balance_report_path).resolve())
+            ),
         },
         "time_contract": {
             "end_time_s": end_time_s,
@@ -457,6 +506,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--steady-report", required=True)
     parser.add_argument("--mesh-integral-report", required=True)
+    parser.add_argument("--energy-balance-report")
     parser.add_argument("--qvol", required=True, type=float)
     parser.add_argument("--qvol-samples")
     parser.add_argument("--coolant-cp", required=True, type=float)
@@ -473,6 +523,7 @@ def main(argv: list[str] | None = None) -> int:
             mesh_integral_report_path=args.mesh_integral_report,
             qvol_w_m3=args.qvol,
             qvol_samples_path=args.qvol_samples,
+            energy_balance_report_path=args.energy_balance_report,
             coolant_cp_j_kgk=args.coolant_cp,
             initial_temperature_k=args.initial_temperature,
             steady_initial_temperature_k=args.steady_initial_temperature,

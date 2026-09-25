@@ -16,6 +16,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 
 MODEL_PATTERN = re.compile(r'<script src="([^"?]*model[^"?]*\.js)(?:\?[^"}]*)?"')
@@ -380,7 +381,10 @@ def append_validated_run(
     if not referenced:
         raise ValueError("source CFD result has no published dataset files")
     for relative in referenced:
-        path = (source_viewer / relative).resolve()
+        url = urlsplit(relative)
+        if url.scheme or url.netloc or not url.path or url.path.startswith("/"):
+            raise FileNotFoundError(source_viewer / relative)
+        path = (source_viewer / unquote(url.path)).resolve()
         if not path.is_relative_to(source_data) or not path.is_file() or path.stat().st_size == 0:
             raise FileNotFoundError(source_viewer / relative)
     for stem in ("mesh-data", "mesh-volume-data"):

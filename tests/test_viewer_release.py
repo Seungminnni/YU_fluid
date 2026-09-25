@@ -76,6 +76,9 @@ class ViewerReleaseTests(unittest.TestCase):
             source_model["mesh_runs"][0].pop("inlet_diameter_mm")
             source_model["mesh_runs"][0].pop("outlet_diameter_mm")
             source_model["ports"][1]["radius"] = 12.5
+            source_dataset = source_model["interactive_cfd_by_mesh"]["precision"]["actual_one_second"]["datasets"]["cell_surface"]
+            source_dataset["file"] += "?v=verified"
+            source_dataset["portable_file"] += "?v=verified"
             (source / "model.js").write_text(
                 "window.CFD_TWIN_MODEL = " + json.dumps(source_model) + ";\n",
                 encoding="utf-8",

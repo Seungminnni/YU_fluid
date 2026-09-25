@@ -326,6 +326,49 @@ class ColdFlowValidationTests(unittest.TestCase):
                 dynamic_report["source"]["steady_reference_temperature_k"],
                 299.0,
             )
+            self.assertFalse(
+                dynamic_report["checks"]["storage_corrected_energy_balance_below_2_percent"]
+            )
+
+            balance = root / "energy_balance.json"
+            balance.write_text(
+                json.dumps(
+                    {
+                        "status": "TRANSIENT_ENERGY_BALANCE_PASSED",
+                        "energy_balance_gate": {
+                            "maximum_fraction": 0.02,
+                            "passed": True,
+                        },
+                        "last_time_s": 20,
+                        "sample_count": 20,
+                        "final": {"generated_W": 2.0, "removed_W": 1.95},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            verified_dynamic = validate_frozen_flow(
+                log,
+                run_dir=run,
+                steady_report_path=steady,
+                mesh_integral_report_path=mesh,
+                qvol_w_m3=1.0,
+                qvol_samples_path=samples,
+                energy_balance_report_path=balance,
+                coolant_cp_j_kgk=1.95,
+                initial_temperature_k=300.0,
+                steady_initial_temperature_k=299.0,
+                end_time_s=20.0,
+                telemetry_interval_s=1.0,
+                field_interval_s=5.0,
+                final_window_s=10.0,
+            )
+            self.assertEqual(
+                verified_dynamic["status"], "FROZEN_FLOW_VALIDATION_PASSED"
+            )
+            self.assertGreater(
+                verified_dynamic["final_summary"]["mean_energy_imbalance_fraction"],
+                0.02,
+            )
 
 
 if __name__ == "__main__":

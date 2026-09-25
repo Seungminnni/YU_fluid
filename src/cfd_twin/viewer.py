@@ -2470,10 +2470,16 @@ function cylinderFaces(cell,segments=24,axialSegments=1){
   return faces;
 }
 const cellSurface=flow.cell_surface||null;
+const waterTemperatureRunIds=new Set(["precision","single","exact_phi21","exact_phi23","exact_phi25"]);
 function sharedTemperatureRange(){
-  // Shared display scale for every result and temperature view.  Actual CFD
-  // values stay untouched; jet() clamps values above the upper limit to red.
-  return [19.000,21.044];
+  // Display scales only: preserve every original CFD temperature sample.
+  // Keep the Ø19/21/23 water cases on the supplied Fluent reference;
+  // compare Ø25 water and all dielectric-coolant cases on the same 23 C scale.
+  const inputs=model.inputs_by_mesh?.[activeMeshRunId]||model.inputs||{};
+  const fluidCp=Number(inputs.fluid_cp_J_kgK);
+  const dielectric=Number.isFinite(fluidCp)&&fluidCp>0?fluidCp<3000:!waterTemperatureRunIds.has(activeMeshRunId);
+  const use23DegreeScale=activeMeshRunId==="exact_phi25"||dielectric;
+  return use23DegreeScale?[19.500,23.000]:[19.500,21.450];
 }
 const cellFaces=sceneCells.flatMap(cell=>cylinderFaces(cell,cellSurface?.angular_segments||24,cellSurface?.axial_segments||1));
 const portFaces=scenePorts.flatMap(port=>cylinderFaces(port,24,1));
@@ -2496,6 +2502,28 @@ function jet(value){
   const t=clamp(value),r=clamp(1.5-Math.abs(4*t-3)),g=clamp(1.5-Math.abs(4*t-2)),b=clamp(1.5-Math.abs(4*t-1));
   return [Math.round(255*r),Math.round(255*g),Math.round(255*b)];
 }
+// Sampled from the supplied Fluent temperature legend at its labelled levels.
+// Keep the velocity palette separate; only temperature views use this ramp.
+const temperaturePaletteStops=[
+  [0,[0,42,249]],[.13026,[71,119,239]],[.26,[88,195,221]],
+  [.38974,[122,241,142]],[.52,[192,243,84]],[.65026,[241,195,78]],
+  [.78,[229,110,42]],[.91026,[199,60,25]],[1,[186,42,19]]
+];
+function temperaturePalette(value){
+  const t=clamp(value);
+  for(let index=1;index<temperaturePaletteStops.length;index++){
+    const [upper,high]=temperaturePaletteStops[index], [lower,low]=temperaturePaletteStops[index-1];
+    if(t<=upper){const weight=(t-lower)/(upper-lower);return low.map((channel,axis)=>Math.round(channel+weight*(high[axis]-channel)));}
+  }
+  return temperaturePaletteStops.at(-1)[1];
+}
+function cellSurfacePalette(value){
+  // Fluent's lit solid surfaces look a touch richer than their flat legend.
+  // Apply this only to the 3-D cylinders; the scalar mapping and legend stay fixed.
+  const colour=temperaturePalette(value),midpoint=(Math.max(...colour)+Math.min(...colour))/2;
+  return colour.map(channel=>Math.round(Math.max(0,Math.min(255,midpoint+(channel-midpoint)*1.10))));
+}
+function scalarPalette(value,field){return field==="temperature"?temperaturePalette(value):jet(value);}
 function activeMeshRun(){return meshRuns.find(run=>run.id===activeMeshRunId)||meshRuns[0]||null;}
 function activeMeshWireframe(){return meshWireframes[activeMeshRunId]||null;}
 let projectedMeshCache={key:null,points:null};
@@ -2521,6 +2549,32 @@ function drawActualMeshWireframe(basis,scale,cx,cy,w,h){
     ctx.beginPath();
     for(const edge of group.edges){const a=points[edge[0]],b=points[edge[1]];ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);}
     ctx.strokeStyle=style[0];ctx.lineWidth=style[1];ctx.stroke();
+  }
+  ctx.restore();
+}
+const geometryFrameStroke="rgba(164,195,216,.67)",geometryFrameLineWidth=1.25;
+function drawTemperaturePortOutlines(basis,scale,cx,cy){
+  // In the cell-only temperature view, retain the port geometry as clean
+  // outlines without filling it or implying a cell-surface temperature there.
+  // Use precisely the same stroke as the enclosure frame for both ports.
+  ctx.save();ctx.strokeStyle=geometryFrameStroke;ctx.lineWidth=geometryFrameLineWidth;
+  for(const port of scenePorts){
+    const bottom=port.z-port.length/2,top=port.z+port.length/2,segments=32;
+    for(const z of [bottom,top]){
+      ctx.beginPath();
+      for(let index=0;index<=segments;index++){
+        const angle=2*Math.PI*index/segments;
+        const point=projected([port.x+port.radius*Math.cos(angle),port.y+port.radius*Math.sin(angle),z],basis,scale,cx,cy);
+        if(index===0)ctx.moveTo(point.x,point.y);else ctx.lineTo(point.x,point.y);
+      }
+      ctx.stroke();
+    }
+    for(let index=0;index<4;index++){
+      const angle=Math.PI*index/2;
+      const x=port.x+port.radius*Math.cos(angle),y=port.y+port.radius*Math.sin(angle);
+      const a=projected([x,y,bottom],basis,scale,cx,cy),b=projected([x,y,top],basis,scale,cx,cy);
+      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -2590,7 +2644,7 @@ function sectionRaster(section,field,range){
     const index=row*section.columns+column,value=field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];
     if(!Number.isFinite(value))continue;
     const imageRow=flipRow?section.rows-1-row:row,imageColumn=flipColumn?section.columns-1-column:column;
-    const colour=jet((value-range[0])/Math.max(1e-12,range[1]-range[0])),pixel=4*(imageRow*section.columns+imageColumn);
+    const colour=scalarPalette((value-range[0])/Math.max(1e-12,range[1]-range[0]),field),pixel=4*(imageRow*section.columns+imageColumn);
     raster.pixels.data[pixel]=colour[0];raster.pixels.data[pixel+1]=colour[1];raster.pixels.data[pixel+2]=colour[2];raster.pixels.data[pixel+3]=255;
   }
   raster.context.putImageData(raster.pixels,0,0);if(field==="velocity")raster.fixedReady=true;return raster.canvas;
@@ -2686,7 +2740,7 @@ function drawDirectXYGrid(section,field,w,h,showScalar=true){
     }else for(let index=0;index<section.columns*section.rows;index++){
       const value=field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];if(!Number.isFinite(value))continue;
       const point=planePoint(section,index),x=layout.left+(box.x-point[0])*layout.scale,y=layout.top+point[1]*layout.scale;
-      const colour=jet((value-range[0])/Math.max(1e-12,range[1]-range[0]));
+      const colour=scalarPalette((value-range[0])/Math.max(1e-12,range[1]-range[0]),field);
       ctx.fillStyle=`rgb(${colour[0]},${colour[1]},${colour[2]})`;ctx.fillRect(x-stepX/2,y-stepY/2,stepX+.35,stepY+.35);
     }
     if(visibility.grid){
@@ -2796,7 +2850,7 @@ function temperatureSectionRange(section){
 }
 function temperatureColour(value,range,alpha=1){
   if(!Number.isFinite(value)||!range)return null;
-  const [r,g,b]=jet((value-range[0])/Math.max(1e-9,range[1]-range[0]));
+  const [r,g,b]=temperaturePalette((value-range[0])/Math.max(1e-9,range[1]-range[0]));
   return alpha>=1?`rgb(${r},${g},${b})`:`rgba(${r},${g},${b},${alpha})`;
 }
 function cellSurfaceRingIndex(cell,z){
@@ -2921,7 +2975,7 @@ function thermalFaceGradient(face,points,range,fallback){
   if(Math.abs(temperatures[hot]-temperatures[cold])<1e-10)return fallback;
   const gradient=ctx.createLinearGradient(points[cold].x,points[cold].y,points[hot].x,points[hot].y);
   for(const [position,index] of [[0,cold],[.5,-1],[1,hot]]){
-    const temperature=index<0?meanFinite(temperatures):temperatures[index],colour=jet((temperature-range[0])/Math.max(1e-9,range[1]-range[0]));
+    const temperature=index<0?meanFinite(temperatures):temperatures[index],colour=cellSurfacePalette((temperature-range[0])/Math.max(1e-9,range[1]-range[0]));
     // 배터리는 불투명한 고체다. 반투명 색을 쓰면 painter 정렬 오차나
     // 겹친 원통의 뒷면이 비쳐 재생 중 셀이 갑자기 투명해 보일 수 있다.
     gradient.addColorStop(position,`rgb(${colour[0]},${colour[1]},${colour[2]})`);
@@ -2971,13 +3025,14 @@ function drawScalarLegend(w,h,title,range,unit,legendId="legend",side="left"){
   // Keep the larger type requested for presentations, but adapt the number of
   // labelled ticks to the short embedded viewer. Fixed 19-label legends were
   // unreadable once the text grew, even though the colour bar itself fitted.
-  const height=Math.min(Math.round(320*uiScale),Math.max(Math.round(112*uiScale),h-Math.round(90*uiScale)));
+  const height=Math.min(Math.round(320*uiScale),Math.max(Math.round(112*uiScale),h-Math.round(72*uiScale)));
   const width=Math.round(12*uiScale),panelWidth=Math.round(102*uiScale),panelHeight=height+Math.round(60*uiScale);
   const defaultLeft=side==="right"?w-panelWidth-Math.round(18*uiScale):Math.round(18*uiScale);
   const position=overlayBoxPosition(legendId,w,h,panelWidth,panelHeight,defaultLeft,Math.round(16*uiScale)),x=position.left,y=position.top+Math.round(30*uiScale);
   registerOverlayHitbox(legendId,position.left,position.top,panelWidth,panelHeight);
   const gradient=ctx.createLinearGradient(0,y+height,0,y);
-  for(let index=0;index<=8;index++){const t=index/8,[r,g,b]=jet(t);gradient.addColorStop(t,`rgb(${r},${g},${b})`);}
+  const paletteStops=unit==="C"?temperaturePaletteStops:Array.from({length:9},(_,index)=>[index/8,jet(index/8)]);
+  for(const [t,[r,g,b]] of paletteStops)gradient.addColorStop(t,`rgb(${r},${g},${b})`);
   ctx.fillStyle=gradient;ctx.fillRect(x,y,width,height);ctx.strokeStyle="rgba(230,240,250,.7)";ctx.strokeRect(x,y,width,height);
   ctx.fillStyle="rgba(232,242,250,.96)";ctx.font=`700 ${Math.round(11*uiScale)}px system-ui`;ctx.fillText(title,x-1,y-Math.round(24*uiScale));
   const colourSmooth=smoothSectionInput.checked&&["combined","cell-temperature","xy-temperature","xz-temperature"].includes(visualMode);
@@ -2985,13 +3040,18 @@ function drawScalarLegend(w,h,title,range,unit,legendId="legend",side="left"){
   ctx.fillStyle="rgba(145,168,188,.96)";ctx.font=`600 ${Math.round(9*uiScale)}px system-ui`;ctx.fillText(unit==="C"?scaleLabel:"ACTUAL CFD · GLOBAL U SCALE",x-1,y-Math.round(10*uiScale));
   const tickFontPx=Math.round(9*uiScale),preferredIntervals=unit==="C"?10:9;
   const intervals=Math.min(preferredIntervals,Math.max(4,Math.floor(height/Math.max(18,tickFontPx*1.7))));
+  const fluentWaterTicks=unit==="C"&&Math.abs(low-19.5)<1e-9&&Math.abs(high-21.45)<1e-9
+    ?[21.450,21.275,21.021,20.768,20.514,20.260,20.007,19.754,19.500]:null;
+  const values=fluentWaterTicks?(height>=Math.round(145*uiScale)?fluentWaterTicks:[21.450,21.021,20.514,20.007,19.500])
+    :Array.from({length:intervals+1},(_,index)=>high-(high-low)*index/intervals);
   ctx.font=`700 ${tickFontPx}px ui-monospace,monospace`;
-  for(let index=0;index<=intervals;index++){
-    const fraction=index/intervals,position=y+height*fraction,value=high-(high-low)*fraction;
+  for(let index=0;index<values.length;index++){
+    const value=values[index],position=y+height*(high-value)/Math.max(1e-9,high-low);
     ctx.strokeStyle="rgba(235,243,249,.88)";ctx.lineWidth=.8;ctx.beginPath();ctx.moveTo(x+width,position);ctx.lineTo(x+width+Math.round(7*uiScale),position);ctx.stroke();
     ctx.fillStyle="rgba(232,242,250,.96)";ctx.fillText(value.toFixed(3),x+width+Math.round(10*uiScale),position+Math.round(3*uiScale));
-    if(index<intervals)for(let minor=1;minor<5;minor++){
-      const minorY=position+height/intervals*minor/5;ctx.strokeStyle="rgba(220,233,242,.58)";ctx.beginPath();ctx.moveTo(x+width,minorY);ctx.lineTo(x+width+Math.round(3*uiScale),minorY);ctx.stroke();
+    if(!fluentWaterTicks&&index<values.length-1)for(let minor=1;minor<5;minor++){
+      const nextY=y+height*(high-values[index+1])/Math.max(1e-9,high-low);
+      const minorY=position+(nextY-position)*minor/5;ctx.strokeStyle="rgba(220,233,242,.58)";ctx.beginPath();ctx.moveTo(x+width,minorY);ctx.lineTo(x+width+Math.round(3*uiScale),minorY);ctx.stroke();
     }
   }
   ctx.fillStyle="rgba(232,242,250,.96)";ctx.font=`700 ${Math.round(10*uiScale)}px system-ui`;ctx.fillText(`[${unit}]`,x-1,y+height+Math.round(18*uiScale));
@@ -3045,7 +3105,7 @@ function drawDirectSampleTiles(section,field,basis,scale,cx,cy,range,alpha){
   }
   quads.sort((a,b)=>a.depth-b.depth);
   for(const quad of quads){
-    const normalised=(quad.value-range[0])/Math.max(1e-9,range[1]-range[0]),[r,g,b]=jet(normalised),points=quad.points.map(point=>projected(point,basis,scale,cx,cy));
+    const normalised=(quad.value-range[0])/Math.max(1e-9,range[1]-range[0]),[r,g,b]=scalarPalette(normalised,field),points=quad.points.map(point=>projected(point,basis,scale,cx,cy));
     ctx.beginPath();ctx.moveTo(points[0].x,points[0].y);for(let index=1;index<points.length;index++)ctx.lineTo(points[index].x,points[index].y);ctx.closePath();
     ctx.fillStyle=`rgba(${r},${g},${b},${alpha})`;ctx.fill();
     if(visibility.grid){ctx.strokeStyle="rgba(225,238,246,.13)";ctx.lineWidth=.25;ctx.stroke();}
@@ -3072,7 +3132,7 @@ function drawSection(section,field,basis,scale,cx,cy,rangeOverride=null,alpha=.8
   }
   quads.sort((a,b)=>a.depth-b.depth);
   for(const quad of quads){
-    const normalised=(quad.value-range[0])/Math.max(1e-9,range[1]-range[0]),[r,g,b]=jet(normalised);
+    const normalised=(quad.value-range[0])/Math.max(1e-9,range[1]-range[0]),[r,g,b]=scalarPalette(normalised,field);
     const points=quad.points.map(point=>projected(point,basis,scale,cx,cy));
     ctx.beginPath();ctx.moveTo(points[0].x,points[0].y);for(let index=1;index<points.length;index++)ctx.lineTo(points[index].x,points[index].y);ctx.closePath();
     ctx.fillStyle=`rgba(${r},${g},${b},${alpha})`;ctx.fill();
@@ -3361,17 +3421,16 @@ function drawScene(){
   }
   const sorted=projectedFaces(basis,scale,cx,cy,w,h);
   for(const item of sorted){
+    const isPort=item.face.kind.startsWith("port");
+    // Cell-temperature view is only about battery cells: omit the inlet and
+    // outlet geometry entirely. Other views retain their original port styling.
+    if(isPort&&visualMode==="cell-temperature")continue;
     const pts=item.points;
     ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x,pts[i].y); ctx.closePath();
     const shade=Math.max(0,Math.min(1,(item.depth+90)/180));
-    const isPort=item.face.kind.startsWith("port");
     if(!isPort&&!visibility.cells)continue;
     const temperature=isPort?null:surfaceThermalValue(item.face.id,item.face.surfaceIndex);
-    if(isPort&&thermalDisplay){
-      const portT=portTemperature(item.face.id),range=sharedTemperatureRange(),normalised=(portT-range[0])/Math.max(1e-9,range[1]-range[0]);
-      const [r,g,b]=jet(normalised);ctx.fillStyle=`rgb(${r},${g},${b})`;
-    }
-    else if(isPort&&velocityDisplay){
+    if(isPort&&velocityDisplay){
       const key=item.face.id==="IN"?"inlet_mean_velocity_m_s":"outlet_mean_velocity_m_s";
       const normalised=flow.port_flow[key]/velocityDisplayMaximum(),[r,g,b]=jet(normalised);
       ctx.fillStyle=`rgba(${r},${g},${b},.88)`;
@@ -3379,7 +3438,7 @@ function drawScene(){
     else if(isPort){ctx.fillStyle=`rgba(239,147,43,${0.62+0.14*shade})`;}
     else if(thermalCells&&Number.isFinite(temperature)){
       const range=sharedTemperatureRange(),normalised=(temperature-range[0])/Math.max(1e-9,range[1]-range[0]);
-      const [r,g,b]=jet(normalised);
+      const [r,g,b]=cellSurfacePalette(normalised);
       const fallback=`rgb(${r},${g},${b})`;ctx.fillStyle=smoothSectionInput.checked?thermalFaceGradient(item.face,pts,range,fallback):fallback;
     }else if(thermalCells){
       // 직접 표본이 invalid인 면도 투명하게 만들지 않는다. 중립 불투명색으로
@@ -3392,12 +3451,16 @@ function drawScene(){
     if(thermalDisplay&&(isPort||thermalCells)){
       // Shade the rendered solid like Fluent without altering temperature,
       // colour-map normalisation, section plots, or the scalar legend.
-      ctx.fillStyle=`rgba(0,0,0,${fluentSurfaceShadow(item.face,basis)})`;ctx.fill();
+      // The cell cylinders need a little more depth than the 2-D legend;
+      // leave port styling and temperature cut planes unchanged.
+      const shadow=fluentSurfaceShadow(item.face,basis)+(thermalCells&&!isPort?.19:0);
+      ctx.fillStyle=`rgba(0,0,0,${shadow})`;ctx.fill();
     }
     const highlighted=!isPort&&item.face.id===highlightedCellId;
     ctx.strokeStyle=highlighted?"rgba(2,5,7,.99)":thermalCells&&!isPort?"rgba(225,238,246,.045)":"rgba(225,238,246,.26)";
     ctx.lineWidth=highlighted?2.4:thermalCells&&!isPort?.22:.55;ctx.stroke();
   }
+  if(visualMode==="cell-temperature")drawTemperaturePortOutlines(basis,scale,cx,cy);
   if(visibility.section){
     if(visualMode==="xy-temperature"){
       const section=horizontalSection();
@@ -3433,7 +3496,7 @@ function drawScene(){
     if(visualMode==="velocity-streamlines")drawFlow(flow.streamlines||[],basis,scale,cx,cy);
   }
   if(visibility.enclosure&&visualMode!=="xy-velocity"){
-    ctx.lineWidth=1.25; ctx.strokeStyle="rgba(164,195,216,.67)";
+    ctx.lineWidth=geometryFrameLineWidth; ctx.strokeStyle=geometryFrameStroke;
     for(const edge of edges){
       const a=projected(vertices[edge[0]],basis,scale,cx,cy),b=projected(vertices[edge[1]],basis,scale,cx,cy);
       ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
@@ -3443,7 +3506,7 @@ function drawScene(){
     const inlet=projected([scenePorts[0].x,scenePorts[0].y,scenePorts[0].z+scenePorts[0].length/2],basis,scale,cx,cy);
     const outlet=projected([scenePorts[1].x,scenePorts[1].y,scenePorts[1].z-scenePorts[1].length/2],basis,scale,cx,cy);
     const inletMetrics=portMetrics("IN"),outletMetrics=portMetrics("OUT");
-    if(visibility.ports&&visualMode!=="xy-velocity"){
+    if(visibility.ports&&visualMode!=="xy-velocity"&&visualMode!=="cell-temperature"){
       drawPortCallout(inlet,"IN",inletMetrics,"rgba(255,189,91,.98)",w,h);
       drawPortCallout(outlet,"OUT",outletMetrics,"rgba(99,215,229,.98)",w,h);
     }
@@ -3455,13 +3518,13 @@ function drawScene(){
       }
     }
     updatePortStateText(inletMetrics,outletMetrics);
-    if(visibility.temperatureLegend&&visualMode==="combined"&&visibility.cells)drawScalarLegend(w,h,"Cell surface T · shared scale",sharedTemperatureRange(),"C","temperature-legend","right");
+    if(visibility.temperatureLegend&&visualMode==="combined"&&visibility.cells)drawScalarLegend(w,h,"Cell surface T",sharedTemperatureRange(),"C","temperature-legend","right");
     if(visibility.velocityLegend&&visualMode==="combined"&&visibility.flow)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s","velocity-legend","left");
-    if(visibility.temperatureLegend&&visualMode==="cell-temperature"&&visibility.cells)drawScalarLegend(w,h,"Cell surface T · shared scale",sharedTemperatureRange(),"C");
+    if(visibility.temperatureLegend&&visualMode==="cell-temperature"&&visibility.cells)drawScalarLegend(w,h,"Cell surface T",sharedTemperatureRange(),"C");
     if(visibility.velocityLegend&&visualMode==="velocity-streamlines"&&visibility.flow)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
-    if(visibility.temperatureLegend&&visualMode==="xy-temperature"&&visibility.section)drawScalarLegend(w,h,"Fluid + cell cut T · shared scale",temperatureSectionRange(horizontalSection()),"C");
+    if(visibility.temperatureLegend&&visualMode==="xy-temperature"&&visibility.section)drawScalarLegend(w,h,"Fluid + cell cut T",temperatureSectionRange(horizontalSection()),"C");
     if(visibility.velocityLegend&&visualMode==="xy-velocity"&&visibility.section)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
-    if(visibility.temperatureLegend&&visualMode==="xz-temperature"&&visibility.section){const section=verticalSection(),plane=section?.kind?.toUpperCase()||"VERTICAL",hasFluidSection=Boolean(section?.actual_dataset)||exactSolidSectionActive(section);drawScalarLegend(w,h,`${hasFluidSection?"Fluid + ":""}cell cut T · ${plane} · shared scale`,verticalRange("temperature"),"C");}
+    if(visibility.temperatureLegend&&visualMode==="xz-temperature"&&visibility.section){const section=verticalSection(),plane=section?.kind?.toUpperCase()||"VERTICAL",hasFluidSection=Boolean(section?.actual_dataset)||exactSolidSectionActive(section);drawScalarLegend(w,h,`${hasFluidSection?"Fluid + ":""}cell cut T · ${plane}`,verticalRange("temperature"),"C");}
     if(visibility.velocityLegend&&visualMode==="xz-velocity"&&visibility.section)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
     updateFlowClock();
   }else{ctx.fillStyle="rgba(255,189,91,.92)";ctx.font="700 11px system-ui";ctx.fillText("Ø19 mm IN / OUT",16,h-34);}

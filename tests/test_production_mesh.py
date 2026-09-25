@@ -775,6 +775,11 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("--qvol-samples", frozen_script)
             self.assertIn("--field-interval 1", frozen_script)
             self.assertIn("build_energy_balance.py", frozen_script)
+            self.assertLess(
+                frozen_script.index("build_energy_balance.py"),
+                frozen_script.index("validate_frozen_flow.py"),
+            )
+            self.assertIn("--energy-balance-report", frozen_script)
             self.assertIn("--initial-fluid-temperature", frozen_script)
             self.assertIn("--initial-solid-temperature", frozen_script)
             self.assertIn("TRANSIENT_DELTA_T", frozen_script)

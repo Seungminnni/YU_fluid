@@ -1,0 +1,14 @@
+# Shell Immersion Cooling Fluid S3 X exploratory 20 °C constant-property
+# comparison. All four values below are approximate readings supplied by the
+# user from Figure 2 of Shell TechXplorer Digest (2024), not tabulated
+# manufacturer specifications. The 20 °C density is about 805 kg/m^3,
+# dynamic viscosity about 16.0 mPa*s, conductivity about 0.1437 W/(m*K),
+# and heat capacity about 1.950 kJ/(kg*K).
+# The unchanged CFD inlet is 293 K (19.85 °C), 0.15 °C below this basis.
+# https://www.shell.com/what-we-do/technology-and-innovation/shell-techxplorer-digest/2024-2-shell-techxplorer-digest/_jcr_content/root/main/section_1944918422/text_52551135_copy.multi.stream/1733905937706/9fd4662bd944feff58b1b5f08ab89e570e99c4ac/STCHDigest2024_12_shivaprasad.pdf
+fluid:
+  name: shell_s3x_20c_approximate
+  density: "805 kg/m^3"
+  specific_heat: "1950 J/(kg*K)"
+  thermal_conductivity: "0.1437 W/(m*K)"
+  dynamic_viscosity: "0.0160 Pa*s"

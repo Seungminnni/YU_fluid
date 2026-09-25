@@ -24,8 +24,26 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class ViewerTests(unittest.TestCase):
-    def test_shared_temperature_display_range_is_19_to_21_044_c(self) -> None:
-        self.assertIn("return [19.000,21.044]", JAVASCRIPT)
+    def test_temperature_display_ranges_follow_water_and_oil_legend_contract(self) -> None:
+        self.assertIn('const use23DegreeScale=activeMeshRunId==="exact_phi25"||dielectric;', JAVASCRIPT)
+        self.assertIn("return use23DegreeScale?[19.500,23.000]:[19.500,21.450]", JAVASCRIPT)
+        self.assertIn("[21.450,21.275,21.021,20.768,20.514,20.260,20.007,19.754,19.500]", JAVASCRIPT)
+        self.assertIn("const temperaturePaletteStops=[", JAVASCRIPT)
+        self.assertIn("[.52,[192,243,84]]", JAVASCRIPT)
+        self.assertIn('const paletteStops=unit==="C"?temperaturePaletteStops', JAVASCRIPT)
+        self.assertIn('function scalarPalette(value,field){return field==="temperature"?temperaturePalette(value):jet(value);}', JAVASCRIPT)
+        self.assertIn('if(isPort&&visualMode==="cell-temperature")continue;', JAVASCRIPT)
+        self.assertIn('visibility.ports&&visualMode!=="xy-velocity"&&visualMode!=="cell-temperature"', JAVASCRIPT)
+        self.assertNotIn('if(isPort&&thermalDisplay){ctx.fillStyle=`rgba(182,198,207,', JAVASCRIPT)
+        self.assertIn('fluentSurfaceShadow(item.face,basis)+(thermalCells&&!isPort?.19:0)', JAVASCRIPT)
+        self.assertIn('function cellSurfacePalette(value)', JAVASCRIPT)
+        self.assertIn('const [r,g,b]=cellSurfacePalette(normalised)', JAVASCRIPT)
+        self.assertIn('if(visualMode==="cell-temperature")drawTemperaturePortOutlines(basis,scale,cx,cy)', JAVASCRIPT)
+        self.assertIn('function drawTemperaturePortOutlines(basis,scale,cx,cy)', JAVASCRIPT)
+        self.assertIn('const geometryFrameStroke="rgba(164,195,216,.67)",geometryFrameLineWidth=1.25', JAVASCRIPT)
+        self.assertIn('ctx.save();ctx.strokeStyle=geometryFrameStroke;ctx.lineWidth=geometryFrameLineWidth;', JAVASCRIPT)
+        self.assertIn('ctx.lineWidth=geometryFrameLineWidth; ctx.strokeStyle=geometryFrameStroke;', JAVASCRIPT)
+        self.assertNotIn("const portT=portTemperature(item.face.id),range=sharedTemperatureRange()", JAVASCRIPT)
         self.assertIn("const t=clamp(value)", JAVASCRIPT)
         self.assertIn("return sharedTemperatureRange()", JAVASCRIPT)
 
@@ -563,7 +581,7 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('"velocity-legend","left"', script)
             self.assertIn('"temperature-legend","right"', script)
             self.assertIn("function sharedTemperatureRange", script)
-            self.assertIn("return [19.000,21.044]", script)
+            self.assertIn("return use23DegreeScale?[19.500,23.000]:[19.500,21.450]", script)
             self.assertIn('preferredIntervals=unit==="C"?10:9', script)
             self.assertIn("const activeGeometry=(model.geometry_by_mesh||{})", script)
             self.assertIn('visibility.temperatureLegend', script)
