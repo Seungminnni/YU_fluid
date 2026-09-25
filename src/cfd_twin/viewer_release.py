@@ -69,16 +69,24 @@ def validate_server_viewer(viewer_dir: str | Path) -> dict[str, object]:
         target = _local_file(viewer, viewer, raw)
         if target is None or not target.is_file() or target.stat().st_size == 0:
             raise FileNotFoundError(viewer / raw)
-    for run_id in model_ids:
+    for run in runs:
+        if not run.get("data_ready"):
+            continue
+        run_id = str(run["id"])
         if not re.fullmatch(r"[a-z][a-z0-9_]*", run_id):
             raise ValueError(f"unsafe run id: {run_id}")
+        asset_id = str(run.get("asset_source_id") or run_id)
+        if asset_id not in model_ids or not re.fullmatch(r"[a-z][a-z0-9_]*", asset_id):
+            raise ValueError(f"invalid asset source for {run_id}: {asset_id}")
+        if run.get("display_variant_of") and run["display_variant_of"] != asset_id:
+            raise ValueError(f"display variant source differs from assets for {run_id}")
         for stem in ("mesh-data", "mesh-volume-data"):
-            target = viewer / f"{stem}-{run_id}.js"
+            target = viewer / f"{stem}-{asset_id}.js"
             if not target.is_file() or target.stat().st_size == 0:
                 raise FileNotFoundError(target)
         for view in ("top", "side"):
             for suffix in (".svg", ".en.svg"):
-                target = viewer / "cad" / f"cad_{run_id}_{view}{suffix}"
+                target = viewer / "cad" / f"cad_{asset_id}_{view}{suffix}"
                 if not target.is_file():
                     raise FileNotFoundError(target)
     for page in (viewer / "index.html", viewer / "results.html", viewer / "mesh.html", viewer / "cad/index.html"):

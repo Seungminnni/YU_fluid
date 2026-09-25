@@ -81,7 +81,7 @@
           ? (english() ? "The preserved Ø19 CFD geometry is displayed with its documented rigid Y reflection. The source simulation was not rerun." : "기존 Ø19 계산 형상을 Y축으로 반사해 표시했습니다. 원본 계산은 다시 돌리지 않았습니다.")
           : (english() ? "CAD geometry used for this validated calculation." : "이 검증된 계산에 사용한 CAD 형상입니다.");
         for (const [view, projection] of [["top", run.projection_top], ["side", run.projection_side]]) {
-          const drawing = `cad_${run.id}_${view}${english()?".en":""}.svg`;
+          const drawing = `cad_${run.asset_source_id || run.id}_${view}${english()?".en":""}.svg`;
           document.getElementById(`${view}-image`).src = drawing;
           document.getElementById(`${view}-link`).href = drawing;
           document.getElementById(`${view}-download`).href = drawing;

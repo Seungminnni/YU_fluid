@@ -7,7 +7,10 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from cfd_twin.cad_case_drawings import write_case_drawings
-from cfd_twin.multi_case_viewer import append_validated_run, read_viewer_model, refresh_four_case_manifest
+from cfd_twin.multi_case_viewer import (
+    add_temperature_display_variant, append_validated_run, read_viewer_model,
+    refresh_four_case_manifest, write_four_case_model,
+)
 from cfd_twin.viewer_release import package_demo_viewer, validate_server_viewer
 from cfd_twin.workflow_app import workflow_status
 
@@ -66,6 +69,29 @@ def _viewer(path: Path, diameter: int) -> None:
 
 
 class ViewerReleaseTests(unittest.TestCase):
+    def test_comparison_variant_uses_source_mesh_and_cad_without_duplicate_cfd_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            viewer = Path(temporary) / "viewer"
+            _viewer(viewer, 25)
+            model, _ = read_viewer_model(viewer)
+            add_temperature_display_variant(
+                model, source_id="precision", variant_id="water_phi25_compare",
+                label="Ø25 mm · 물 · 비교 범례", label_en="Ø25 mm · Water · comparison scale",
+                range_c=(19.5, 23.0),
+            )
+            write_four_case_model(viewer, model)
+            manifest = refresh_four_case_manifest(viewer)
+            self.assertEqual(manifest["runs"][1]["asset_source_id"], "precision")
+            self.assertEqual(manifest["runs"][1]["display_variant_of"], "precision")
+            self.assertEqual(manifest["runs"][1]["temperature_legend_range_c"], [19.5, 23.0])
+            self.assertEqual(validate_server_viewer(viewer)["runs"], ["precision", "water_phi25_compare"])
+            self.assertFalse((viewer / "mesh-data-water_phi25_compare.js").exists())
+            archive = Path(temporary) / "demo.zip"
+            package_demo_viewer(viewer, archive)
+            with ZipFile(archive) as compressed:
+                self.assertIn("viewer/mesh-data-precision.js", compressed.namelist())
+                self.assertNotIn("viewer/mesh-data-water_phi25_compare.js", compressed.namelist())
+
     def test_new_validated_run_appears_in_server_and_identical_demo_zip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

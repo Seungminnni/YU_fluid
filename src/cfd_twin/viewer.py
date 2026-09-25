@@ -2473,13 +2473,14 @@ const cellSurface=flow.cell_surface||null;
 const waterTemperatureRunIds=new Set(["precision","single","exact_phi21","exact_phi23","exact_phi25"]);
 function sharedTemperatureRange(){
   // Display scales only: preserve every original CFD temperature sample.
-  // Keep the Ø19/21/23 water cases on the supplied Fluent reference;
-  // compare Ø25 water and all dielectric-coolant cases on the same 23 C scale.
+  // The four original water results use the supplied Fluent reference. The
+  // additional Ø25 water display variant and dielectric fluids share 23 C.
+  const selectedRange=activeMeshRun()?.temperature_legend_range_c;
+  if(Array.isArray(selectedRange)&&selectedRange.length===2&&selectedRange[1]>selectedRange[0])return selectedRange;
   const inputs=model.inputs_by_mesh?.[activeMeshRunId]||model.inputs||{};
   const fluidCp=Number(inputs.fluid_cp_J_kgK);
   const dielectric=Number.isFinite(fluidCp)&&fluidCp>0?fluidCp<3000:!waterTemperatureRunIds.has(activeMeshRunId);
-  const use23DegreeScale=activeMeshRunId==="exact_phi25"||dielectric;
-  return use23DegreeScale?[19.500,23.000]:[19.500,21.450];
+  return dielectric?[19.500,23.000]:[19.908,21.044];
 }
 const cellFaces=sceneCells.flatMap(cell=>cylinderFaces(cell,cellSurface?.angular_segments||24,cellSurface?.axial_segments||1));
 const portFaces=scenePorts.flatMap(port=>cylinderFaces(port,24,1));
@@ -3040,9 +3041,9 @@ function drawScalarLegend(w,h,title,range,unit,legendId="legend",side="left"){
   ctx.fillStyle="rgba(145,168,188,.96)";ctx.font=`600 ${Math.round(9*uiScale)}px system-ui`;ctx.fillText(unit==="C"?scaleLabel:"ACTUAL CFD · GLOBAL U SCALE",x-1,y-Math.round(10*uiScale));
   const tickFontPx=Math.round(9*uiScale),preferredIntervals=unit==="C"?10:9;
   const intervals=Math.min(preferredIntervals,Math.max(4,Math.floor(height/Math.max(18,tickFontPx*1.7))));
-  const fluentWaterTicks=unit==="C"&&Math.abs(low-19.5)<1e-9&&Math.abs(high-21.45)<1e-9
-    ?[21.450,21.275,21.021,20.768,20.514,20.260,20.007,19.754,19.500]:null;
-  const values=fluentWaterTicks?(height>=Math.round(145*uiScale)?fluentWaterTicks:[21.450,21.021,20.514,20.007,19.500])
+  const fluentWaterTicks=unit==="C"&&Math.abs(low-19.908)<1e-9&&Math.abs(high-21.044)<1e-9
+    ?[21.044,20.930,20.817,20.703,20.590,20.476,20.362,20.249,20.135,20.022,19.908]:null;
+  const values=fluentWaterTicks?(height>=Math.round(145*uiScale)?fluentWaterTicks:[21.044,20.817,20.590,20.362,20.135,19.908])
     :Array.from({length:intervals+1},(_,index)=>high-(high-low)*index/intervals);
   ctx.font=`700 ${tickFontPx}px ui-monospace,monospace`;
   for(let index=0;index<values.length;index++){

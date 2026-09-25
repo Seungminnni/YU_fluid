@@ -8,7 +8,7 @@ from pathlib import Path
 
 from cfd_twin.cad_case_drawings import write_case_drawings
 from cfd_twin.multi_case_viewer import (
-    assemble_four_case_viewer, combine_models, read_viewer_model,
+    add_temperature_display_variant, assemble_four_case_viewer, combine_models, read_viewer_model,
     publish_diameter_mesh_viewer, prune_archived_diameter_results,
     refresh_diameter_comparison,
 )
@@ -75,8 +75,8 @@ class MultiCaseViewerTests(unittest.TestCase):
             self.assertIn('id="mesh-case-select"', html)
             self.assertIn('src="four_case_data.js"', html)
             self.assertNotIn('src="mesh-data.js"', html)
-            self.assertIn('selectedMeshId==="precision"', javascript)
-            self.assertIn('`mesh-volume-data-${selectedMeshId}.js`', javascript)
+            self.assertIn('selectedMeshAssetId==="precision"', javascript)
+            self.assertIn('`mesh-volume-data-${selectedMeshAssetId}.js`', javascript)
             for run_id in run_ids:
                 self.assertEqual(
                     (viewer / f"mesh-data-{run_id}.js").read_text(encoding="utf-8"),
@@ -86,6 +86,37 @@ class MultiCaseViewerTests(unittest.TestCase):
                     (viewer / f"mesh-volume-data-{run_id}.js").read_text(encoding="utf-8"),
                     f"volume-{run_id}",
                 )
+
+    def test_comparison_legend_variant_reuses_validated_water_data(self) -> None:
+        model = _source_model(25, 624_788)
+        model.update(actual_solver_data=True, validation_status="FROZEN_FLOW_VALIDATION_PASSED")
+        model["mesh_runs"][0]["label"] = "Ø25 mm"
+        model["mesh_runs"][0]["label_en"] = "Ø25 mm"
+        model["mesh_runs"][0]["temperature_legend_range_c"] = [19.908, 21.044]
+        add_temperature_display_variant(
+            model, source_id="precision", variant_id="water_phi25_compare",
+            label="Ø25 mm · 물 · 비교 범례", label_en="Ø25 mm · Water · comparison scale",
+            range_c=(19.5, 23.0),
+        )
+        self.assertEqual([run["id"] for run in model["mesh_runs"]], ["precision", "water_phi25_compare"])
+        variant = model["mesh_runs"][1]
+        self.assertEqual(variant["temperature_legend_range_c"], [19.5, 23.0])
+        self.assertEqual(variant["asset_source_id"], "precision")
+        self.assertEqual(model["mesh_runs"][0]["temperature_legend_range_c"], [19.908, 21.044])
+        self.assertEqual(
+            model["interactive_cfd_by_mesh"]["water_phi25_compare"],
+            model["interactive_cfd_by_mesh"]["precision"],
+        )
+        self.assertIsNot(
+            model["interactive_cfd_by_mesh"]["water_phi25_compare"],
+            model["interactive_cfd_by_mesh"]["precision"],
+        )
+        add_temperature_display_variant(
+            model, source_id="precision", variant_id="water_phi25_compare",
+            label="Ø25 mm · 물 · 비교 범례", label_en="Ø25 mm · Water · comparison scale",
+            range_c=(19.5, 23.0),
+        )
+        self.assertEqual(len(model["mesh_runs"]), 2)
 
     def test_combines_four_runs_without_mutating_sources(self) -> None:
         legacy = _source_model(19, 611_313)

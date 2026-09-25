@@ -25,9 +25,9 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 class ViewerTests(unittest.TestCase):
     def test_temperature_display_ranges_follow_water_and_oil_legend_contract(self) -> None:
-        self.assertIn('const use23DegreeScale=activeMeshRunId==="exact_phi25"||dielectric;', JAVASCRIPT)
-        self.assertIn("return use23DegreeScale?[19.500,23.000]:[19.500,21.450]", JAVASCRIPT)
-        self.assertIn("[21.450,21.275,21.021,20.768,20.514,20.260,20.007,19.754,19.500]", JAVASCRIPT)
+        self.assertIn("const selectedRange=activeMeshRun()?.temperature_legend_range_c;", JAVASCRIPT)
+        self.assertIn("return dielectric?[19.500,23.000]:[19.908,21.044]", JAVASCRIPT)
+        self.assertIn("[21.044,20.930,20.817,20.703,20.590,20.476,20.362,20.249,20.135,20.022,19.908]", JAVASCRIPT)
         self.assertIn("const temperaturePaletteStops=[", JAVASCRIPT)
         self.assertIn("[.52,[192,243,84]]", JAVASCRIPT)
         self.assertIn('const paletteStops=unit==="C"?temperaturePaletteStops', JAVASCRIPT)
@@ -581,7 +581,7 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('"velocity-legend","left"', script)
             self.assertIn('"temperature-legend","right"', script)
             self.assertIn("function sharedTemperatureRange", script)
-            self.assertIn("return use23DegreeScale?[19.500,23.000]:[19.500,21.450]", script)
+            self.assertIn("return dielectric?[19.500,23.000]:[19.908,21.044]", script)
             self.assertIn('preferredIntervals=unit==="C"?10:9', script)
             self.assertIn("const activeGeometry=(model.geometry_by_mesh||{})", script)
             self.assertIn('visibility.temperatureLegend', script)
