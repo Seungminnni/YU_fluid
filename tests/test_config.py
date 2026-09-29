@@ -82,6 +82,61 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(changed.ports.inlet_center_xy_m, (0.0136, 0.1052))
                 self.assertEqual(changed.ports.outlet_center_xy_m, (0.0896, 0.0152))
 
+    def test_pao2_phi25_overlay_preserves_geometry_and_sets_manufacturer_properties(self) -> None:
+        reference = load_config(
+            BASELINE,
+            overlay_paths=(
+                ROOT / "configs" / "ppt_bernardi_udf.yaml",
+                ROOT / "configs" / "recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml",
+            ),
+        )
+        pao2 = load_config(
+            BASELINE,
+            overlay_paths=(
+                ROOT / "configs" / "ppt_bernardi_udf.yaml",
+                ROOT / "configs" / "recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml",
+                ROOT / "configs" / "fluid_dynalene_pao2_20c.yaml",
+            ),
+        )
+        self.assertEqual(pao2.geometry_sha256, reference.geometry_sha256)
+        self.assertAlmostEqual(pao2.fluid.density_kg_m3, 795)
+        self.assertAlmostEqual(pao2.fluid.dynamic_viscosity_pa_s, 0.00706)
+        self.assertAlmostEqual(pao2.fluid.thermal_conductivity_w_mk, 0.143)
+        self.assertAlmostEqual(pao2.fluid.specific_heat_j_kgk, 2128)
+        self.assertAlmostEqual(pao2.boundary.inlet_velocity_m_s, 0.4)
+        self.assertAlmostEqual(pao2.boundary.inlet_temperature_k, 293)
+        self.assertAlmostEqual(pao2.derived.reynolds_table4, 1126.0623229461755)
+
+    def test_other_requested_fluids_keep_phi25_geometry_and_boundary_conditions(self) -> None:
+        reference = load_config(
+            BASELINE,
+            overlay_paths=(
+                ROOT / "configs" / "ppt_bernardi_udf.yaml",
+                ROOT / "configs" / "recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml",
+            ),
+        )
+        cases = (
+            ("fluid_ampcool_ac110_20c.yaml", 817.75, 0.02012073875, 0.13705, 2136.45),
+            ("fluid_shell_s3x_20c.yaml", 805, 0.0160, 0.1437, 1950),
+        )
+        for filename, density, viscosity, conductivity, heat_capacity in cases:
+            with self.subTest(fluid=filename):
+                config = load_config(
+                    BASELINE,
+                    overlay_paths=(
+                        ROOT / "configs" / "ppt_bernardi_udf.yaml",
+                        ROOT / "configs" / "recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml",
+                        ROOT / "configs" / filename,
+                    ),
+                )
+                self.assertEqual(config.geometry_sha256, reference.geometry_sha256)
+                self.assertAlmostEqual(config.fluid.density_kg_m3, density)
+                self.assertAlmostEqual(config.fluid.dynamic_viscosity_pa_s, viscosity)
+                self.assertAlmostEqual(config.fluid.thermal_conductivity_w_mk, conductivity)
+                self.assertAlmostEqual(config.fluid.specific_heat_j_kgk, heat_capacity)
+                self.assertAlmostEqual(config.boundary.inlet_velocity_m_s, 0.4)
+                self.assertAlmostEqual(config.boundary.inlet_temperature_k, 293)
+
     def test_overrides_change_physics_and_provenance(self) -> None:
         base = load_config(BASELINE)
         changed = load_config(

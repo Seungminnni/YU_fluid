@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .config import ResolvedConfig
 from .geometry import cell_placements
+from .parallelism import default_solver_mpi_ranks
 from .heat_source import (
     ConstantVolumetricSource,
     render_openfoam_fvoptions,
@@ -27,7 +28,7 @@ STRICT_STEADY_RESIDUAL_TARGET = 1.0e-6
 # Run a conservative 6k primary solve, then use the existing 500-iteration
 # continuation path only when the compound convergence gate still fails.
 STEADY_MAXIMUM_ITERATIONS = 6000
-DEFAULT_SOLVER_MPI_RANKS = 4
+DEFAULT_SOLVER_MPI_RANKS = default_solver_mpi_ranks()
 
 
 def _steady_qvol(config: ResolvedConfig) -> float:
@@ -1546,19 +1547,6 @@ python3 "$case_dir/tools/audit_energy_coupling.py" \
     --expected-cap "$energy_coupling_iterations" \
     --output "$run_dir/reports/solver/energy_coupling_audit.json"
 
-python3 "$case_dir/tools/validate_frozen_flow.py" \
-    --log "$run_dir/logs/solver/{run_name}.log" \
-    --run-dir "$run_dir" \
-    --steady-report "$case_dir/runs/steady_cht/reports/solver/steady_cht_validation.json" \
-    --mesh-integral-report "$case_dir/reports/production_mesh/mesh_integrals_pre_split.json" \
-    --qvol {_steady_qvol(config):.12g} \
-    --qvol-samples "$case_dir/heat_source_reference/heat_source_samples.csv" \
-    --coolant-cp {config.fluid.specific_heat_j_kgk:.12g} \
-    --initial-temperature {initial_solid_temperature:.12g} \
-    --steady-initial-temperature "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-{steady_reference_temperature:.12g}}}" \
-    --field-interval {field_interval_s:.12g} \
-    --output "$run_dir/reports/solver/frozen_flow_validation.json"
-
 python3 "$case_dir/tools/build_energy_balance.py" \
     --run-dir "$run_dir" \
     --mesh-integral-report "$case_dir/reports/production_mesh/mesh_integrals_pre_split.json" \
@@ -1572,6 +1560,20 @@ python3 "$case_dir/tools/build_energy_balance.py" \
     --maximum-final-window-imbalance 0.02 \
     --output-csv "$run_dir/reports/solver/energy_balance.csv" \
     --output-report "$run_dir/reports/solver/energy_balance.json"
+
+python3 "$case_dir/tools/validate_frozen_flow.py" \
+    --log "$run_dir/logs/solver/{run_name}.log" \
+    --run-dir "$run_dir" \
+    --steady-report "$case_dir/runs/steady_cht/reports/solver/steady_cht_validation.json" \
+    --mesh-integral-report "$case_dir/reports/production_mesh/mesh_integrals_pre_split.json" \
+    --energy-balance-report "$run_dir/reports/solver/energy_balance.json" \
+    --qvol {_steady_qvol(config):.12g} \
+    --qvol-samples "$case_dir/heat_source_reference/heat_source_samples.csv" \
+    --coolant-cp {config.fluid.specific_heat_j_kgk:.12g} \
+    --initial-temperature {initial_solid_temperature:.12g} \
+    --steady-initial-temperature "${{FROZEN_FLOW_STEADY_INITIAL_TEMPERATURE_K:-{steady_reference_temperature:.12g}}}" \
+    --field-interval {field_interval_s:.12g} \
+    --output "$run_dir/reports/solver/frozen_flow_validation.json"
 '''
     return f'''#!/bin/sh
 set -eu

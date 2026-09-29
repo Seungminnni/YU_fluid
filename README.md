@@ -3,6 +3,7 @@
 23개 원통형 배터리의 냉각 CAD, OpenFOAM 계산 결과와 3D 뷰어를 연결하는 로컬 프로젝트다. 현재 비교 대상은 `build/result/`에 보존한 Ø19·21·23·25 mm 네 케이스다. 잘못된 CAD 기반의 과거 약 80만 셀 결과는 현행 결과에서 제외한다.
 
 - [전체 계산·뷰어·검증 안내](docs/README.md)
+- [Ø28·31·34 시안의 메시 시험과 벽면 진단](docs/frame_fit_trials.md)
 - [보존한 네 결과의 위치](build/result/README.md)
 - [시작 화면](viewer/index.html) · [결과 뷰어](viewer/results.html) · [CAD 도면](viewer/cad/index.html) · [3D 메시](viewer/mesh.html)
 

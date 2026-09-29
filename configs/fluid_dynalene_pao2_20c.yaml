@@ -1,0 +1,10 @@
+# Dynalene PAO-2, manufacturer technical data sheet Rev. 1 (August 2025),
+# page 2, 20 °C row. The CFD model uses constant properties; the unchanged
+# comparison inlet is 293 K (19.85 °C), 0.15 °C below the tabulated point.
+# https://www.dynalene.com/wp-content/uploads/2025/08/Dynalene-PAO-series-Tech-Data-Sheet-Rev1.pdf
+fluid:
+  name: dynalene_pao2_20c
+  density: "795 kg/m^3"
+  specific_heat: "2128 J/(kg*K)"
+  thermal_conductivity: "0.143 W/(m*K)"
+  dynamic_viscosity: "0.00706 Pa*s"

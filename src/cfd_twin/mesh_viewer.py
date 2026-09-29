@@ -352,9 +352,10 @@ const meshCases=(window.CFD_FOUR_CASE_MANIFEST?.runs||[]).filter(run=>run.data_r
 const requestedMeshCase=new URLSearchParams(window.location.search).get("mesh");
 const selectedMeshCase=meshCases.find(run=>run.id===requestedMeshCase)||meshCases[0]||null;
 const selectedMeshId=selectedMeshCase?.id||null;
+const selectedMeshAssetId=selectedMeshCase?.asset_source_id||selectedMeshId;
 // Only the preserved Ø19 field uses the documented Y reflection. The new
 // Ø21/23/25 polyMeshes already have the C05-top/C19-bottom orientation.
-const reflectY=!selectedMeshId||selectedMeshId==="precision";
+const reflectY=!selectedMeshAssetId||selectedMeshAssetId==="precision";
 const meshCaseSelect=document.getElementById("mesh-case-select");
 function refreshMeshCaseOptions(){
   if(!meshCaseSelect)return;
@@ -424,7 +425,7 @@ function displayMode(which,keepView=false){mode=which;for(const entry of geometr
 async function displayCompleteVolume(){
   loading.hidden=false;loading.textContent="실제 유체·고체 전체 체적 격자를 불러오는 중…";
   try{
-    if(selectedMeshId&&!window.CFD_TWIN_VOLUME_GZIP)await loadMeshAsset(`mesh-volume-data-${selectedMeshId}.js`);
+    if(selectedMeshAssetId&&!window.CFD_TWIN_VOLUME_GZIP)await loadMeshAsset(`mesh-volume-data-${selectedMeshAssetId}.js`);
     if(!window.CFD_TWIN_VOLUME_GZIP)throw Error("mesh-volume-data.js가 없습니다. ZIP 전체를 압축 해제한 뒤 mesh.html을 여세요.");
     if(!window.DecompressionStream)throw Error("이 브라우저는 gzip 압축 해제를 지원하지 않습니다.");
     for(const entry of geometry)gl.deleteBuffer(entry.buffer);geometry=[];
@@ -505,7 +506,7 @@ savePng.onclick=()=>{if(!mesh)return;
     window.setTimeout(()=>URL.revokeObjectURL(url),1000);
   },"image/png");};
 async function start(){try{if(!gl)throw Error("이 브라우저에서 WebGL을 사용할 수 없습니다.");
-  if(selectedMeshId&&!window.CFD_TWIN_MESH_GZIP)await loadMeshAsset(`mesh-data-${selectedMeshId}.js`);
+  if(selectedMeshAssetId&&!window.CFD_TWIN_MESH_GZIP)await loadMeshAsset(`mesh-data-${selectedMeshAssetId}.js`);
   if(!window.CFD_TWIN_MESH_GZIP||!window.DecompressionStream)throw Error("메시 데이터 또는 gzip 지원이 없습니다.");
   const bytes=Uint8Array.from(atob(window.CFD_TWIN_MESH_GZIP),character=>character.charCodeAt(0));
   mesh=await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).json();

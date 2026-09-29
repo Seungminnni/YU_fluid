@@ -1,0 +1,18 @@
+# AmpCool AC-110 exploratory 20 °C constant-property comparison.
+# Manufacturer properties at 0 and 40 °C are linearly interpolated to 20 °C:
+# rho = (828.7 + 806.8)/2 = 817.75 kg/m^3 (the density endpoints themselves
+# are derived from the manufacturer's 15.6 °C density/expansion coefficient);
+# nu = (41.10 + 8.11)/2 = 24.605 mm^2/s;
+# mu = rho * nu * 1e-6 = 0.02012073875 Pa*s;
+# k = (0.1382 + 0.1359)/2 = 0.13705 W/(m*K);
+# cp = (2060.8 + 2212.1)/2 = 2136.45 J/(kg*K).
+# Viscosity interpolation is an approximation, not a measured 20 °C value.
+# The unchanged CFD inlet is 293 K (19.85 °C), 0.15 °C below this basis.
+# https://info.engineeredfluids.com/hubfs/Engineered%20Fluids%20-%20Scharf%20-%20A%20Customers%20Journey.pdf
+# https://media.knowde.com/image/upload/v1655193073/production/Collateral/367833/AmpCool_Dielectric_Coolants_AC_1XX_Technical_Data_Sheet.pdf
+fluid:
+  name: ampcool_ac110_20c_interpolated
+  density: "817.75 kg/m^3"
+  specific_heat: "2136.45 J/(kg*K)"
+  thermal_conductivity: "0.13705 W/(m*K)"
+  dynamic_viscosity: "0.02012073875 Pa*s"

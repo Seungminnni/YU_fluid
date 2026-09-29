@@ -16,6 +16,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 
 MODEL_PATTERN = re.compile(r'<script src="([^"?]*model[^"?]*\.js)(?:\?[^"}]*)?"')
@@ -51,16 +52,17 @@ def four_case_manifest(model: dict[str, Any], viewer: Path) -> dict[str, Any]:
 
     def result_run(run: dict[str, Any]) -> dict[str, Any]:
         run_id = str(run["id"])
+        asset_source_id = str(run.get("asset_source_id") or run_id)
         graphs = model.get("interactive_cfd_by_mesh", {}).get(run_id, {}).get("temperature_graphs", {})
         diameter = run.get("inlet_diameter_mm")
         geometry = model.get("geometry_by_mesh", {}).get(run_id, {})
         enclosure = geometry.get("enclosure_mm") or model.get("enclosure_mm", {})
         cells = geometry.get("cells", [])
         ports = geometry.get("ports", [])
-        if run_id == "precision" or run_id.startswith("exact_phi"):
+        if asset_source_id == "precision" or asset_source_id.startswith("exact_phi"):
             projection_stem = f"actual_phi{int(diameter)}" if diameter is not None else ""
         else:
-            projection_stem = f"actual_{run_id}"
+            projection_stem = f"actual_{asset_source_id}"
 
         def final_kelvin(key: str) -> float | None:
             series = graphs.get(key)
@@ -70,6 +72,9 @@ def four_case_manifest(model: dict[str, Any], viewer: Path) -> dict[str, Any]:
 
         return {
             "id": run_id,
+            "asset_source_id": asset_source_id,
+            "display_variant_of": run.get("display_variant_of"),
+            "temperature_legend_range_c": run.get("temperature_legend_range_c"),
             "label": run["label"],
             "label_en": run.get("label_en", run["label"]),
             "diameter_mm": diameter,
@@ -380,7 +385,10 @@ def append_validated_run(
     if not referenced:
         raise ValueError("source CFD result has no published dataset files")
     for relative in referenced:
-        path = (source_viewer / relative).resolve()
+        url = urlsplit(relative)
+        if url.scheme or url.netloc or not url.path or url.path.startswith("/"):
+            raise FileNotFoundError(source_viewer / relative)
+        path = (source_viewer / unquote(url.path)).resolve()
         if not path.is_relative_to(source_data) or not path.is_file() or path.stat().st_size == 0:
             raise FileNotFoundError(source_viewer / relative)
     for stem in ("mesh-data", "mesh-volume-data"):
@@ -549,6 +557,62 @@ def write_four_case_model(output: Path, combined: dict[str, Any]) -> str:
         encoding="utf-8",
     )
     return model_asset
+
+
+def add_temperature_display_variant(
+    model: dict[str, Any],
+    *,
+    source_id: str,
+    variant_id: str,
+    label: str,
+    label_en: str,
+    range_c: tuple[float, float],
+) -> None:
+    """Expose one validated CFD result with a second legend, not a new solve.
+
+    The variant reuses the source's published datasets, CAD and mesh assets.
+    Its own run ID keeps the selectable view and its legend unambiguous.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", variant_id):
+        raise ValueError("variant_id must be a lowercase filesystem-safe identifier")
+    if not (float(range_c[0]) < float(range_c[1])):
+        raise ValueError("temperature legend range must increase")
+    if not model.get("actual_solver_data") or not str(model.get("validation_status", "")).endswith("_PASSED"):
+        raise ValueError("display variant requires an already validated CFD result")
+    runs = model.get("mesh_runs", [])
+    source_index = next((index for index, run in enumerate(runs) if run.get("id") == source_id), None)
+    if source_index is None or not runs[source_index].get("data_ready"):
+        raise ValueError(f"source result is not ready: {source_id}")
+    if not model.get("interactive_cfd_by_mesh", {}).get(source_id, {}).get("actual_one_second"):
+        raise ValueError(f"source result has no validated one-second CFD data: {source_id}")
+    if model.get("energy_balance_by_mesh", {}).get(source_id, {}).get("available") is not True:
+        raise ValueError(f"source result has no energy-balance report: {source_id}")
+    existing = next((run for run in runs if run.get("id") == variant_id), None)
+    if existing is not None and existing.get("display_variant_of") != source_id:
+        raise ValueError(f"run ID is already used by another result: {variant_id}")
+    if existing is None:
+        existing = copy.deepcopy(runs[source_index])
+        existing["id"] = variant_id
+        existing["comparison_key"] = f"display_{variant_id}"
+        runs.insert(source_index + 1, existing)
+    existing.update({
+        "label": label,
+        "label_en": label_en,
+        "asset_source_id": source_id,
+        "display_variant_of": source_id,
+        "temperature_legend_range_c": [float(range_c[0]), float(range_c[1])],
+    })
+    for key in (
+        "calculation_note_by_mesh", "calculation_summary_by_mesh", "convergence_by_mesh",
+        "derived_by_mesh", "energy_balance_by_mesh", "geometry_by_mesh", "inputs_by_mesh",
+        "interactive_cfd_by_mesh", "mesh_wireframes", "spatial_transform_by_mesh",
+    ):
+        bucket = model.get(key)
+        if isinstance(bucket, dict) and source_id in bucket:
+            bucket[variant_id] = copy.deepcopy(bucket[source_id])
+    comparison = model.get("four_case_comparison")
+    if isinstance(comparison, dict):
+        comparison["run_ids"] = [str(run["id"]) for run in runs]
 
 
 def refresh_four_case_labels(output: Path) -> str:

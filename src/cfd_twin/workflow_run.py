@@ -22,7 +22,7 @@ from .case_builder import _docker_command
 from .cad_import import STEP_ROLES, import_step_bundle, imported_config_overrides, inspect_imported_steps
 from .config import load_config
 from .errors import CfdTwinError
-from .production_mesh import write_production_mesh_source_bundle
+from .production_mesh import MESH_PRESETS, write_production_mesh_source_bundle
 from .steady_convergence import continuation_decision
 from .workflow_publish import publish_completed_run
 
@@ -151,6 +151,13 @@ def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None =
             raise CfdTwinError(f"{run_name}: existing run has no validation report")
         while True:
             _check_cancel(cancel_path)
+            if stage == "cold" and (case / "diagnostics/wall/layer_faces.json.gz").is_file():
+                from .wall_diagnostics import compare
+                measured = _read_json(report_path).get("final_iteration")
+                if measured is not None:
+                    # Preserve correspondence even when the eventual y+ gate
+                    # fails. Keep diagnostic_only until the full gate passes.
+                    compare(case, f"{measured:g}", diagnostic_only=_read_json(report_path).get("status") != "COLD_FLOW_VALIDATION_PASSED")
             decision = continuation_decision(_read_json(report_path), stage=stage)
             _write_json(decision_path, decision)
             if decision["action"] == "pass":
@@ -168,6 +175,43 @@ def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None =
                 raise CfdTwinError(f"{run_name}: continuation failed with {status}")
             if not isinstance(current, (int, float)) or current <= decision["iteration"]:
                 raise CfdTwinError(f"{run_name}: validation did not advance past {decision['iteration']}")
+
+
+def _run_wall_diagnostic(case: Path, output: object, iterations: int, *, cancel_path: Path) -> None:
+    """A short S0 checkpoint is diagnostic, never an acceptance shortcut."""
+    from .wall_diagnostics import compare
+
+    if not isinstance(iterations, int) or not 100 <= iterations < 5000:
+        raise CfdTwinError("Wall diagnostic requires 100--4999 iterations")
+    profile = case / "profiles/steady_cold_flow/system/controlDict"
+    original = profile.read_text()
+    maximum = int(re.search(r"\bendTime\s+(\d+)\s*;", original).group(1))
+    shortened, count = re.subn(r"\bendTime\s+\d+\s*;", f"endTime {iterations};", original)
+    if count != 1 or maximum < 5000:
+        raise CfdTwinError("Invalid cold-flow control dictionary")
+    profile.write_text(shortened)
+    try:
+        _compose_service(case, "cold-flow-pilot", output, cancel_path=cancel_path)
+    finally:
+        profile.write_text(original)
+    report_path = case / "runs/steady_cold_flow/reports/solver/cold_flow_validation.json"
+    report = _read_json(report_path)
+    if report.get("final_iteration") != iterations:
+        raise CfdTwinError("Short wall diagnostic did not finish")
+    compare(case, str(iterations), diagnostic_only=True)
+    destination = case / "diagnostics/wall" / str(iterations)
+    shutil.copy2(report_path, destination / "cold_flow_validation.json")
+    shutil.copy2(report_path.with_name("yplus.json"), destination / "yplus.json")
+    for check in ("solver_clean_end", "final_fields_finite", "final_turbulence_fields_nonnegative"):
+        if report.get("checks", {}).get(check) is not True:
+            raise CfdTwinError(f"Unsafe diagnostic field: {check}")
+    # A developing y+ distribution at 1500 iterations is not the final result.
+    # Continue to the original 6000-iteration checkpoint before normal gates.
+    environment = os.environ.copy()
+    environment["COLD_FLOW_ADDITIONAL_ITERATIONS"] = str(maximum - iterations)
+    _compose_service(case, "cold-flow-continue", output, environment=environment, cancel_path=cancel_path)
+    if _read_json(report_path).get("final_iteration") != maximum:
+        raise CfdTwinError("Cold flow did not reach the original checkpoint")
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
@@ -425,7 +469,9 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
         overrides=base_overrides + geometry_overrides + _operation_overrides(inputs),
     )
     case = job_dir / "case"
-    profile = f"production_{inputs['mesh_target_cells']//1000}k"
+    profile = job.get("mesh_profile", f"production_{inputs['mesh_target_cells']//1000}k")
+    if profile not in MESH_PRESETS or MESH_PRESETS[profile].target_cells != inputs['mesh_target_cells']:
+        raise CfdTwinError("Mesh profile must match the requested cell-count target")
     write_production_mesh_source_bundle(config, imported["cad_dir"], case, mesh_level=profile)
     (job_dir / "resolved_config.json").write_text(config.to_json() + "\n", encoding="utf-8")
     return {"case": case, "cad": imported["cad_dir"], "config": config}
@@ -467,6 +513,9 @@ def run_imported_case(job_manifest: Path) -> None:
                     environment.update(TRANSIENT_DELTA_T="1", ENERGY_COUPLING_ITERATIONS="200")
                 with (job_dir / "worker.log").open("ab") as output:
                     if stage == "steady":
+                        diagnostic_iterations = _read_json(job_manifest).get("wall_diagnostic_iterations")
+                        if diagnostic_iterations is not None:
+                            _run_wall_diagnostic(case, output, diagnostic_iterations, cancel_path=cancel_path)
                         _run_steady_stages(case, output, cancel_path=cancel_path)
                         result_code = 0
                     else:
@@ -486,8 +535,10 @@ def run_imported_case(job_manifest: Path) -> None:
                     actual = composition.get("actual", {})
                     count = actual.get("total_cells") if isinstance(actual, dict) else None
                     target = _read_json(job_dir / "job.json")["inputs"]["mesh_target_cells"]
-                    if not isinstance(count, int) or abs(count - target) / target > 0.1:
-                        raise CfdTwinError(f"mesh: actual {count} is outside requested {target} ±10%")
+                    job = _read_json(job_manifest)
+                    preset = MESH_PRESETS[job.get("mesh_profile", f"production_{target//1000}k")]
+                    if not isinstance(count, int) or abs(count - target) / target > preset.total_tolerance_fraction or (preset.minimum_total_cells is not None and count < preset.minimum_total_cells):
+                        raise CfdTwinError(f"mesh: actual {count} is outside profile {target} ±{100*preset.total_tolerance_fraction:g}%")
                 if stage == "steady":
                     _gate(case / "runs/steady_cold_flow/reports/solver/cold_flow_validation.json", "COLD_FLOW_VALIDATION_PASSED")
                     _gate(case / "runs/steady_cht/reports/solver/steady_cht_validation.json", "STEADY_CHT_VALIDATION_PASSED")

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from cfd_twin.config import load_config
+from cfd_twin.openfoam_case import DEFAULT_SOLVER_MPI_RANKS
 from cfd_twin.openfoam_zone_validation import (
     EXPECTED_BATTERY_ZONES,
     validate_cell_zones,
@@ -486,7 +487,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("relaxationFactors.equations.h -set 0.5", cold_continuation)
             self.assertIn("validate_cold_flow.py", cold_continuation)
             decompose = (output / "system" / "decomposeParDict").read_text()
-            self.assertIn("numberOfSubdomains 4;", decompose)
+            self.assertIn(f"numberOfSubdomains {DEFAULT_SOLVER_MPI_RANKS};", decompose)
             self.assertIn("method scotch;", decompose)
             self.assertEqual(
                 (output / "system" / "coolant" / "decomposeParDict").read_text(),
@@ -501,7 +502,7 @@ class ProductionMeshTests(unittest.TestCase):
                 ).read_text(),
                 decompose,
             )
-            self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], 4)
+            self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], DEFAULT_SOLVER_MPI_RANKS)
             self.assertEqual(manifest["parallel_execution"]["default_mesh_mpi_ranks"], 1)
             self.assertTrue(
                 (output / "heat_source_reference" / "heat_source_manifest.json").is_file()
@@ -775,6 +776,11 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("--qvol-samples", frozen_script)
             self.assertIn("--field-interval 1", frozen_script)
             self.assertIn("build_energy_balance.py", frozen_script)
+            self.assertLess(
+                frozen_script.index("build_energy_balance.py"),
+                frozen_script.index("validate_frozen_flow.py"),
+            )
+            self.assertIn("--energy-balance-report", frozen_script)
             self.assertIn("--initial-fluid-temperature", frozen_script)
             self.assertIn("--initial-solid-temperature", frozen_script)
             self.assertIn("TRANSIENT_DELTA_T", frozen_script)
