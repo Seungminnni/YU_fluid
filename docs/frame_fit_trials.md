@@ -55,3 +55,19 @@ python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame
 잔차만 미달한 경우에는 기존 9,500회 상한 내 수렴 판정을 먼저 따르며,
 후보 소진이나 다른 오류를 성공으로 처리하지 않는다. 새 YAML 실험에서도 이 이름을
 `mesh_profiles`에 명시할 수 있다. 생성된 실제 보고서가 합격 여부의 기준이다.
+
+### Ø34의 층수 보정 시험
+
+6 µm·10층은 층이 없는 벽면 면적 30.3046%, 4 µm·10층은 90.2265%로
+층 생성 검증에 실패했다. 해당 시도들은 유동 계산에 진입하지 않았다.
+기존 8 µm·10층의 무층 면적은 1.7819%였다. 이 비교만으로 원인이
+완전히 확인된 것은 아니며, 서로 다른 메시의 y+를 결합해 판정하지 않는다.
+
+`production_frame_fit_6um_11layers_motion`과 `production_frame_fit_6um_12layers_motion`은
+실패한 6 µm·10층에서 요청 층수만 늘린 새 시험이다. 팽창비 1.2에서 요청 총 두께는
+각각 192.9 µm와 237.5 µm로, 기존 8 µm·10층의 207.7 µm에 가까운 범위를 시험한다.
+실제 층수·두께·품질·600,000~690,000셀·y+ 기준은 모두 다시 검증한다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_11layers_motion production_frame_fit_6um_12layers_motion
+```

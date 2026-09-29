@@ -288,6 +288,20 @@ for _microns in (6, 4):
     SUPPORTED_LEVELS += (_name,)
 
 
+# Ø34's 6/4 µm × 10-layer motion trials lost layer coverage before any CFD.
+# At expansionRatio=1.2, 6 µm × 11/12 layers requests 193/237 µm overall,
+# bracketing the 208 µm envelope of the mesh-passing 8 µm × 10-layer case.
+# Test coverage, composition and y+ afresh; a thicker envelope is no guarantee.
+for _layers in (11, 12):
+    _name = f"production_frame_fit_6um_{_layers}layers_motion"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_frame_fit_6um_10layers_motion"],
+        prism_layer_count=_layers,
+        calibration_status="MOTION_SHRINKER_LAYER_ENVELOPE_TRIAL_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
