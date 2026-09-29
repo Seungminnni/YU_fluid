@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e ".[cad,results,media]"
       - name: Workflow and cross-platform regression tests
-        run: python -m unittest tests.test_bootstrap tests.test_file_lock tests.test_launch_workflow tests.test_experiments tests.test_viewer_release tests.test_workflow_app tests.test_workflow_cancel tests.test_cad_import_workflow tests.test_wall_diagnostic_workflow tests.test_production_mesh -q
+        run: python -m unittest tests.test_bootstrap tests.test_file_lock tests.test_launch_workflow tests.test_experiments tests.test_viewer_release tests.test_workflow_app tests.test_workflow_cancel tests.test_cad_import_workflow tests.test_wall_diagnostic_workflow tests.test_production_mesh tests.test_frame_fit_resume -q
       - name: Fresh-checkout startup
         run: python -m cfd_twin.bootstrap --check
       - name: CLI imports on Windows and Linux

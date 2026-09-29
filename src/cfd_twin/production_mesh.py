@@ -274,6 +274,20 @@ for _suffix, _shrinker in (("A", "displacementMedialAxis"), ("B", "displacementM
     SUPPORTED_LEVELS += (_name,)
 
 
+# The Ø34 8 µm motion-shrinker run passed the 662,674-cell mesh gate,
+# but only 94.5825% of wall area was below y+=1 at S0 iteration 6000.
+# Keep the B shrinker and ten layers; vary only the first-cell height.
+# These are fresh trials, never inherited y+ or convergence passes.
+for _microns in (6, 4):
+    _name = f"production_frame_fit_{_microns}um_10layers_motion"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_frame_fit_8um_10layers_ab_B"],
+        first_layer_thickness_m=_microns * 1e-6,
+        calibration_status="MOTION_SHRINKER_THINNER_WALL_TRIAL_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")

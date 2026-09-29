@@ -35,3 +35,23 @@ python tools/run_experiment.py --output build/experiments/water_trial_01 --run
 기존 Mac의 날짜 배치를 이어가는 `python tools/run_wall_diagnostic_batch.py` 경로도 유지한다. 인수 없이 기존 `build/frame_fit_water_20260929/batch.json`이 있으면 Ø28에서 성공한 설정을 Ø31·Ø34에 적용하는 기존 전략을 사용한다. Windows와 POSIX 모두 파일 잠금으로 동일 배치의 중복 실행을 막는다.
 
 `build/`, `viewer/`, 데모 압축 파일 및 로컬 연구 문서는 Git 대상에서 제외한다. 코드 패키지에 포함된 소형 기준 CAD 자산은 소스와 함께 관리한다.
+
+## Ø34의 B 시험 이후 보정
+
+Ø34의 8 µm B 시도는 662,674셀·육면체 89.4256%로 메시를 통과했으나,
+S0 6,000회에서 y+<1 면적 94.5825%와 압력 잔차 기준 미달로 멈췄다.
+같은 좌표의 층/y+ 진단에서 기준 초과 면은 0층 또는 1~3층 구간에 있었다.
+`production_frame_fit_6um_10layers_motion`과 `production_frame_fit_4um_10layers_motion`은
+B의 shrinker·10층·품질 기준을 유지하고 첫 층 두께만 줄이는 미검증 시험 프로필이다.
+
+기존 날짜 배치의 실패한 Ø34만 새 ID로 재생성할 때는 다음을 사용한다.
+완료된 Ø28·Ø31은 건드리지 않으며, 진단 자료 보존 후 실패 생성물을 삭제한다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_10layers_motion production_frame_fit_4um_10layers_motion
+```
+
+6 µm가 통과하면 본 계산으로 이어지고, 메시/y+ 실패에만 다음 4 µm 후보를 쓴다.
+잔차만 미달한 경우에는 기존 9,500회 상한 내 수렴 판정을 먼저 따르며,
+후보 소진이나 다른 오류를 성공으로 처리하지 않는다. 새 YAML 실험에서도 이 이름을
+`mesh_profiles`에 명시할 수 있다. 생성된 실제 보고서가 합격 여부의 기준이다.
