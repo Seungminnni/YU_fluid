@@ -47,20 +47,9 @@ def _check_cancel(cancel_path: Path | None) -> None:
 def _lock_solver_file(stream: object) -> None:
     """Non-blocking single-job lock on both POSIX and Windows hosts."""
 
-    if os.name == "nt":
-        import msvcrt
+    from .file_lock import lock_file
 
-        stream.seek(0)
-        if not stream.read(1):
-            stream.seek(0)
-            stream.write(b"1")
-            stream.flush()
-        stream.seek(0)
-        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-    else:
-        import fcntl
-
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    lock_file(stream)
 
 
 def _worker_process_options(platform_name: str | None = None) -> dict[str, object]:
@@ -189,11 +178,11 @@ def _run_wall_diagnostic(case: Path, output: object, iterations: int, *, cancel_
     shortened, count = re.subn(r"\bendTime\s+\d+\s*;", f"endTime {iterations};", original)
     if count != 1 or maximum < 5000:
         raise CfdTwinError("Invalid cold-flow control dictionary")
-    profile.write_text(shortened)
+    profile.write_text(shortened, encoding="utf-8", newline="\n")
     try:
         _compose_service(case, "cold-flow-pilot", output, cancel_path=cancel_path)
     finally:
-        profile.write_text(original)
+        profile.write_text(original, encoding="utf-8", newline="\n")
     report_path = case / "runs/steady_cold_flow/reports/solver/cold_flow_validation.json"
     report = _read_json(report_path)
     if report.get("final_iteration") != iterations:

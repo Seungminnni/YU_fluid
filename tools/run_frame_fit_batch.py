@@ -8,11 +8,11 @@ Restarting never silently recomputes a started or failed job.
 from __future__ import annotations
 
 import argparse
-import fcntl
+from cfd_twin.file_lock import lock_file
 import json
 import os
 from pathlib import Path
-import subprocess
+import shutil
 import time
 import uuid
 
@@ -39,12 +39,12 @@ INPUTS = {
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(temp, path)
 
 
 def read_json(path):
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def prepare():
@@ -56,8 +56,7 @@ def prepare():
     write_json(BATCH / "preparation_started.json", {"time": time.time()})
     JOBS.mkdir(parents=True, exist_ok=True)
     existing = validate_server_viewer(ROOT / "viewer")
-    # APFS clone preserves the complete existing release at low initial cost.
-    subprocess.run(["cp", "-cR", str(ROOT / "viewer"), str(BATCH / "viewer_before")], check=True)
+    shutil.copytree(ROOT / "viewer", BATCH / "viewer_before")
     preview = read_json(PREVIEW)
     write_json(BATCH / "approved_preview.json", preview)
     reference = load_config(
@@ -147,12 +146,20 @@ def run(batch):
 
 
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 or not (BATCH / "batch.json").exists():
+        from cfd_twin.experiments import main
+        arguments = sys.argv[1:]
+        if not any(arg == "--output" or arg.startswith("--output=") for arg in arguments):
+            arguments = ["--output", str(BATCH.parent / "experiments/frame_fit_water"), *arguments]
+        raise SystemExit(main(arguments))
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     BATCH.mkdir(parents=True, exist_ok=True)
-    with (BATCH / "batch.lock").open("a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with (BATCH / "batch.lock").open("a+b") as lock:
+        lock_file(lock)
         batch = prepare()
         if not args.prepare_only:
             run(batch)

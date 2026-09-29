@@ -2,6 +2,7 @@
 
 23개 원통형 배터리의 냉각 CAD, OpenFOAM 계산 결과와 3D 뷰어를 연결하는 로컬 프로젝트다. 현재 비교 대상은 `build/result/`에 보존한 Ø19·21·23·25 mm 네 케이스다. 잘못된 CAD 기반의 과거 약 80만 셀 결과는 현행 결과에서 제외한다.
 
+- [Windows 설치·Python 3.12 이상·새 실험 실행](docs/windows_and_new_experiments.md)
 - [전체 계산·뷰어·검증 안내](docs/README.md)
 - [Ø28·31·34 시안의 메시 시험과 벽면 진단](docs/frame_fit_trials.md)
 - [보존한 네 결과의 위치](build/result/README.md)
@@ -16,3 +17,5 @@
 `build/result/`, `viewer/`, `YU_fluid_데모.zip`은 대용량 생성물이라 Git에는 포함하지 않는다. 다른 컴퓨터에서 현재 네 결과를 그대로 보려면 이 파일들을 별도로 복사해야 한다.
 
 로컬 서버는 `PYTHONPATH=src python3 tools/serve_current_viewer.py`로 실행한다. 이 명령은 최상위 `viewer/`와 별도 보존한 검증 기준 CAD를 사용하며, 과거 원본 케이스가 있는 `build/result/`에 의존하지 않는다. 새 계산 작업 파일은 `build/imported_runs/`에 저장된다. 따라서 `build/result/`을 외장 저장소에 보관하더라도 서버의 기존 결과와 새 실험의 결과 추가 경로는 유지된다. 단, 원본 OpenFOAM 케이스를 다시 분석하거나 재가공하려면 외장 저장소를 다시 연결해야 한다.
+
+Python 요구사항은 **3.12 이상**이다. Windows에서는 `distribution/run_windows.cmd`를 실행한다. 새 체크아웃도 결과 0개 상태로 웹앱을 시작할 수 있다. 새 조건의 배치는 `tools/run_experiment.py --config <실험.yaml> --output <새 폴더> --prepare-only`로 준비한 뒤 같은 출력 폴더에 `--run`으로 실행한다. 상세 명령은 위 Windows·새 실험 안내를 따른다.

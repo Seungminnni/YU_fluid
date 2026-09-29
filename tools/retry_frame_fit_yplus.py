@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fresh mesh retries: remove failed output after freezing the replacement job."""
-import fcntl
+from cfd_twin.file_lock import lock_file
 import hashlib
 import json
 import os
@@ -16,11 +16,11 @@ BATCH=ROOT/'build/frame_fit_water_20260929'
 RUNS=ROOT/'build/imported_runs/runs'
 
 def read(path):
-    return json.loads(path.read_text()) if path.exists() else {}
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 def write(path,value):
     temp=path.with_suffix(path.suffix+'.tmp')
-    temp.write_text(json.dumps(value,indent=2,ensure_ascii=False)+'\n')
+    temp.write_text(json.dumps(value,indent=2,ensure_ascii=False)+'\n', encoding='utf-8')
     os.replace(temp,path)
 
 def yplus_only(job):
@@ -85,8 +85,8 @@ def next_thickness(entry):
     return 6 if current>6 else 4 if current>4 else None
 
 if __name__=='__main__':
-    with (BATCH/'retry.lock').open('a+') as single:
-        fcntl.flock(single,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    with (BATCH/'retry.lock').open('a+b') as single:
+        lock_file(single)
         # Existing batch only reads batch.json at startup and owns its current
         # job. Updating a terminal failed entry cannot touch its active job.
         batch=read(BATCH/'batch.json')
@@ -95,8 +95,8 @@ if __name__=='__main__':
             if thickness and yplus_only(Path(entry['job_dir'])):
                 prepare_retry(batch,entry,thickness)
         write(BATCH/'retry_status.json',{'status':'waiting_for_current_batch','pid':os.getpid(),'plan':'Delete failed outputs and regenerate from frozen STEP inputs; 6 µm then 4 µm; unchanged gates'})
-        with (BATCH/'batch.lock').open('a+') as lock:
-            fcntl.flock(lock,fcntl.LOCK_EX)
+        with (BATCH/'batch.lock').open('a+b') as lock:
+            lock_file(lock, blocking=True)
             batch=read(BATCH/'batch.json')
             os.environ.update(OPENFOAM_MPI_RANKS=str(batch['solver_mpi_ranks']),OPENFOAM_MESH_MPI_RANKS='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1')
             for entry in batch['jobs']:

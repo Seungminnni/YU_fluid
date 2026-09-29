@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fresh baseline then paired shrinker trial; accepted runs continue to S1/S2."""
-import fcntl
+from cfd_twin.file_lock import lock_file
 import os
 import time
 from pathlib import Path
@@ -10,9 +10,17 @@ from retry_frame_fit_yplus import BATCH, read, write
 PROFILES = ['production_frame_fit_8um_10layers_ab_A', 'production_frame_fit_8um_10layers_ab_B']
 
 if __name__ == '__main__':
-    with (BATCH/'retry.lock').open('a+') as retry_lock, (BATCH/'batch.lock').open('a+') as batch_lock:
-        fcntl.flock(retry_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(batch_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    import sys
+    if len(sys.argv) > 1 or not (BATCH / "batch.json").exists():
+        from cfd_twin.experiments import main
+        arguments = sys.argv[1:]
+        if not any(arg == "--output" or arg.startswith("--output=") for arg in arguments):
+            arguments = ["--output", str(BATCH.parent / "experiments/frame_fit_water"), *arguments]
+        raise SystemExit(main(arguments))
+
+    with (BATCH/'retry.lock').open('a+b') as retry_lock, (BATCH/'batch.lock').open('a+b') as batch_lock:
+        lock_file(retry_lock)
+        lock_file(batch_lock)
         batch = read(BATCH/'batch.json')
         os.environ.update(OPENFOAM_MPI_RANKS=str(batch['solver_mpi_ranks']), OPENFOAM_MESH_MPI_RANKS='1', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1')
         batch['strategy'] = 'Fresh 8 µm / 10-layer baseline, then shrinker-only B; 600k–690k; snapshot and polygon-matched layer/y+ diagnostics; unchanged final gates'

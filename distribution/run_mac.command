@@ -1,14 +1,12 @@
 #!/bin/zsh
 set -e
 cd "$(dirname "$0")"
-if ! command -v python3.12 >/dev/null 2>&1; then
-  echo "Python 3.12 명령(python3.12)을 설치한 뒤 다시 실행하세요."
-  read -r "?Enter를 누르면 닫습니다. "
-  exit 1
-fi
-if [[ ! -f .venv/bin/python ]]; then python3.12 -m venv .venv; fi
-.venv/bin/python -m pip install -e '.[cad,results,media]'
-echo "웹앱: http://127.0.0.1:8765/"
-echo "이 창을 열어 둔 채 브라우저에서 위 주소로 접속하세요."
-exec .venv/bin/python -m cfd_twin serve-workflow \
-  --case-dir data/case --cad-dir data/cad --viewer-dir viewer --port 8765
+[[ -f pyproject.toml ]] || cd ..
+[[ -f pyproject.toml ]] || { echo 'Extract the whole project first.'; exit 1; }
+for candidate in .venv/bin/python python3 python3.14 python3.13 python3.12; do
+  if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3,12) else 1)' >/dev/null 2>&1; then
+    exec "$candidate" tools/launch_workflow.py "$@"
+  fi
+done
+echo 'Python 3.12 or higher is required. Python 3.13 and 3.14 are allowed.'
+exit 1

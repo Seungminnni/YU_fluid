@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Try bounded local refinement at the best 8 µm / 10-layer wall setting."""
-import fcntl
+from cfd_twin.file_lock import lock_file
 import os
 import time
 from pathlib import Path
@@ -14,9 +14,9 @@ PROFILES=[
 ]
 
 if __name__=='__main__':
- with (BATCH/'retry.lock').open('a+') as rlock,(BATCH/'batch.lock').open('a+') as lock:
-  fcntl.flock(rlock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-  fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ with (BATCH/'retry.lock').open('a+b') as rlock,(BATCH/'batch.lock').open('a+b') as lock:
+  lock_file(rlock)
+  lock_file(lock)
   batch=read(BATCH/'batch.json')
   os.environ.update(OPENFOAM_MPI_RANKS=str(batch['solver_mpi_ranks']),OPENFOAM_MESH_MPI_RANKS='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1')
   # Preserve only compact diagnostics; the failed output itself is deleted.

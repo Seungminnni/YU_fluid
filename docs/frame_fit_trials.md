@@ -23,14 +23,15 @@
 
 ## 배치 실행과 재시도
 
-프로젝트 루트의 Python 환경에서 다음 스크립트를 실행한다.
+Python 3.12 이상과 설치된 프로젝트 환경에서 새 배치를 준비하고 실행한다.
 
 ```sh
-python tools/run_wall_diagnostic_batch.py
+python tools/run_experiment.py --config configs/experiments/frame_fit_water.yaml --output build/experiments/water_trial_01 --ranks 4 --prepare-only
+python tools/run_experiment.py --output build/experiments/water_trial_01 --run
 ```
 
-이 스크립트는 기존 `build/frame_fit_water_20260929/batch.json`과 고정된 STEP 입력을 필요로 한다. 새 Git 체크아웃에는 이 생성물이 없으므로, 기존 작업 입력을 별도로 복사하거나 CAD 업로드 흐름으로 준비해야 한다. 현재 실행 중인 배치가 있으면 잠금으로 중복 실행을 막는다.
+새 실행기는 저장소의 YAML에서 CAD와 입력을 생성하므로 예전 `batch.json`, preview, `viewer/`가 필요하지 않다. 각 시안에서 A를 시험한 뒤 메시/y+ 실패 시 B를 새 ID로 생성한다. 실패 진단 자료를 `diagnostic_attempts/<작업 ID>/`에 보존하고 실패한 메시·유동장은 삭제한다. 후보 소진이나 다른 오류는 `needs_attention`으로 종료한다. 전체 사용법은 [새 실험 안내](windows_and_new_experiments.md)를 따른다.
 
-Ø28의 기준 A 시험이 메시 또는 y+ 검증에서 실패하면 진단 자료를 `build/frame_fit_water_20260929/diagnostic_attempts/<작업 ID>/`에 보존하고, 실패한 계산 폴더를 삭제한 뒤 새 ID로 B 시험을 생성한다. 실패 메시나 해석장은 재사용하지 않는다. 성공한 설정으로 Ø31·Ø34를 순차 실행한다. 준비한 후보를 소진하거나 다른 오류가 발생하면 `needs_attention`으로 종료한다.
+기존 Mac의 날짜 배치를 이어가는 `python tools/run_wall_diagnostic_batch.py` 경로도 유지한다. 인수 없이 기존 `build/frame_fit_water_20260929/batch.json`이 있으면 Ø28에서 성공한 설정을 Ø31·Ø34에 적용하는 기존 전략을 사용한다. Windows와 POSIX 모두 파일 잠금으로 동일 배치의 중복 실행을 막는다.
 
 `build/`, `viewer/`, 데모 압축 파일 및 로컬 연구 문서는 Git 대상에서 제외한다. 코드 패키지에 포함된 소형 기준 CAD 자산은 소스와 함께 관리한다.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Calibrate one port variant before applying its meshing profile to the others."""
-import fcntl
+from cfd_twin.file_lock import lock_file
 import os
 import time
 from pathlib import Path
@@ -59,9 +59,9 @@ def retryable(entry):
     return checks.get('battery_yplus_gate_passed') is False
 
 if __name__=='__main__':
-    with (BATCH/'retry.lock').open('a+') as rlock, (BATCH/'batch.lock').open('a+') as block:
-        fcntl.flock(rlock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        fcntl.flock(block,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    with (BATCH/'retry.lock').open('a+b') as rlock, (BATCH/'batch.lock').open('a+b') as block:
+        lock_file(rlock)
+        lock_file(block)
         batch=read(BATCH/'batch.json')
         os.environ.update(OPENFOAM_MPI_RANKS=str(batch['solver_mpi_ranks']),OPENFOAM_MESH_MPI_RANKS='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1')
         # Delete the failed outputs now, freezing minimal diagnoses and new inputs.

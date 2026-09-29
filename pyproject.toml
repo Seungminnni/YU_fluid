@@ -24,4 +24,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-cfd_twin = ["workflow_assets/*.html", "workflow_assets/*.css", "workflow_assets/*.js", "workflow_assets/*.png", "assets/cad_reference/*.html", "assets/cad_reference/*.css", "assets/cad_reference/*.svg", "assets/cad_reference/*.png"]
+cfd_twin = ["workflow_assets/*.html", "workflow_assets/*.css", "workflow_assets/*.js", "workflow_assets/*.png", "assets/cad_reference/*.html", "assets/cad_reference/*.css", "assets/cad_reference/*.svg", "assets/cad_reference/*.png", "assets/verified_cad_phi23/*.step", "assets/verified_cad_phi23/*.json"]
