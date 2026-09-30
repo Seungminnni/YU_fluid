@@ -10,6 +10,7 @@ import time
 from cfd_twin.file_lock import lock_file
 from cfd_twin.production_mesh import MESH_PRESETS
 from cfd_twin.steady_numerics import PROFILES, validate_profile
+from cfd_twin.outlet_boundary import PROFILES as OUTLET_PROFILES, validate_profile as validate_outlet_profile
 from recover_frame_fit_mesh import configure, execute, retryable
 from retry_frame_fit_yplus import BATCH, read, write
 
@@ -17,10 +18,15 @@ from retry_frame_fit_yplus import BATCH, read, write
 def pressure_retryable(entry: dict, numerical_profile: str) -> bool:
     """An explicit new trial only after a clean, pressure-only failure at the cap."""
     job = Path(entry['job_dir'])
+    return (read(job / 'job.json').get('steady_numerics_profile') != numerical_profile
+            and pressure_failure_at_cap(entry))
+
+
+def pressure_failure_at_cap(entry: dict) -> bool:
+    """Require all mesh, y+, safety and monitor gates; only pressure may fail."""
+    job = Path(entry['job_dir'])
     state = read(job / 'status.json')
     if state.get('status') != 'failed' or state.get('stage') != 'steady':
-        return False
-    if read(job / 'job.json').get('steady_numerics_profile') == numerical_profile:
         return False
     if read(job / 'case/reports/production_mesh/production_mesh_gate.json').get('status') != 'PRODUCTION_MESH_GATE_PASSED':
         return False
@@ -49,7 +55,7 @@ def pressure_retryable(entry: dict, numerical_profile: str) -> bool:
     )
 
 
-def resume(batch: dict, diameter: int, profiles: list[str], *, steady_numerics_profile: str | None = None) -> dict:
+def resume(batch: dict, diameter: int, profiles: list[str], *, steady_numerics_profile: str | None = None, outlet_velocity_profile: str | None = None) -> dict:
     entries = [entry for entry in batch['jobs'] if entry['diameter_mm'] == diameter]
     if len(entries) != 1:
         raise ValueError('Expected exactly one matching diameter')
@@ -58,7 +64,16 @@ def resume(batch: dict, diameter: int, profiles: list[str], *, steady_numerics_p
     if state.get('status') == 'complete':
         return state
     validate_profile(steady_numerics_profile)
-    if steady_numerics_profile:
+    validate_outlet_profile(outlet_velocity_profile)
+    if steady_numerics_profile and outlet_velocity_profile:
+        raise ValueError('Change only one trial setting at a time')
+    if outlet_velocity_profile:
+        prior = read(Path(entry['job_dir']) / 'job.json')
+        if prior.get('outlet_velocity_profile') == outlet_velocity_profile or not pressure_failure_at_cap(entry):
+            raise ValueError('Outlet trial requires a new boundary profile after a pressure-only failure at the cap')
+        if profiles != [prior.get('mesh_profile')]:
+            raise ValueError('An outlet trial must use exactly the previous mesh profile')
+    elif steady_numerics_profile:
         if not pressure_retryable(entry, steady_numerics_profile):
             raise ValueError('Pressure trial requires a clean pressure-only failure at 9500; never repeat the same numerical profile')
         if profiles != [read(Path(entry['job_dir']) / 'job.json').get('mesh_profile')]:
@@ -76,10 +91,12 @@ def resume(batch: dict, diameter: int, profiles: list[str], *, steady_numerics_p
                 or not preset.preserve_wall_diagnostics):
             raise ValueError('Retry profile must preserve the approved mesh gates and diagnostics')
     for profile in profiles:
-        if not steady_numerics_profile and not retryable(entry):
+        if not steady_numerics_profile and not outlet_velocity_profile and not retryable(entry):
             break
         preset = MESH_PRESETS[profile]
         options = {'steady_numerics_profile': steady_numerics_profile} if steady_numerics_profile else {}
+        if outlet_velocity_profile:
+            options['outlet_velocity_profile'] = outlet_velocity_profile
         configure(batch, entry, round(preset.first_layer_thickness_m * 1e6),
                   preset.prism_layer_count, profile=profile, **options)
         print(f'Ø{diameter}: fresh retry with {profile}', flush=True)
@@ -101,13 +118,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--diameter', type=int, required=True)
     parser.add_argument('--profiles', nargs='+', required=True, choices=sorted(MESH_PRESETS))
-    parser.add_argument('--steady-numerics-profile', choices=PROFILES)
+    trial = parser.add_mutually_exclusive_group()
+    trial.add_argument('--steady-numerics-profile', choices=PROFILES)
+    trial.add_argument('--outlet-velocity-profile', choices=OUTLET_PROFILES)
     args = parser.parse_args()
     with (BATCH / 'retry.lock').open('a+b') as retry_lock, (BATCH / 'batch.lock').open('a+b') as batch_lock:
         lock_file(retry_lock)
         lock_file(batch_lock)
         state = resume(read(BATCH / 'batch.json'), args.diameter, args.profiles,
-                       steady_numerics_profile=args.steady_numerics_profile)
+                       steady_numerics_profile=args.steady_numerics_profile,
+                       outlet_velocity_profile=args.outlet_velocity_profile)
     return 0 if state.get('status') == 'complete' and not state.get('release_error') else 1
 
 

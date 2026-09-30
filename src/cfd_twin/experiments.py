@@ -22,6 +22,7 @@ from .geometry import geometry_report
 from .parallelism import default_solver_mpi_ranks
 from .production_mesh import MESH_PRESETS
 from .steady_numerics import validate_profile
+from .outlet_boundary import validate_profile as validate_outlet_profile
 from .workflow_run import (
     BASE_CONFIG, SOURCE_ROOT, STEP_ROLES, THERMAL_OVERLAY, _operation_overrides,
     _write_json, prepare_imported_run, prepare_solver_inputs, run_imported_case,
@@ -90,6 +91,10 @@ def load_plan(path: Path) -> dict:
         validate_profile(numerical_profile)
         if numerical_profile is not None:
             plan["cases"][-1]["steady_numerics_profile"] = numerical_profile
+        outlet_profile = case.get("outlet_velocity_profile", raw.get("outlet_velocity_profile"))
+        validate_outlet_profile(outlet_profile)
+        if outlet_profile is not None:
+            plan["cases"][-1]["outlet_velocity_profile"] = outlet_profile
     return plan
 
 
@@ -106,6 +111,8 @@ def _queue(jobs: Path, prepared: dict, files: dict, specification: dict, *, prof
         manifest["source"]["retry_of"] = retry_of
     if specification.get("steady_numerics_profile") is not None:
         manifest["steady_numerics_profile"] = specification["steady_numerics_profile"]
+    if specification.get("outlet_velocity_profile") is not None:
+        manifest["outlet_velocity_profile"] = specification["outlet_velocity_profile"]
     if MESH_PRESETS[profile].preserve_wall_diagnostics:
         manifest["wall_diagnostic_iterations"] = 1500
     _write_json(directory / "job.json", manifest)
@@ -181,7 +188,7 @@ def fresh_retry(output: Path, batch: dict, entry: dict, specification: dict, *, 
     archive.mkdir(parents=True, exist_ok=True)
     for name in ("job.json", "status.json"):
         shutil.copy2(previous / name, archive / name)
-    for relative in ("case/reports/production_mesh", "case/diagnostics/wall", "case/runs/steady_cold_flow/reports/solver"):
+    for relative in ("case/reports/production_mesh", "case/diagnostics/wall", "case/diagnostics/outlet", "case/runs/steady_cold_flow/reports/solver"):
         source = previous / relative
         if source.is_dir():
             shutil.copytree(source, archive / relative, dirs_exist_ok=True)
@@ -189,6 +196,10 @@ def fresh_retry(output: Path, batch: dict, entry: dict, specification: dict, *, 
     if snappy.is_file():
         shutil.copy2(snappy, archive / "snappyHexMesh.log")
     worker_log = previous / "worker.log"
+    for name in ('outlet_boundary.json', 'steady_numerics.json'):
+        audit = previous / 'case/reports' / name
+        if audit.is_file():
+            shutil.copy2(audit, archive / name)
     if worker_log.is_file():
         with worker_log.open("rb") as stream:
             stream.seek(0, 2)

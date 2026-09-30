@@ -25,6 +25,7 @@ from .errors import CfdTwinError
 from .production_mesh import MESH_PRESETS, write_production_mesh_source_bundle
 from .steady_convergence import continuation_decision
 from .steady_numerics import apply_profile as apply_steady_numerics, validate_profile as validate_steady_numerics
+from .outlet_boundary import apply_profile as apply_outlet_boundary, validate_profile as validate_outlet_boundary, record_outlet
 from .workflow_publish import publish_completed_run
 
 
@@ -141,6 +142,10 @@ def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None =
             raise CfdTwinError(f"{run_name}: existing run has no validation report")
         while True:
             _check_cancel(cancel_path)
+            if stage == "cold" and (case / "reports/outlet_boundary.json").is_file():
+                measured = _read_json(report_path).get("final_iteration")
+                if measured is not None:
+                    record_outlet(case, f"{measured:g}")
             if stage == "cold" and (case / "diagnostics/wall/layer_faces.json.gz").is_file():
                 from .wall_diagnostics import compare
                 measured = _read_json(report_path).get("final_iteration")
@@ -189,6 +194,8 @@ def _run_wall_diagnostic(case: Path, output: object, iterations: int, *, cancel_
     if report.get("final_iteration") != iterations:
         raise CfdTwinError("Short wall diagnostic did not finish")
     compare(case, str(iterations), diagnostic_only=True)
+    if (case / "reports/outlet_boundary.json").is_file():
+        record_outlet(case, str(iterations))
     destination = case / "diagnostics/wall" / str(iterations)
     shutil.copy2(report_path, destination / "cold_flow_validation.json")
     shutil.copy2(report_path.with_name("yplus.json"), destination / "yplus.json")
@@ -447,6 +454,7 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
 
     job = _read_json(job_dir / "job.json")
     validate_steady_numerics(job.get("steady_numerics_profile"))
+    validate_outlet_boundary(job.get("outlet_velocity_profile"))
     files = {role: Path(job["files"][role]) for role in STEP_ROLES}
     base_overrides = _validated_geometry_overrides(job.get("geometry_overrides"))
     imported = import_step_bundle(
@@ -465,6 +473,7 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
         raise CfdTwinError("Mesh profile must match the requested cell-count target")
     write_production_mesh_source_bundle(config, imported["cad_dir"], case, mesh_level=profile)
     apply_steady_numerics(case, job.get("steady_numerics_profile"))
+    apply_outlet_boundary(case, job.get("outlet_velocity_profile"))
     (job_dir / "resolved_config.json").write_text(config.to_json() + "\n", encoding="utf-8")
     return {"case": case, "cad": imported["cad_dir"], "config": config}
 
@@ -550,11 +559,16 @@ def run_imported_case(job_manifest: Path) -> None:
 
                 write_mesh_only_viewer(case, job_dir / "viewer")
                 project_root = Path(__file__).resolve().parents[2]
+                labels = {}
+                if (case / "reports/outlet_boundary.json").is_file():
+                    diameter = config.geometry.ports.inlet_diameter_m * 1000
+                    labels = {"label": f"Ø{diameter:g} mm · 출구 역류 대응", "label_en": f"Ø{diameter:g} mm · pressure-outlet backflow"}
                 publish_experiment_and_demo(
                     project_root / "viewer",
                     project_root / "YU_fluid_데모.zip",
                     source_viewer=job_dir / "viewer",
                     run_id=f"run_{job_dir.name}",
+                    **labels,
                 )
             except Exception as exc:
                 _write_json(job_dir / "status.json", {

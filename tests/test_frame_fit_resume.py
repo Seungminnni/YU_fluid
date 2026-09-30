@@ -18,6 +18,23 @@ finally:
 
 
 class FrameFitResumeTests(unittest.TestCase):
+    def test_outlet_trial_changes_one_setting_and_rejects_repeat(self):
+        profile = 'production_frame_fit_6um_11layers_motion'
+        prior = {'mesh_profile': profile, 'steady_numerics_profile': 'pressure_reltol_zero'}
+        batch = {'solver_mpi_ranks': 12, 'jobs': [{'diameter_mm': 34, 'id': 'third', 'job_dir': '/third'}]}
+        def read(path):
+            return prior if path.name == 'job.json' else {'status': 'failed'}
+        with patch.object(runner, 'read', side_effect=read), patch.object(runner, 'pressure_failure_at_cap', return_value=True), patch.object(runner, 'configure') as configure, patch.object(runner, 'execute', return_value={'status': 'complete'}) as execute, patch.object(runner, 'write'):
+            runner.resume(batch, 34, [profile], outlet_velocity_profile='pressure_backflow')
+            self.assertEqual(configure.call_args.kwargs, {'profile': profile, 'outlet_velocity_profile': 'pressure_backflow'})
+            execute.assert_called_once()
+            with self.assertRaises(ValueError):
+                runner.resume(batch, 34, [profile], outlet_velocity_profile='pressure_backflow', steady_numerics_profile='pressure_limited_0p5')
+            prior['outlet_velocity_profile'] = 'pressure_backflow'
+            with self.assertRaises(ValueError):
+                runner.resume(batch, 34, [profile], outlet_velocity_profile='pressure_backflow')
+            self.assertEqual(configure.call_count, 1)
+
     def test_numerical_retry_freezes_new_job_before_deleting_failed_output(self):
         import retry_frame_fit_yplus as retry
         import recover_frame_fit_mesh as recover
@@ -106,6 +123,7 @@ class FrameFitResumeTests(unittest.TestCase):
             write(path, report)
             write('job.json', {'steady_numerics_profile': 'pressure_limited_0p5'})
             self.assertFalse(runner.pressure_retryable(entry, 'pressure_limited_0p5'))
+            self.assertTrue(runner.pressure_failure_at_cap(entry))
 
     def test_pressure_retry_cannot_change_mesh_or_repeat_candidates(self):
         profile = 'production_frame_fit_6um_11layers_motion'

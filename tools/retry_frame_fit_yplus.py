@@ -53,7 +53,7 @@ def prepare_retry(batch,entry,microns, *, replacement_overrides=None, reason=Non
     archive.mkdir(parents=True,exist_ok=True)
     for name in ('job.json','status.json'):
         shutil.copy2(previous/name,archive/name)
-    for relative in ('case/reports/production_mesh','case/diagnostics/wall','case/runs/steady_cold_flow/reports/solver','case/runs/steady_cold_flow/logs/solver','case/runs/steady_cold_flow/system'):
+    for relative in ('case/reports/production_mesh','case/diagnostics/wall','case/diagnostics/outlet','case/runs/steady_cold_flow/reports/solver','case/runs/steady_cold_flow/logs/solver','case/runs/steady_cold_flow/system'):
         source=previous/relative
         if source.is_dir():
             shutil.copytree(source,archive/relative,dirs_exist_ok=True)
@@ -61,6 +61,8 @@ def prepare_retry(batch,entry,microns, *, replacement_overrides=None, reason=Non
     if snappy.is_file():shutil.copy2(snappy,archive/'snappyHexMesh.log')
     numerics=previous/'case/reports/steady_numerics.json'
     if numerics.is_file():shutil.copy2(numerics,archive/'steady_numerics.json')
+    boundary=previous/'case/reports/outlet_boundary.json'
+    if boundary.is_file():shutil.copy2(boundary,archive/'outlet_boundary.json')
     worker=previous/'worker.log'
     if worker.is_file():
         with worker.open('rb') as stream:

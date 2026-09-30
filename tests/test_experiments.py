@@ -58,10 +58,12 @@ class ExperimentTests(unittest.TestCase):
 
     def test_explicit_numerical_profile_is_frozen_and_validated(self):
         self.raw['cases'][0]['steady_numerics_profile'] = 'pressure_limited_0p5'
+        self.raw['cases'][0]['outlet_velocity_profile'] = 'pressure_backflow'
         self.write_config()
         batch = self.prepare()
         job = experiments.read(Path(batch['jobs'][0]['job_dir']) / 'job.json')
         self.assertEqual(job['steady_numerics_profile'], 'pressure_limited_0p5')
+        self.assertEqual(job['outlet_velocity_profile'], 'pressure_backflow')
         self.raw['cases'][0]['steady_numerics_profile'] = 'typo'
         self.write_config()
         with self.assertRaisesRegex(ValueError, 'Unknown steady_numerics_profile'):

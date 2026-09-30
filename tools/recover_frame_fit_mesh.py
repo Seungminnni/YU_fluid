@@ -8,19 +8,24 @@ from retry_frame_fit_yplus import BATCH, read, write, prepare_retry
 from cfd_twin.workflow_run import run_imported_case
 from cfd_twin.production_mesh import MESH_PRESETS
 from cfd_twin.steady_numerics import validate_profile
+from cfd_twin.outlet_boundary import validate_profile as validate_outlet_profile
 
 CANDIDATES=[(6,12),(8,10),(6,14)]
 
-def configure(batch,entry,um,layers, *, profile=None, steady_numerics_profile=None):
+def configure(batch,entry,um,layers, *, profile=None, steady_numerics_profile=None, outlet_velocity_profile=None):
     old=Path(entry['job_dir'])
     profile=profile or f'production_600k_frame_fit_{um}um_{layers}layers'
     preset=MESH_PRESETS[profile]
     validate_profile(steady_numerics_profile)
+    validate_outlet_profile(outlet_velocity_profile)
     reason=('Fresh pressure non-orthogonal correction trial; unchanged mesh profile, physics and acceptance limits'
             if steady_numerics_profile else 'Fresh boundary-layer envelope trial; all physical conditions and validation thresholds unchanged')
     overrides={'mesh_profile':profile}
     if steady_numerics_profile:
         overrides['steady_numerics_profile']=steady_numerics_profile
+    if outlet_velocity_profile:
+        overrides['outlet_velocity_profile']=outlet_velocity_profile
+        reason='Fresh pressure-outlet backflow trial; unchanged mesh profile, numerical settings, operating inputs and acceptance limits; outlet velocity boundary changes'
     state=read(old/'status.json')
     layer=read(old/'case/reports/production_mesh/layer_coverage.json')
     summary={k:layer[k] for k in ['status','checks','low_coverage_batteries','low_thickness_batteries'] if k in layer}

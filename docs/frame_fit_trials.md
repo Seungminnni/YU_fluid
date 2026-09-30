@@ -130,3 +130,44 @@ y+<1 면적은 92.7160%로 감소했다. 압력 초기 잔차의 마지막 200�
 종료됐다. 이 변경은 상대오차 조건에 따른 종료를 없애는 수치 시험이며,
 전체 유동 수렴이나 y+ 통과를 보장하지 않는다. 내부 반복 증가로 계산이 느려질 수 있다.
 [OpenCFD 선형 솔버 잔차 설명](https://doc.openfoam.com/2306/tools/processing/numerics/solvers/residuals/)을 따른다.
+
+#### 압력 내부 정확도 결과와 출구 역류 진단
+
+`2bbb7ad9f42d4654b9580f280cfa9398`은 2026-09-30 15:12 KST에 9,500회에서
+압력 초기 잔차 4.6581e-4로 다시 실패했다. 기준 11층의 4.6699e-4 대비 감소는
+약 0.25%뿐이며, y+<1 면적은 95.3181%였다. 내부 선형 풀이 정확도를 높이는
+것만으로는 이번 수렴 정체를 해결하지 못했다.
+
+재구성된 출구 `phi`와 `U`를 같은 면 번호로 비교하면 다음과 같다.
+
+| 시안·반복 | 출구 면 수 | 역류 면 수 | 역류량/순 출구 유량 | 역류 면 중 속도 0인 면 |
+| --- | ---: | ---: | ---: | ---: |
+| Ø28 · 6,000 | 992 | 0 | 0% | 0 |
+| Ø31 · 6,000 | 1,212 | 41 | 0.1515% | 41 |
+| Ø34 · 9,500 | 1,447 | 105 | 0.4876% | 105 |
+
+기존 출구 속도는 `inletOutlet`과 `inletValue uniform (0 0 0)`이다. 압력 보정된
+`phi`가 음수인 출구 면에서 속도 전체를 0으로 고정하는 차이가 확인됐다.
+이는 압력 잔차 정체의 후보 원인이며 아직 인과관계가 확정된 것은 아니다.
+
+`outlet_velocity_profile: pressure_backflow`는 **출구 U의 경계조건만**
+`pressureInletOutletVelocity`로 바꾼다. 출구 압력 101325 Pa, 입구 유속 0.4 m/s,
+수온 293 K, CAD와 메시 프로필, 수렴·y+·열 검증 기준은 그대로 유지한다.
+v2512 구현은 역류 시 접선 성분을 제한하면서 법선 속도를 허용한다.
+[OpenCFD 경계조건 설명](https://doc.openfoam.com/2312/tools/processing/boundary-conditions/rtm/derived/outlet/pressureInletOutletVelocity/).
+기존 수치 프로필 `pressure_reltol_zero`도 유지해 직전 시도 대비 한 설정만 바꾼다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_11layers_motion --outlet-velocity-profile pressure_backflow
+```
+
+이 명령은 메시·y+·안전성·유량·압력차 검사를 통과하고 9,500회에서 압력 잔차만
+실패한 작업에 대해, 새 경계조건과 같은 메시 프로필을 지정한 경우에만 허용된다.
+기존 실패 출력은 진단 보존 후 삭제하고 새 UUID에서 CAD·메시부터 다시 생성한다.
+1,500회 및 이후 S0 검증 지점마다 `case/diagnostics/outlet/<반복>.json`에 실제
+역류량과 역류 면의 속도를 저장한다. 합격 판정을 대신하는 진단값은 아니다.
+
+경계조건 변경은 `case/reports/outlet_boundary.json`과 결과 manifest에 기록하며,
+검증 통과 후 웹 결과 이름에 `출구 역류 대응`을 표시한다. 원래 Ø28·Ø31 결과는
+유지한다. 정량적인 시안 비교에는 이 경계조건 차이의 영향도 검토해야 한다.
+새 YAML 실험에도 위 `outlet_velocity_profile`을 명시할 수 있으며 기본값은 바꾸지 않는다.
