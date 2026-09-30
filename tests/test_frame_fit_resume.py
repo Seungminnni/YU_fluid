@@ -39,6 +39,9 @@ class FrameFitResumeTests(unittest.TestCase):
             log = previous / 'case/runs/steady_cold_flow/logs/solver/trace.log'
             log.parent.mkdir(parents=True)
             log.write_text('pressure plateau')
+            (previous / 'worker.log').write_text('Docker startup failed')
+            (previous / 'case/reports').mkdir(parents=True)
+            retry.write(previous / 'case/reports/steady_numerics.json', {'profile': 'pressure_limited_0p5'})
             entry = {'diameter_mm': 34, 'id': previous.name, 'job_dir': str(previous)}
             batch = {'jobs': [entry]}
             delete = retry.delete_failed_job
@@ -57,6 +60,8 @@ class FrameFitResumeTests(unittest.TestCase):
             self.assertEqual(retry.read(new / 'status.json')['status'], 'queued')
             archive = batch_dir / 'diagnostic_attempts' / previous.name
             self.assertEqual((archive / log.relative_to(previous)).read_text(), 'pressure plateau')
+            self.assertEqual((archive / 'worker_tail.log').read_text(), 'Docker startup failed')
+            self.assertEqual(retry.read(archive / 'steady_numerics.json')['profile'], 'pressure_limited_0p5')
 
     def test_pressure_retry_requires_complete_safe_evidence_at_cap(self):
         checks = dict.fromkeys([

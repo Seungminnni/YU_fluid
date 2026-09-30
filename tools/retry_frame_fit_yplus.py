@@ -59,6 +59,14 @@ def prepare_retry(batch,entry,microns, *, replacement_overrides=None, reason=Non
             shutil.copytree(source,archive/relative,dirs_exist_ok=True)
     snappy=previous/'case/logs/production_mesh/snappyHexMesh.log'
     if snappy.is_file():shutil.copy2(snappy,archive/'snappyHexMesh.log')
+    numerics=previous/'case/reports/steady_numerics.json'
+    if numerics.is_file():shutil.copy2(numerics,archive/'steady_numerics.json')
+    worker=previous/'worker.log'
+    if worker.is_file():
+        with worker.open('rb') as stream:
+            stream.seek(0,2)
+            stream.seek(max(0,stream.tell()-65536))
+            (archive/'worker_tail.log').write_bytes(stream.read())
     # The original STEP inputs live in shared staging, outside the failed job.
     for source in prior['files'].values():
         p=Path(source)
