@@ -100,3 +100,17 @@ python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame
 
 새 YAML 실험은 전체 또는 개별 case에 `steady_numerics_profile: pressure_limited_0p5`를
 명시할 수 있다. 생략하면 기존 설정을 그대로 사용하며 자동 재시도 범위를 늘리지 않는다.
+
+#### 압력 보정 시험 결과와 다음 메시 후보
+
+`fb607bcbbd384bccb8501768ab494663`은 2026-09-30 11:49 KST에 S0 9,500회에서
+실패했다. y+<1 면적 95.2332%와 메시·질량수지·압력차 안정성 검사는 통과했으나,
+마지막 200회의 초기 잔차 최댓값은 압력 1.5042e-3, Ux 1.6225e-4,
+Uy 1.3192e-4였다. 압력 잔차는 원래 보정 방식의 4.6699e-4보다 커졌으므로
+`pressure_limited_0p5`를 이 시안의 개선안으로 채택하지 않는다.
+
+다음 검토된 후보는 `production_frame_fit_6um_12layers_motion`이며 수치 보정은
+기존 `Gauss linear corrected`로 되돌린다. 비교 기준은 원래 수치 설정을 쓴
+6 µm·11층 시도 `c3bf655d46fe4c8abf7037618f6fd53c`이다. 실패 진단을 보존하고
+새 ID의 빈 폴더에서 메시부터 생성한다. 기존 물리 입력과 모든 합격 기준을
+유지하며, 12층 후보 역시 실제 검증을 통과하기 전까지는 미검증 시험이다.
