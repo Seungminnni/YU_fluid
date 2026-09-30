@@ -9,6 +9,7 @@ PROFILES = (
     "pressure_limited_0p5",
     "pressure_reltol_zero",
     "pressure_relaxation_0p15",
+    "pressure_relaxation_0p5",
 )
 
 
@@ -39,10 +40,11 @@ def apply_profile(case: Path, profile: str | None) -> None:
     else:
         filename = "fvSolution"
         original = "    fields\n    {\n        p_rgh 0.3;\n    }"
-        replacement = original.replace("p_rgh 0.3;", "p_rgh 0.15;")
+        relaxation = 0.15 if profile == "pressure_relaxation_0p15" else 0.5
+        replacement = original.replace("p_rgh 0.3;", f"p_rgh {relaxation:g};")
         settings = {
             "field": "p_rgh",
-            "relaxation": 0.15,
+            "relaxation": relaxation,
             "previous_relaxation": 0.3,
             "evidence": "pressure residual plateau with stable mass balance and pressure drop",
         }

@@ -18,8 +18,32 @@ from retry_frame_fit_yplus import BATCH, read, write
 def pressure_retryable(entry: dict, numerical_profile: str) -> bool:
     """An explicit new trial only after a clean, pressure-only failure at the cap."""
     job = Path(entry['job_dir'])
-    return (read(job / 'job.json').get('steady_numerics_profile') != numerical_profile
-            and pressure_failure_at_cap(entry))
+    prior = read(job / 'job.json').get('steady_numerics_profile')
+    return (prior != numerical_profile and (
+        pressure_failure_at_cap(entry)
+        or (numerical_profile == 'pressure_relaxation_0p5'
+            and prior == 'pressure_relaxation_0p15'
+            and under_relaxed_pressure_diverged(entry))
+    ))
+
+
+def under_relaxed_pressure_diverged(entry: dict) -> bool:
+    """Recognise the one unsafe 0.15 pressure-relaxation trial; never reuse it."""
+    job = Path(entry['job_dir'])
+    state = read(job / 'status.json')
+    gate = read(job / 'case/reports/production_mesh/production_mesh_gate.json')
+    log = job / 'case/runs/steady_cold_flow/logs/solver/steady_cold_flow.log'
+    try:
+        tail = log.read_text(encoding='utf-8', errors='replace')[-65536:]
+    except OSError:
+        return False
+    return (
+        state.get('status') == 'failed'
+        and state.get('stage') == 'steady'
+        and gate.get('status') == 'PRODUCTION_MESH_GATE_PASSED'
+        and 'Negative initial temperature' in tail
+        and 'FOAM parallel run aborting' in tail
+    )
 
 
 def pressure_failure_at_cap(entry: dict) -> bool:

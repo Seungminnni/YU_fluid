@@ -125,6 +125,30 @@ class FrameFitResumeTests(unittest.TestCase):
             self.assertFalse(runner.pressure_retryable(entry, 'pressure_limited_0p5'))
             self.assertTrue(runner.pressure_failure_at_cap(entry))
 
+    def test_only_known_under_relaxed_divergence_can_advance_to_0p5(self):
+        profile = 'production_frame_fit_6um_11layers_motion'
+        with tempfile.TemporaryDirectory() as temp:
+            job = Path(temp)
+            entry = {'job_dir': str(job)}
+            def write(relative, value):
+                path = job / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value), encoding='utf-8')
+            write('job.json', {'mesh_profile': profile,
+                               'steady_numerics_profile': 'pressure_relaxation_0p15'})
+            write('status.json', {'status': 'failed', 'stage': 'steady'})
+            write('case/reports/production_mesh/production_mesh_gate.json',
+                  {'status': 'PRODUCTION_MESH_GATE_PASSED'})
+            log = job / 'case/runs/steady_cold_flow/logs/solver/steady_cold_flow.log'
+            log.parent.mkdir(parents=True)
+            log.write_text('Negative initial temperature T0: -1\nFOAM parallel run aborting\n')
+            self.assertTrue(runner.under_relaxed_pressure_diverged(entry))
+            self.assertTrue(runner.pressure_retryable(entry, 'pressure_relaxation_0p5'))
+            self.assertFalse(runner.pressure_retryable(entry, 'pressure_relaxation_0p15'))
+            log.write_text('ordinary failure')
+            self.assertFalse(runner.under_relaxed_pressure_diverged(entry))
+            self.assertFalse(runner.pressure_retryable(entry, 'pressure_relaxation_0p5'))
+
     def test_pressure_retry_cannot_change_mesh_or_repeat_candidates(self):
         profile = 'production_frame_fit_6um_11layers_motion'
         batch = {'solver_mpi_ranks': 12, 'jobs': [{'diameter_mm': 34, 'id': 'third', 'job_dir': '/third'}]}
