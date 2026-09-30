@@ -40,3 +40,20 @@ class LocalRefinementTests(unittest.TestCase):
         )
         self.assertIn('firstLayerThickness     6e-06;', text)
         self.assertIn('nSurfaceLayers 11;', text)
+
+    def test_frame_fit_800k_port_rim_retry_changes_only_cap_box_level(self):
+        configs = Path(__file__).resolve().parents[1] / 'configs'
+        config = load_config(
+            configs / 'baseline_23cell.yaml',
+            overlay_paths=(configs / 'frame_fit_water_phi34_20260929.yaml',),
+        )
+        preset = MESH_PRESETS['production_frame_fit_800k_6um_11layers_motion_port_l1']
+        text = _snappy_dict(config, preset)
+        self.assertRegex(
+            text,
+            r'outletCapRefinement\s*\{\s*mode inside;\s*levels \(\(1e15 1\)\);',
+        )
+        self.assertRegex(text, r'outerDomain\s*\{\s*level \(1 2\);')
+        self.assertEqual(preset.background_cell_m, 0.0029)
+        self.assertEqual(preset.first_layer_thickness_m, 6e-6)
+        self.assertEqual(preset.prism_layer_count, 11)

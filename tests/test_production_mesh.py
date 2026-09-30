@@ -235,6 +235,15 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertTrue(preset.preserve_wall_diagnostics)
         self.assertEqual(preset.minimum_hexahedron_fraction, 0.88)
 
+        port_retry = MESH_PRESETS[
+            "production_frame_fit_800k_6um_11layers_motion_port_l1"
+        ]
+        self.assertEqual(port_retry.port_cap_refinement_level, 1)
+        self.assertEqual(port_retry.target_cells, preset.target_cells)
+        self.assertEqual(port_retry.background_cell_m, preset.background_cell_m)
+        self.assertEqual(port_retry.first_layer_thickness_m, preset.first_layer_thickness_m)
+        self.assertEqual(port_retry.prism_layer_count, preset.prism_layer_count)
+
     def test_600k_profile_is_recalibrated_above_the_minimum(self) -> None:
         preset = MESH_PRESETS["production_600k"]
         self.assertEqual(preset.target_cells, 600_000)

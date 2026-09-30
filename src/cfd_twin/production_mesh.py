@@ -72,6 +72,7 @@ class MeshPreset:
     refined_battery_cells: tuple[str, ...] = ()
     preserve_wall_diagnostics: bool = False
     mesh_shrinker: str = "displacementMedialAxis"
+    port_cap_refinement_level: int | None = None
     target_solid_cells: int | None = None
     target_fluid_cells: int | None = None
     target_points: int | None = None
@@ -320,6 +321,19 @@ MESH_PRESETS[_name] = replace(
 )
 SUPPORTED_LEVELS += (_name,)
 
+# The first Ø34 800k attempt produced 935,507 post-split cells and twelve
+# low-twist coolant faces, all clustered at the two port rims.  Keep the same
+# global grid and wall layers, but reduce only the short port-cap volume boxes
+# from level 2 to level 1.  The outerDomain surface itself remains level 2, so
+# the circular inlet/outlet geometry is still resolved and revalidated.
+_name = "production_frame_fit_800k_6um_11layers_motion_port_l1"
+MESH_PRESETS[_name] = replace(
+    MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"],
+    port_cap_refinement_level=1,
+    calibration_status="FRAME_FIT_800K_PORT_RIM_QUALITY_TRIAL_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (_name,)
+
 
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -483,10 +497,10 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
     )
 
     port_refinement_regions: list[str] = []
-    port_refinement_level: int | None = None
-    if preset.background_cell_m <= 0.0027:
+    port_refinement_level: int | None = preset.port_cap_refinement_level
+    if port_refinement_level is None and preset.background_cell_m <= 0.0027:
         port_refinement_level = 3
-    elif (
+    elif port_refinement_level is None and (
         preset.minimum_total_cells is not None
         and max(config.ports.inlet_diameter_m, config.ports.outlet_diameter_m) >= 0.023
     ):
