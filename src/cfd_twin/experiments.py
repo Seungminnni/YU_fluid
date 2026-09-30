@@ -21,6 +21,7 @@ from .file_lock import lock_file
 from .geometry import geometry_report
 from .parallelism import default_solver_mpi_ranks
 from .production_mesh import MESH_PRESETS
+from .steady_convergence import validate_maximum_iterations
 from .steady_numerics import validate_profile
 from .outlet_boundary import validate_profile as validate_outlet_profile
 from .workflow_run import (
@@ -95,6 +96,12 @@ def load_plan(path: Path) -> dict:
         validate_outlet_profile(outlet_profile)
         if outlet_profile is not None:
             plan["cases"][-1]["outlet_velocity_profile"] = outlet_profile
+        cold_flow_maximum = case.get(
+            "cold_flow_maximum_iterations", raw.get("cold_flow_maximum_iterations")
+        )
+        validate_maximum_iterations(cold_flow_maximum)
+        if cold_flow_maximum is not None:
+            plan["cases"][-1]["cold_flow_maximum_iterations"] = cold_flow_maximum
     return plan
 
 
@@ -113,6 +120,10 @@ def _queue(jobs: Path, prepared: dict, files: dict, specification: dict, *, prof
         manifest["steady_numerics_profile"] = specification["steady_numerics_profile"]
     if specification.get("outlet_velocity_profile") is not None:
         manifest["outlet_velocity_profile"] = specification["outlet_velocity_profile"]
+    if specification.get("cold_flow_maximum_iterations") is not None:
+        manifest["cold_flow_maximum_iterations"] = specification[
+            "cold_flow_maximum_iterations"
+        ]
     if MESH_PRESETS[profile].preserve_wall_diagnostics:
         manifest["wall_diagnostic_iterations"] = 1500
     _write_json(directory / "job.json", manifest)

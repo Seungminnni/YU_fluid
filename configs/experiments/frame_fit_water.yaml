@@ -7,6 +7,10 @@ inputs:
   inlet_velocity_m_s: 0.4
   outlet_pressure_pa: 101325.0
   mesh_target_cells: 600000
+# Optional diagnostic S0 cap. The default is 9500. Use 6000--50000 in
+# 500-iteration steps. A larger value does not relax validation or publish a
+# failed result; it only keeps a safe residual/mass-balance plateau running.
+# cold_flow_maximum_iterations: 20000
 # A: original shrinker; B: displacementMotionSolver. Failed mesh/y+ attempts
 # are archived for diagnostics, deleted, and regenerated with a new run UUID.
 mesh_profiles:

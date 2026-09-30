@@ -23,7 +23,7 @@ from .cad_import import STEP_ROLES, import_step_bundle, imported_config_override
 from .config import load_config
 from .errors import CfdTwinError
 from .production_mesh import MESH_PRESETS, write_production_mesh_source_bundle
-from .steady_convergence import continuation_decision
+from .steady_convergence import continuation_decision, validate_maximum_iterations
 from .steady_numerics import apply_profile as apply_steady_numerics, validate_profile as validate_steady_numerics
 from .outlet_boundary import apply_profile as apply_outlet_boundary, validate_profile as validate_outlet_boundary, record_outlet
 from .workflow_publish import publish_completed_run
@@ -123,8 +123,13 @@ def _compose_service(
             _check_cancel(cancel_path)
 
 
-def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None = None) -> None:
+def _run_steady_stages(
+    case: Path, output: object, *, cancel_path: Path | None = None,
+    cold_flow_maximum_iterations: int | None = None,
+) -> None:
     """Run S0/S1 with the same measured, bounded gate on Mac and Windows."""
+
+    cold_flow_maximum = validate_maximum_iterations(cold_flow_maximum_iterations)
 
     for stage, run_name, pilot, continuation, report_name, env_name in (
         ("cold", "steady_cold_flow", "cold-flow-pilot", "cold-flow-continue", "cold_flow_validation.json", "COLD_FLOW_ADDITIONAL_ITERATIONS"),
@@ -153,7 +158,10 @@ def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None =
                     # Preserve correspondence even when the eventual y+ gate
                     # fails. Keep diagnostic_only until the full gate passes.
                     compare(case, f"{measured:g}", diagnostic_only=_read_json(report_path).get("status") != "COLD_FLOW_VALIDATION_PASSED")
-            decision = continuation_decision(_read_json(report_path), stage=stage)
+            decision = continuation_decision(
+                _read_json(report_path), stage=stage,
+                maximum=cold_flow_maximum if stage == "cold" else 9500,
+            )
             _write_json(decision_path, decision)
             if decision["action"] == "pass":
                 break
@@ -455,6 +463,7 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
     job = _read_json(job_dir / "job.json")
     validate_steady_numerics(job.get("steady_numerics_profile"))
     validate_outlet_boundary(job.get("outlet_velocity_profile"))
+    validate_maximum_iterations(job.get("cold_flow_maximum_iterations"))
     files = {role: Path(job["files"][role]) for role in STEP_ROLES}
     base_overrides = _validated_geometry_overrides(job.get("geometry_overrides"))
     imported = import_step_bundle(
@@ -514,10 +523,16 @@ def run_imported_case(job_manifest: Path) -> None:
                     environment.update(TRANSIENT_DELTA_T="1", ENERGY_COUPLING_ITERATIONS="200")
                 with (job_dir / "worker.log").open("ab") as output:
                     if stage == "steady":
-                        diagnostic_iterations = _read_json(job_manifest).get("wall_diagnostic_iterations")
+                        job_options = _read_json(job_manifest)
+                        diagnostic_iterations = job_options.get("wall_diagnostic_iterations")
                         if diagnostic_iterations is not None:
                             _run_wall_diagnostic(case, output, diagnostic_iterations, cancel_path=cancel_path)
-                        _run_steady_stages(case, output, cancel_path=cancel_path)
+                        _run_steady_stages(
+                            case, output, cancel_path=cancel_path,
+                            cold_flow_maximum_iterations=job_options.get(
+                                "cold_flow_maximum_iterations"
+                            ),
+                        )
                         result_code = 0
                     else:
                         result_code = _compose_service(

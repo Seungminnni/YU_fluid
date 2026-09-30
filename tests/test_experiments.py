@@ -59,14 +59,22 @@ class ExperimentTests(unittest.TestCase):
     def test_explicit_numerical_profile_is_frozen_and_validated(self):
         self.raw['cases'][0]['steady_numerics_profile'] = 'pressure_limited_0p5'
         self.raw['cases'][0]['outlet_velocity_profile'] = 'pressure_backflow'
+        self.raw['cases'][0]['cold_flow_maximum_iterations'] = 20000
         self.write_config()
         batch = self.prepare()
         job = experiments.read(Path(batch['jobs'][0]['job_dir']) / 'job.json')
         self.assertEqual(job['steady_numerics_profile'], 'pressure_limited_0p5')
         self.assertEqual(job['outlet_velocity_profile'], 'pressure_backflow')
+        self.assertEqual(job['cold_flow_maximum_iterations'], 20000)
         self.raw['cases'][0]['steady_numerics_profile'] = 'typo'
         self.write_config()
         with self.assertRaisesRegex(ValueError, 'Unknown steady_numerics_profile'):
+            experiments.load_plan(self.config)
+
+    def test_cold_flow_iteration_cap_is_validated_before_preparation(self):
+        self.raw['cold_flow_maximum_iterations'] = 6001
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, 'multiple of 500'):
             experiments.load_plan(self.config)
 
     def test_failed_mesh_is_archived_and_regenerated_in_new_job(self):

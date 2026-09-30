@@ -34,14 +34,39 @@ RETRYABLE_CHECKS = {
         "maximum_energy_imbalance_below_5_percent",
     },
 }
+DEFAULT_MAXIMUM_ITERATIONS = 9500
+MINIMUM_MAXIMUM_ITERATIONS = 6000
+MAXIMUM_DIAGNOSTIC_ITERATIONS = 50000
 PASS_STATUS = {
     "cold": "COLD_FLOW_VALIDATION_PASSED",
     "cht": "STEADY_CHT_VALIDATION_PASSED",
 }
 
 
+def validate_maximum_iterations(value: object | None) -> int:
+    """Return a bounded, reproducible S0 iteration cap.
+
+    A larger cap is diagnostic only.  It never changes any acceptance gate or
+    permits S1/S2/publication after a failed S0 report.
+    """
+
+    if value is None:
+        return DEFAULT_MAXIMUM_ITERATIONS
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("cold_flow_maximum_iterations must be an integer")
+    if not MINIMUM_MAXIMUM_ITERATIONS <= value <= MAXIMUM_DIAGNOSTIC_ITERATIONS:
+        raise ValueError(
+            "cold_flow_maximum_iterations must be between "
+            f"{MINIMUM_MAXIMUM_ITERATIONS} and {MAXIMUM_DIAGNOSTIC_ITERATIONS}"
+        )
+    if value % 500:
+        raise ValueError("cold_flow_maximum_iterations must be a multiple of 500")
+    return value
+
+
 def continuation_decision(
-    report: dict[str, object], *, stage: str, maximum: int = 9500,
+    report: dict[str, object], *, stage: str,
+    maximum: int = DEFAULT_MAXIMUM_ITERATIONS,
     increment: int = 500,
 ) -> dict[str, object]:
     """Choose pass, bounded continuation or fail from measured gate results."""
@@ -53,28 +78,32 @@ def continuation_decision(
     checks = report.get("checks")
     final = report.get("final_iteration")
     if not isinstance(checks, dict) or isinstance(final, bool) or not isinstance(final, (int, float)):
-        return {"action": "fail", "reason": "missing measured checks or iteration"}
+        return {"action": "fail", "reason": "missing measured checks or iteration",
+                "maximum_iterations": maximum}
     iteration = int(final)
     if iteration != final or iteration < 0:
-        return {"action": "fail", "reason": "invalid final iteration"}
+        return {"action": "fail", "reason": "invalid final iteration",
+                "maximum_iterations": maximum}
     failed = sorted(name for name, passed in checks.items() if passed is not True)
     if report.get("status") == PASS_STATUS[stage] and not failed:
-        return {"action": "pass", "iteration": iteration, "failed_checks": []}
+        return {"action": "pass", "iteration": iteration, "failed_checks": [],
+                "maximum_iterations": maximum}
     if not failed or any(name not in RETRYABLE_CHECKS[stage] for name in failed):
         return {
             "action": "fail", "iteration": iteration,
             "reason": "non-retryable or unrecognised gate failure",
-            "failed_checks": failed,
+            "failed_checks": failed, "maximum_iterations": maximum,
         }
     if iteration >= maximum:
         return {
             "action": "fail", "iteration": iteration,
             "reason": "absolute iteration cap reached", "failed_checks": failed,
+            "maximum_iterations": maximum,
         }
     return {
         "action": "continue", "iteration": iteration,
         "additional_iterations": min(increment, maximum - iteration),
-        "failed_checks": failed,
+        "failed_checks": failed, "maximum_iterations": maximum,
     }
 
 
