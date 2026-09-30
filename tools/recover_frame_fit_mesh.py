@@ -18,7 +18,7 @@ def configure(batch,entry,um,layers, *, profile=None, steady_numerics_profile=No
     preset=MESH_PRESETS[profile]
     validate_profile(steady_numerics_profile)
     validate_outlet_profile(outlet_velocity_profile)
-    reason=('Fresh pressure non-orthogonal correction trial; unchanged mesh profile, physics and acceptance limits'
+    reason=('Fresh pressure numerical trial; unchanged mesh profile, physics and acceptance limits'
             if steady_numerics_profile else 'Fresh boundary-layer envelope trial; all physical conditions and validation thresholds unchanged')
     overrides={'mesh_profile':profile}
     if steady_numerics_profile:

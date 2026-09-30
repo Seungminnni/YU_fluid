@@ -59,11 +59,34 @@ class SteadyNumericsTests(unittest.TestCase):
             self.assertEqual(len(report['changes']), 3)
             self.assertFalse(report['acceptance_limits_changed'])
 
+    def test_pressure_relaxation_trial_only_changes_pressure_field_relaxation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            case = Path(temp)
+            original = _fluid_solution(conservative=True)
+            paths = [case / 'system/coolant/fvSolution'] + [
+                case / 'profiles' / stage / 'system/coolant/fvSolution'
+                for stage in ('steady_cold_flow', 'steady', 'frozen_flow_actual_1s')
+            ]
+            for path in paths:
+                path.parent.mkdir(parents=True)
+                path.write_text(original, encoding='utf-8')
+            apply_profile(case, 'pressure_relaxation_0p15')
+            old = '    fields\n    {\n        p_rgh 0.3;\n    }'
+            new = old.replace('p_rgh 0.3;', 'p_rgh 0.15;')
+            for path in paths[:3]:
+                self.assertEqual(path.read_text(encoding='utf-8'), original.replace(old, new))
+                self.assertNotIn(b'\r', path.read_bytes())
+            self.assertEqual(paths[-1].read_text(encoding='utf-8'), original)
+            report = json.loads((case / 'reports/steady_numerics.json').read_text())
+            self.assertEqual(report['relaxation'], 0.15)
+            self.assertFalse(report['acceptance_limits_changed'])
+
     def test_existing_run_or_unknown_profile_cannot_be_modified(self):
         with tempfile.TemporaryDirectory() as temp:
             case = Path(temp)
             (case / 'runs/steady_cold_flow').mkdir(parents=True)
-            for profile in ('pressure_limited_0p5', 'pressure_reltol_zero', 'typo'):
+            for profile in ('pressure_limited_0p5', 'pressure_reltol_zero',
+                            'pressure_relaxation_0p15', 'typo'):
                 with self.assertRaises(ValueError):
                     apply_profile(case, profile)
 
