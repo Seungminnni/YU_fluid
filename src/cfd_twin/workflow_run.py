@@ -24,6 +24,7 @@ from .config import load_config
 from .errors import CfdTwinError
 from .production_mesh import MESH_PRESETS, write_production_mesh_source_bundle
 from .steady_convergence import continuation_decision
+from .steady_numerics import apply_profile as apply_steady_numerics, validate_profile as validate_steady_numerics
 from .workflow_publish import publish_completed_run
 
 
@@ -445,6 +446,7 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
     """Create the real STL/mesh/solver input bundle without running Docker."""
 
     job = _read_json(job_dir / "job.json")
+    validate_steady_numerics(job.get("steady_numerics_profile"))
     files = {role: Path(job["files"][role]) for role in STEP_ROLES}
     base_overrides = _validated_geometry_overrides(job.get("geometry_overrides"))
     imported = import_step_bundle(
@@ -462,6 +464,7 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
     if profile not in MESH_PRESETS or MESH_PRESETS[profile].target_cells != inputs['mesh_target_cells']:
         raise CfdTwinError("Mesh profile must match the requested cell-count target")
     write_production_mesh_source_bundle(config, imported["cad_dir"], case, mesh_level=profile)
+    apply_steady_numerics(case, job.get("steady_numerics_profile"))
     (job_dir / "resolved_config.json").write_text(config.to_json() + "\n", encoding="utf-8")
     return {"case": case, "cad": imported["cad_dir"], "config": config}
 

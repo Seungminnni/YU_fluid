@@ -21,6 +21,7 @@ from .file_lock import lock_file
 from .geometry import geometry_report
 from .parallelism import default_solver_mpi_ranks
 from .production_mesh import MESH_PRESETS
+from .steady_numerics import validate_profile
 from .workflow_run import (
     BASE_CONFIG, SOURCE_ROOT, STEP_ROLES, THERMAL_OVERLAY, _operation_overrides,
     _write_json, prepare_imported_run, prepare_solver_inputs, run_imported_case,
@@ -85,6 +86,10 @@ def load_plan(path: Path) -> dict:
         geometry_report(config)
         plan["cases"].append({"name": name, "inputs": inputs, "mesh_profiles": profiles,
                               "geometry_overrides": overrides})
+        numerical_profile = case.get("steady_numerics_profile", raw.get("steady_numerics_profile"))
+        validate_profile(numerical_profile)
+        if numerical_profile is not None:
+            plan["cases"][-1]["steady_numerics_profile"] = numerical_profile
     return plan
 
 
@@ -99,6 +104,8 @@ def _queue(jobs: Path, prepared: dict, files: dict, specification: dict, *, prof
                 "mesh_profile": profile, "source": {"kind": "experiment_yaml", "name": specification["name"]}}
     if retry_of:
         manifest["source"]["retry_of"] = retry_of
+    if specification.get("steady_numerics_profile") is not None:
+        manifest["steady_numerics_profile"] = specification["steady_numerics_profile"]
     if MESH_PRESETS[profile].preserve_wall_diagnostics:
         manifest["wall_diagnostic_iterations"] = 1500
     _write_json(directory / "job.json", manifest)

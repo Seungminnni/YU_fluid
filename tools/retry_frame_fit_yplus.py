@@ -44,7 +44,7 @@ def delete_failed_job(previous, replacement):
         raise RuntimeError('Published results must never be removed')
     shutil.rmtree(previous)
 
-def prepare_retry(batch,entry,microns):
+def prepare_retry(batch,entry,microns, *, replacement_overrides=None, reason=None):
     previous=Path(entry['job_dir'])
     prior=read(previous/'job.json')
     # The later explicit request retains raw wall diagnostics for spatial A/B
@@ -53,7 +53,7 @@ def prepare_retry(batch,entry,microns):
     archive.mkdir(parents=True,exist_ok=True)
     for name in ('job.json','status.json'):
         shutil.copy2(previous/name,archive/name)
-    for relative in ('case/reports/production_mesh','case/diagnostics/wall','case/runs/steady_cold_flow/reports/solver'):
+    for relative in ('case/reports/production_mesh','case/diagnostics/wall','case/runs/steady_cold_flow/reports/solver','case/runs/steady_cold_flow/logs/solver','case/runs/steady_cold_flow/system'):
         source=previous/relative
         if source.is_dir():
             shutil.copytree(source,archive/relative,dirs_exist_ok=True)
@@ -67,7 +67,7 @@ def prepare_retry(batch,entry,microns):
     new_id=uuid.uuid4().hex
     job_dir=RUNS/new_id
     job_dir.mkdir(exist_ok=False)
-    job={**prior,'id':new_id,'status':'queued','mesh_profile':f'production_600k_frame_fit_{microns}um','source':{**prior.get('source',{}),'retry_of':previous.name,'first_layer_microns':microns,'reason':'y+ area criterion failed; regenerate mesh with unchanged physics and acceptance limits'}}
+    job={**prior,'mesh_profile':f'production_600k_frame_fit_{microns}um',**(replacement_overrides or {}),'id':new_id,'status':'queued','source':{**prior.get('source',{}),'retry_of':previous.name,'first_layer_microns':microns,'reason':reason or 'y+ area criterion failed; regenerate mesh with unchanged physics and acceptance limits'}}
     write(job_dir/'job.json',job)
     write(job_dir/'status.json',{'status':'queued','stage':'cad','message':f'Ø{entry["diameter_mm"]} 재시도: 실패 생성물 삭제 후 새 메시, 첫 격자층 {microns} µm'})
     failure={'id':entry['id'],'status':read(previous/'status.json'),'mesh_profile':prior.get('mesh_profile'),'first_layer_microns':entry.get('first_layer_microns',10),'yplus':read(previous/'case/runs/steady_cold_flow/reports/solver/yplus.json').get('battery_surface',{}),'diagnostics_archive':str(archive),'output_deleted':False}

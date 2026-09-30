@@ -9,11 +9,47 @@ import time
 
 from cfd_twin.file_lock import lock_file
 from cfd_twin.production_mesh import MESH_PRESETS
+from cfd_twin.steady_numerics import PROFILES, validate_profile
 from recover_frame_fit_mesh import configure, execute, retryable
 from retry_frame_fit_yplus import BATCH, read, write
 
 
-def resume(batch: dict, diameter: int, profiles: list[str]) -> dict:
+def pressure_retryable(entry: dict, numerical_profile: str) -> bool:
+    """An explicit new trial only after a clean, pressure-only failure at the cap."""
+    job = Path(entry['job_dir'])
+    state = read(job / 'status.json')
+    if state.get('status') != 'failed' or state.get('stage') != 'steady':
+        return False
+    if read(job / 'job.json').get('steady_numerics_profile') == numerical_profile:
+        return False
+    if read(job / 'case/reports/production_mesh/production_mesh_gate.json').get('status') != 'PRODUCTION_MESH_GATE_PASSED':
+        return False
+    report = read(job / 'case/runs/steady_cold_flow/reports/solver/cold_flow_validation.json')
+    checks = report.get('checks', {})
+    required = {
+        'battery_yplus_gate_passed', 'final_fields_finite', 'final_iteration_present',
+        'final_turbulence_fields_nonnegative', 'last_200_flow_residuals_below_1e-4',
+        'mass_imbalance_below_0p1_percent', 'minimum_5000_outer_iterations_completed',
+        'monitor_window_has_at_least_21_samples', 'pilot_derived_residual_floors_reached',
+        'pressure_drop_span_below_0p5_percent', 'solver_clean_end',
+    }
+    audit = report.get('acceptance_residual_audit', {})
+    fields = {'coolant.Ux', 'coolant.Uy', 'coolant.Uz', 'coolant.p_rgh', 'coolant.k', 'coolant.omega'}
+    return (
+        report.get('status') == 'COLD_FLOW_VALIDATION_FAILED'
+        and report.get('final_iteration') == 9500
+        and required <= checks.keys()
+        and {key for key, value in checks.items() if value is not True} == {'last_200_flow_residuals_below_1e-4'}
+        and checks['last_200_flow_residuals_below_1e-4'] is False
+        and audit.get('target') == 1e-4
+        and audit.get('window_outer_iterations') == 200
+        and fields == set(audit.get('checks', {}))
+        and {key for key, value in audit['checks'].items() if value is not True} == {'coolant.p_rgh'}
+        and audit['checks']['coolant.p_rgh'] is False
+    )
+
+
+def resume(batch: dict, diameter: int, profiles: list[str], *, steady_numerics_profile: str | None = None) -> dict:
     entries = [entry for entry in batch['jobs'] if entry['diameter_mm'] == diameter]
     if len(entries) != 1:
         raise ValueError('Expected exactly one matching diameter')
@@ -21,7 +57,13 @@ def resume(batch: dict, diameter: int, profiles: list[str]) -> dict:
     state = read(Path(entry['job_dir']) / 'status.json')
     if state.get('status') == 'complete':
         return state
-    if not retryable(entry):
+    validate_profile(steady_numerics_profile)
+    if steady_numerics_profile:
+        if not pressure_retryable(entry, steady_numerics_profile):
+            raise ValueError('Pressure trial requires a clean pressure-only failure at 9500; never repeat the same numerical profile')
+        if profiles != [read(Path(entry['job_dir']) / 'job.json').get('mesh_profile')]:
+            raise ValueError('A pressure trial must use exactly the previous mesh profile')
+    elif not retryable(entry):
         raise ValueError('Only a failed mesh/y+ job may enter fresh mesh trials')
     os.environ.update(OPENFOAM_MPI_RANKS=str(batch['solver_mpi_ranks']),
                       OPENFOAM_MESH_MPI_RANKS='1', OMP_NUM_THREADS='1',
@@ -34,11 +76,12 @@ def resume(batch: dict, diameter: int, profiles: list[str]) -> dict:
                 or not preset.preserve_wall_diagnostics):
             raise ValueError('Retry profile must preserve the approved mesh gates and diagnostics')
     for profile in profiles:
-        if not retryable(entry):
+        if not steady_numerics_profile and not retryable(entry):
             break
         preset = MESH_PRESETS[profile]
+        options = {'steady_numerics_profile': steady_numerics_profile} if steady_numerics_profile else {}
         configure(batch, entry, round(preset.first_layer_thickness_m * 1e6),
-                  preset.prism_layer_count, profile=profile)
+                  preset.prism_layer_count, profile=profile, **options)
         print(f'Ø{diameter}: fresh retry with {profile}', flush=True)
         state = execute(batch, entry)
         if state.get('status') == 'complete':
@@ -58,11 +101,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--diameter', type=int, required=True)
     parser.add_argument('--profiles', nargs='+', required=True, choices=sorted(MESH_PRESETS))
+    parser.add_argument('--steady-numerics-profile', choices=PROFILES)
     args = parser.parse_args()
     with (BATCH / 'retry.lock').open('a+b') as retry_lock, (BATCH / 'batch.lock').open('a+b') as batch_lock:
         lock_file(retry_lock)
         lock_file(batch_lock)
-        state = resume(read(BATCH / 'batch.json'), args.diameter, args.profiles)
+        state = resume(read(BATCH / 'batch.json'), args.diameter, args.profiles,
+                       steady_numerics_profile=args.steady_numerics_profile)
     return 0 if state.get('status') == 'complete' and not state.get('release_error') else 1
 
 

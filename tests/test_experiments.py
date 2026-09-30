@@ -56,6 +56,17 @@ class ExperimentTests(unittest.TestCase):
             self.prepare()
         self.assertEqual(experiments.read(Path(batch["jobs"][0]["job_dir"]) / "job.json"), job)
 
+    def test_explicit_numerical_profile_is_frozen_and_validated(self):
+        self.raw['cases'][0]['steady_numerics_profile'] = 'pressure_limited_0p5'
+        self.write_config()
+        batch = self.prepare()
+        job = experiments.read(Path(batch['jobs'][0]['job_dir']) / 'job.json')
+        self.assertEqual(job['steady_numerics_profile'], 'pressure_limited_0p5')
+        self.raw['cases'][0]['steady_numerics_profile'] = 'typo'
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, 'Unknown steady_numerics_profile'):
+            experiments.load_plan(self.config)
+
     def test_failed_mesh_is_archived_and_regenerated_in_new_job(self):
         batch = self.prepare()
         original = Path(batch["jobs"][0]["job_dir"])

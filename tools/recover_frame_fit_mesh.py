@@ -7,41 +7,48 @@ from pathlib import Path
 from retry_frame_fit_yplus import BATCH, read, write, prepare_retry
 from cfd_twin.workflow_run import run_imported_case
 from cfd_twin.production_mesh import MESH_PRESETS
+from cfd_twin.steady_numerics import validate_profile
 
 CANDIDATES=[(6,12),(8,10),(6,14)]
 
-def configure(batch,entry,um,layers, *, profile=None):
+def configure(batch,entry,um,layers, *, profile=None, steady_numerics_profile=None):
     old=Path(entry['job_dir'])
+    profile=profile or f'production_600k_frame_fit_{um}um_{layers}layers'
+    preset=MESH_PRESETS[profile]
+    validate_profile(steady_numerics_profile)
+    reason=('Fresh pressure non-orthogonal correction trial; unchanged mesh profile, physics and acceptance limits'
+            if steady_numerics_profile else 'Fresh boundary-layer envelope trial; all physical conditions and validation thresholds unchanged')
+    overrides={'mesh_profile':profile}
+    if steady_numerics_profile:
+        overrides['steady_numerics_profile']=steady_numerics_profile
     state=read(old/'status.json')
     layer=read(old/'case/reports/production_mesh/layer_coverage.json')
     summary={k:layer[k] for k in ['status','checks','low_coverage_batteries','low_thickness_batteries'] if k in layer}
     if state.get('status')=='failed':
-        new=prepare_retry(batch,entry,um)
+        new=prepare_retry(batch,entry,um,replacement_overrides=overrides,reason=reason)
         entry['prior_attempts'][-1]['mesh_failure']=summary
     elif state.get('status')=='queued' and not (old/'case').exists():
         new=old
     else:
         raise RuntimeError('Only failed or untouched queued jobs may be reconfigured')
-    profile=profile or f'production_600k_frame_fit_{um}um_{layers}layers'
-    preset=MESH_PRESETS[profile]
     job=read(new/'job.json')
-    job['mesh_profile']=profile
+    job.update(overrides)
     job['inputs']['mesh_target_cells']=preset.target_cells
     if preset.preserve_wall_diagnostics:
         job['wall_diagnostic_iterations']=1500
     else:
         job.pop('wall_diagnostic_iterations',None)
-    job['source'].update(first_layer_microns=um,requested_prism_layers=layers,reason='Fresh boundary-layer envelope trial; all physical conditions and validation thresholds unchanged')
+    job['source'].update(first_layer_microns=um,requested_prism_layers=layers,reason=reason)
     entry.update(first_layer_microns=um,requested_prism_layers=layers,mesh_profile=profile)
     entry.update(refined_battery_cells=list(preset.refined_battery_cells),mesh_target_cells=preset.target_cells)
     job['source'].update(refined_battery_cells=list(preset.refined_battery_cells))
     write(new/'job.json',job)
-    write(new/'status.json',{'status':'queued','stage':'cad','message':f'Ø{entry["diameter_mm"]}: 새 메시, 첫 층 {um} µm · 요청 {layers}층. Ø28 검증 후 순차 실행'})
+    write(new/'status.json',{'status':'queued','stage':'cad','message':f'Ø{entry["diameter_mm"]}: 새 메시, 첫 층 {um} µm · 요청 {layers}층'})
     write(BATCH/'batch.json',batch)
     return new
 
 def execute(batch,entry):
-    active={'status':'running','current':entry,'pid':os.getpid(),'solver_mpi_ranks':batch['solver_mpi_ranks'],'strategy':'validate Ø28 first; fresh mesh for every retry'}
+    active={'status':'running','current':entry,'pid':os.getpid(),'solver_mpi_ranks':batch['solver_mpi_ranks'],'strategy':'fresh mesh for selected failed diameter; preserve completed runs'}
     write(BATCH/'status.json',active)
     write(BATCH/'retry_status.json',active)
     try:

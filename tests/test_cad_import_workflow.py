@@ -86,6 +86,7 @@ class ImportedCadWorkflowTests(unittest.TestCase):
                 json.dumps({
                     "files": {role: str(root / "jobs" / "staging" / selected[role]) for role in STEP_ROLES},
                     "inputs": inputs,
+                    "steady_numerics_profile": "pressure_limited_0p5",
                 }), encoding="utf-8",
             )
             built = build_imported_case(job_dir)
@@ -97,6 +98,9 @@ class ImportedCadWorkflowTests(unittest.TestCase):
             self.assertIn("1e-05", (case / "profiles/frozen_flow_actual_1s/system/fvSolution").read_text())
             self.assertIn("iterations 200;", (case / "profiles/frozen_flow_actual_1s/system/fvSolution").read_text())
             self.assertIn("102000", (case / "profiles/steady/system/coolant/fvSolution").read_text())
+            for stage in ('steady', 'steady_cold_flow'):
+                self.assertIn('laplacian(rhorAUf,p_rgh) Gauss linear limited 0.5;',
+                              (case / 'profiles' / stage / 'system/coolant/fvSchemes').read_text())
 
     def test_incomplete_or_fake_step_bundle_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

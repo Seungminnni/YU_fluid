@@ -71,3 +71,32 @@ python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame
 ```sh
 python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_11layers_motion production_frame_fit_6um_12layers_motion
 ```
+
+### Ø34의 압력 수렴 보정 시험
+
+6 µm·11층 시도 `c3bf655d46fe4c8abf7037618f6fd53c`는 662,352셀·육면체
+89.3907%로 메시 검증을 통과했다. S0 9,500회에서 y+<1 면적은 95.3181%였지만,
+마지막 200회의 압력 초기 잔차 최댓값은 4.6699e-4로 1e-4 기준을 넘었다.
+다른 유동 잔차와 질량수지·압력차 안정성 검사는 통과했으며 결과는 게시하지 않았다.
+
+`pressure_limited_0p5`는 같은 메시 프로필을 새로 생성하고 S0·S1의
+`laplacian(rhorAUf,p_rgh)`만 `Gauss linear limited 0.5`로 바꾸는 수치 시험이다.
+다른 방정식의 이산화·완화계수·물리 조건·합격 기준·9,500회 상한은 유지한다.
+OpenFOAM v2512의 `chtMultiRegionSimpleFoam` 소스에서 압력 연산자 이름을
+확인했다. [OpenCFD 설명](https://api.openfoam.com/2506/classFoam_1_1fv_1_1limitedSnGrad.html)에
+따르면 계수 0.5는 비직교 보정의 크기를 직교 성분 이하로 제한한다.
+압력 잔차 정체가 이 보정 때문에 생겼는지는 아직 확정되지 않았으며 성공을 보장하지 않는다.
+시안 비교 시 이 수치 설정 차이도 함께 기록한다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_11layers_motion --steady-numerics-profile pressure_limited_0p5
+```
+
+이 명시적 재시험은 9,500회에서 압력 잔차만 실패하고 메시와 나머지 S0 검사가
+모두 통과한 경우에만 허용한다. 같은 수치 프로필을 반복하거나 동시에 메시
+프로필을 바꾸는 요청은 거부한다. 진단 필드·보고서에 더해 S0 솔버 로그와 실제
+설정도 보존한 뒤 실패 작업을 삭제하고 새 ID에서 메시부터 실행한다.
+생성된 `case/reports/steady_numerics.json`에는 변경한 파일과 전후 해시를 기록한다.
+
+새 YAML 실험은 전체 또는 개별 case에 `steady_numerics_profile: pressure_limited_0p5`를
+명시할 수 있다. 생략하면 기존 설정을 그대로 사용하며 자동 재시도 범위를 늘리지 않는다.
