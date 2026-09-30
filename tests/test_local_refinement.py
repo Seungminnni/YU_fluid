@@ -57,3 +57,15 @@ class LocalRefinementTests(unittest.TestCase):
         self.assertEqual(preset.background_cell_m, 0.0029)
         self.assertEqual(preset.first_layer_thickness_m, 6e-6)
         self.assertEqual(preset.prism_layer_count, 11)
+
+    def test_frame_fit_800k_three_mm_retry_keeps_port_and_wall_settings(self):
+        preset = MESH_PRESETS[
+            'production_frame_fit_800k_6um_11layers_motion_3mm_port_l1'
+        ]
+        self.assertEqual(preset.target_cells, 800000)
+        self.assertEqual(preset.minimum_total_cells, 800000)
+        self.assertEqual(preset.background_cell_m, 0.003)
+        self.assertEqual(preset.port_cap_refinement_level, 1)
+        self.assertEqual(preset.first_layer_thickness_m, 6e-6)
+        self.assertEqual(preset.prism_layer_count, 11)
+        self.assertEqual(preset.mesh_shrinker, 'displacementMotionSolver')

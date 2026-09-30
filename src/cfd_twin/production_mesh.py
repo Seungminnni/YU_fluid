@@ -334,6 +334,19 @@ MESH_PRESETS[_name] = replace(
 )
 SUPPORTED_LEVELS += (_name,)
 
+# Lowering only the cap-box level retained the same twelve low-twist faces and
+# produced 920,006 post-split cells, six above the 15% count ceiling.  Shift the
+# global block grid from 2.90 to 3.00 mm while keeping the cap-box correction.
+# The observed cubic count ratio predicts roughly 831k cells and the changed
+# grid phase targets the port-rim faces without altering wall treatment.
+_name = "production_frame_fit_800k_6um_11layers_motion_3mm_port_l1"
+MESH_PRESETS[_name] = replace(
+    MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion_port_l1"],
+    background_cell_m=0.00300,
+    calibration_status="FRAME_FIT_800K_3MM_PORT_RIM_QUALITY_TRIAL_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (_name,)
+
 
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
