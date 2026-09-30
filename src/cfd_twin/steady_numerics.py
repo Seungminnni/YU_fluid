@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-PROFILES = ("pressure_limited_0p5",)
+PROFILES = ("pressure_limited_0p5", "pressure_reltol_zero")
 
 
 def validate_profile(profile: str | None) -> None:
@@ -14,16 +14,26 @@ def validate_profile(profile: str | None) -> None:
 
 
 def apply_profile(case: Path, profile: str | None) -> None:
-    """Limit only the pressure Laplacian in S0/S1; keep other equations intact."""
+    """Apply one explicit pressure-only trial in S0/S1 before any solver runs."""
     validate_profile(profile)
     if profile is None:
         return
     if (case / "runs").exists() and any((case / "runs").iterdir()):
         raise ValueError("Numerical profiles may only be applied before a case has run")
-    original = "laplacianSchemes\n{\n    default Gauss linear corrected;\n}"
-    replacement = original[:-1] + "    laplacian(rhorAUf,p_rgh) Gauss linear limited 0.5;\n}"
-    paths = [case / "system/coolant/fvSchemes"] + [
-        case / "profiles" / stage / "system/coolant/fvSchemes"
+    if profile == "pressure_limited_0p5":
+        filename = "fvSchemes"
+        original = "laplacianSchemes\n{\n    default Gauss linear corrected;\n}"
+        replacement = original[:-1] + "    laplacian(rhorAUf,p_rgh) Gauss linear limited 0.5;\n}"
+        settings = {"operator": "laplacian(rhorAUf,p_rgh)", "scheme": "Gauss linear limited 0.5"}
+    else:
+        filename = "fvSolution"
+        original = ("    p_rgh\n    {\n        solver GAMG;\n        tolerance 1e-8;\n"
+                    "        relTol 0.05;\n        smoother GaussSeidel;\n    }")
+        replacement = original.replace("relTol 0.05;", "relTol 0;")
+        settings = {"field": "p_rgh", "tolerance": 1e-8, "relTol": 0,
+                    "previous_relTol": 0.05}
+    paths = [case / "system/coolant" / filename] + [
+        case / "profiles" / stage / "system/coolant" / filename
         for stage in ("steady_cold_flow", "steady")
     ]
     edits = []
@@ -42,8 +52,7 @@ def apply_profile(case: Path, profile: str | None) -> None:
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({
         "profile": profile, "changes": changes,
-        "operator": "laplacian(rhorAUf,p_rgh)",
-        "scheme": "Gauss linear limited 0.5",
+        **settings,
         "acceptance_limits_changed": False,
         "physical_inputs_changed": False,
     }, indent=2) + "\n", encoding="utf-8", newline="\n")
