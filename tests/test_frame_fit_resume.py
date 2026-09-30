@@ -170,6 +170,25 @@ class FrameFitResumeTests(unittest.TestCase):
             self.assertEqual(runner.resume(batch, 28, ['production_frame_fit_6um_10layers_motion'])['status'], 'complete')
             configure.assert_not_called()
 
+    def test_safe_pressure_plateau_can_enter_only_reviewed_800k_trial(self):
+        old = 'production_frame_fit_6um_11layers_motion'
+        new = 'production_frame_fit_800k_6um_11layers_motion'
+        batch = {'solver_mpi_ranks': 12, 'jobs': [
+            {'diameter_mm': 34, 'id': 'third', 'job_dir': '/third'}]}
+        prior = {'mesh_profile': old, 'inputs': {'mesh_target_cells': 600000}}
+        def read(path):
+            return prior if path.name == 'job.json' else {'status': 'failed'}
+        with patch.object(runner, 'read', side_effect=read), \
+                patch.object(runner, 'pressure_failure_at_cap', return_value=True), \
+                patch.object(runner, 'retryable', return_value=False), \
+                patch.object(runner, 'configure') as configure, \
+                patch.object(runner, 'execute', return_value={'status': 'complete'}), \
+                patch.object(runner, 'write'):
+            self.assertTrue(runner.mesh_scale_retryable(batch['jobs'][0], [new]))
+            self.assertFalse(runner.mesh_scale_retryable(batch['jobs'][0], ['production_800k']))
+            runner.resume(batch, 34, [new])
+            self.assertEqual(configure.call_args.kwargs['profile'], new)
+
     def test_retries_only_selected_failed_diameter_and_stops_after_success(self):
         batch = {'solver_mpi_ranks': 12, 'jobs': [
             {'diameter_mm': 28, 'id': 'first', 'job_dir': '/first'},

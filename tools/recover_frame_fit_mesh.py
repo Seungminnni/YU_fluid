@@ -18,8 +18,12 @@ def configure(batch,entry,um,layers, *, profile=None, steady_numerics_profile=No
     preset=MESH_PRESETS[profile]
     validate_profile(steady_numerics_profile)
     validate_outlet_profile(outlet_velocity_profile)
+    prior_target=read(old/'job.json').get('inputs',{}).get('mesh_target_cells')
     reason=('Fresh pressure numerical trial; unchanged mesh profile, physics and acceptance limits'
-            if steady_numerics_profile else 'Fresh boundary-layer envelope trial; all physical conditions and validation thresholds unchanged')
+            if steady_numerics_profile else
+            'Fresh higher-resolution mesh trial; unchanged operating conditions, wall treatment and validation thresholds'
+            if isinstance(prior_target,(int,float)) and preset.target_cells>prior_target else
+            'Fresh boundary-layer envelope trial; all physical conditions and validation thresholds unchanged')
     overrides={'mesh_profile':profile}
     if steady_numerics_profile:
         overrides['steady_numerics_profile']=steady_numerics_profile

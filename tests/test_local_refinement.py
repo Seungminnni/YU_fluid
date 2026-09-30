@@ -23,3 +23,20 @@ class LocalRefinementTests(unittest.TestCase):
         self.assertEqual(preset.maximum_non_orthogonality, 70)
         self.assertEqual(preset.maximum_skewness, 5)
         self.assertEqual(preset.target_cells, 600000)
+
+    def test_frame_fit_800k_trial_preserves_port_cap_refinement(self):
+        configs = Path(__file__).resolve().parents[1] / 'configs'
+        config = load_config(
+            configs / 'baseline_23cell.yaml',
+            overlay_paths=(configs / 'frame_fit_water_phi34_20260929.yaml',),
+        )
+        preset = MESH_PRESETS['production_frame_fit_800k_6um_11layers_motion']
+        text = _snappy_dict(config, preset)
+        self.assertIn('outletCapRefinement', text)
+        self.assertIn('inletCapRefinement', text)
+        self.assertRegex(
+            text,
+            r'outletCapRefinement\s*\{\s*mode inside;\s*levels \(\(1e15 2\)\);',
+        )
+        self.assertIn('firstLayerThickness     6e-06;', text)
+        self.assertIn('nSurfaceLayers 11;', text)

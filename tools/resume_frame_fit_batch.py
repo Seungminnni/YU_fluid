@@ -79,6 +79,19 @@ def pressure_failure_at_cap(entry: dict) -> bool:
     )
 
 
+def mesh_scale_retryable(entry: dict, profiles: list[str]) -> bool:
+    """Allow the single reviewed Ø34 800k trial after a safe pressure plateau."""
+    if profiles != ['production_frame_fit_800k_6um_11layers_motion']:
+        return False
+    job = Path(entry['job_dir'])
+    prior = read(job / 'job.json')
+    return (
+        prior.get('mesh_profile') != profiles[0]
+        and prior.get('inputs', {}).get('mesh_target_cells') == 600_000
+        and pressure_failure_at_cap(entry)
+    )
+
+
 def resume(batch: dict, diameter: int, profiles: list[str], *, steady_numerics_profile: str | None = None, outlet_velocity_profile: str | None = None) -> dict:
     entries = [entry for entry in batch['jobs'] if entry['diameter_mm'] == diameter]
     if len(entries) != 1:
@@ -102,20 +115,22 @@ def resume(batch: dict, diameter: int, profiles: list[str], *, steady_numerics_p
             raise ValueError('Pressure trial requires a clean pressure-only failure at 9500; never repeat the same numerical profile')
         if profiles != [read(Path(entry['job_dir']) / 'job.json').get('mesh_profile')]:
             raise ValueError('A pressure trial must use exactly the previous mesh profile')
-    elif not retryable(entry):
+    elif not retryable(entry) and not mesh_scale_retryable(entry, profiles):
         raise ValueError('Only a failed mesh/y+ job may enter fresh mesh trials')
     os.environ.update(OPENFOAM_MPI_RANKS=str(batch['solver_mpi_ranks']),
                       OPENFOAM_MESH_MPI_RANKS='1', OMP_NUM_THREADS='1',
                       OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1')
     for profile in profiles:
         preset = MESH_PRESETS[profile]
-        if (preset.target_cells != 600000 or preset.minimum_total_cells != 600000
+        if (preset.target_cells not in {600000, 800000}
+                or preset.minimum_total_cells != preset.target_cells
                 or preset.total_tolerance_fraction > 0.15
                 or preset.minimum_hexahedron_fraction < 0.88
                 or not preset.preserve_wall_diagnostics):
             raise ValueError('Retry profile must preserve the approved mesh gates and diagnostics')
     for profile in profiles:
-        if not steady_numerics_profile and not outlet_velocity_profile and not retryable(entry):
+        if (not steady_numerics_profile and not outlet_velocity_profile
+                and not retryable(entry) and not mesh_scale_retryable(entry, profiles)):
             break
         preset = MESH_PRESETS[profile]
         options = {'steady_numerics_profile': steady_numerics_profile} if steady_numerics_profile else {}

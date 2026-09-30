@@ -302,6 +302,25 @@ for _layers in (11, 12):
     SUPPORTED_LEVELS += (_name,)
 
 
+# Ø34 passed the 6 µm / 11-layer wall and quality gates at 662k cells, but its
+# pressure residual plateau remained above the unchanged acceptance target.
+# The higher-resolution trial keeps that wall treatment and motion shrinker;
+# only the background grid/count class changes.  It is not an inherited pass.
+_name = "production_frame_fit_800k_6um_11layers_motion"
+MESH_PRESETS[_name] = replace(
+    MESH_PRESETS["production_800k"],
+    first_layer_thickness_m=6e-6,
+    prism_layer_count=11,
+    preserve_wall_diagnostics=True,
+    mesh_shrinker="displacementMotionSolver",
+    minimum_total_cells=800_000,
+    total_tolerance_fraction=0.15,
+    minimum_hexahedron_fraction=0.88,
+    calibration_status="FRAME_FIT_800K_PRESSURE_PLATEAU_TRIAL_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (_name,)
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -468,7 +487,7 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
     if preset.background_cell_m <= 0.0027:
         port_refinement_level = 3
     elif (
-        preset.minimum_total_cells == 600_000
+        preset.minimum_total_cells is not None
         and max(config.ports.inlet_diameter_m, config.ports.outlet_diameter_m) >= 0.023
     ):
         # At the calibrated 39x42x49 background grid the 23 mm outlet cap was
