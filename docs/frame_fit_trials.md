@@ -1,0 +1,173 @@
+# Ø28·31·34 시안의 메시 시험과 벽면 진단
+
+이 코드는 새 입출구 CAD 시안의 메시와 유동을 검증하는 실험용 흐름이다. 프로필을 생성하거나 계산을 시작했다는 사실은 결과 검증 통과를 뜻하지 않는다. 기존 물 조건과 결과 게시 기준을 유지하며, 검증을 통과한 새 결과만 기존 뷰어에 추가한다.
+
+## 계산 설정
+
+- 메시 생성은 재현성을 위해 1 MPI rank를 사용한다. 솔버 rank 수는 `OPENFOAM_MPI_RANKS`로 지정한다. 현재 M5 Pro 시험 배치는 실측 비교에 따라 12 ranks를 사용한다.
+- `parallelism.py`의 macOS 자동 감지는 `Super`와 `Performance`로 표시된 코어 수를 합산한다. 이는 기본 프로세스 수이며 특정 물리 코어에 대한 고정을 보장하지 않는다.
+- `production_frame_fit_8um_10layers_ab_A`는 첫 층 8 µm·요청 10층의 기준 시험이다. B 프로필은 `displacementMotionSolver`와 이에 필요한 메시 이동 솔버 설정만 변경한다.
+- A/B 프로필은 사용자 지시에 따라 총 600,000~690,000셀을 허용한다. 육면체 비율 88%, 비직교도 70°, skewness 5, 배터리 면적의 95% 이상에서 y+<1인 조건은 유지한다. 다른 프로필의 셀 수 허용 범위는 변경하지 않는다.
+
+## 좌표별 진단
+
+`production_mesh.py`는 A/B 시험에서 영역 분리와 진단 필드 삭제 전에 다음을 보존한다.
+
+- `case/diagnostics/wall/snappy_layer_snapshot.tar.gz`: 진단 필드와 그 필드가 속한 원본 메시, 메시 설정 및 로그
+- `layer_faces.json.gz`: 배터리 계면의 면 좌표, 면적, 유체측 `nSurfaceLayers`
+- `layer_spatial_summary.json`: 층이 없는 면과 1~3층·4~9층·10층 이상 면의 면적 비율
+
+1,500회 초기 유동 계산 후 같은 디렉터리의 `1500/`에 y+ 원본과 `layer_yplus_faces.json.gz`, `spatial_summary.json`을 기록한다. 메시 분리로 면 번호가 바뀌므로 면의 꼭짓점 좌표를 순서와 무관하게 비교한다. 모든 면이 일대일 대응하지 않으면 근접 좌표로 추측하지 않고 중단한다. 서로 다른 작업의 지표를 하나의 결과로 합치지 않는다.
+
+짧은 계산은 진단용이다. 원래 6,000회 지점까지 이어서 y+, 수렴, 질량수지와 필드 검증을 수행하고, 정상 CHT 및 과도 열 계산은 기존 복합 검증을 통과한 뒤 실행한다. 층수가 늘어도 y+ 통과를 가정하지 않는다. v2512의 내부 계면에서 두께 진단 필드가 0으로 기록되는 경우 이를 실제 국부 두께로 해석하지 않는다.
+
+## 배치 실행과 재시도
+
+Python 3.12 이상과 설치된 프로젝트 환경에서 새 배치를 준비하고 실행한다.
+
+```sh
+python tools/run_experiment.py --config configs/experiments/frame_fit_water.yaml --output build/experiments/water_trial_01 --ranks 4 --prepare-only
+python tools/run_experiment.py --output build/experiments/water_trial_01 --run
+```
+
+새 실행기는 저장소의 YAML에서 CAD와 입력을 생성하므로 예전 `batch.json`, preview, `viewer/`가 필요하지 않다. 각 시안에서 A를 시험한 뒤 메시/y+ 실패 시 B를 새 ID로 생성한다. 실패 진단 자료를 `diagnostic_attempts/<작업 ID>/`에 보존하고 실패한 메시·유동장은 삭제한다. 후보 소진이나 다른 오류는 `needs_attention`으로 종료한다. 전체 사용법은 [새 실험 안내](windows_and_new_experiments.md)를 따른다.
+
+기존 Mac의 날짜 배치를 이어가는 `python tools/run_wall_diagnostic_batch.py` 경로도 유지한다. 인수 없이 기존 `build/frame_fit_water_20260929/batch.json`이 있으면 Ø28에서 성공한 설정을 Ø31·Ø34에 적용하는 기존 전략을 사용한다. Windows와 POSIX 모두 파일 잠금으로 동일 배치의 중복 실행을 막는다.
+
+`build/`, `viewer/`, 데모 압축 파일 및 로컬 연구 문서는 Git 대상에서 제외한다. 코드 패키지에 포함된 소형 기준 CAD 자산은 소스와 함께 관리한다.
+
+## Ø34의 B 시험 이후 보정
+
+Ø34의 8 µm B 시도는 662,674셀·육면체 89.4256%로 메시를 통과했으나,
+S0 6,000회에서 y+<1 면적 94.5825%와 압력 잔차 기준 미달로 멈췄다.
+같은 좌표의 층/y+ 진단에서 기준 초과 면은 0층 또는 1~3층 구간에 있었다.
+`production_frame_fit_6um_10layers_motion`과 `production_frame_fit_4um_10layers_motion`은
+B의 shrinker·10층·품질 기준을 유지하고 첫 층 두께만 줄이는 미검증 시험 프로필이다.
+
+기존 날짜 배치의 실패한 Ø34만 새 ID로 재생성할 때는 다음을 사용한다.
+완료된 Ø28·Ø31은 건드리지 않으며, 진단 자료 보존 후 실패 생성물을 삭제한다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_10layers_motion production_frame_fit_4um_10layers_motion
+```
+
+6 µm가 통과하면 본 계산으로 이어지고, 메시/y+ 실패에만 다음 4 µm 후보를 쓴다.
+잔차만 미달한 경우에는 기존 9,500회 상한 내 수렴 판정을 먼저 따르며,
+후보 소진이나 다른 오류를 성공으로 처리하지 않는다. 새 YAML 실험에서도 이 이름을
+`mesh_profiles`에 명시할 수 있다. 생성된 실제 보고서가 합격 여부의 기준이다.
+
+### Ø34의 층수 보정 시험
+
+6 µm·10층은 층이 없는 벽면 면적 30.3046%, 4 µm·10층은 90.2265%로
+층 생성 검증에 실패했다. 해당 시도들은 유동 계산에 진입하지 않았다.
+기존 8 µm·10층의 무층 면적은 1.7819%였다. 이 비교만으로 원인이
+완전히 확인된 것은 아니며, 서로 다른 메시의 y+를 결합해 판정하지 않는다.
+
+`production_frame_fit_6um_11layers_motion`과 `production_frame_fit_6um_12layers_motion`은
+실패한 6 µm·10층에서 요청 층수만 늘린 새 시험이다. 팽창비 1.2에서 요청 총 두께는
+각각 192.9 µm와 237.5 µm로, 기존 8 µm·10층의 207.7 µm에 가까운 범위를 시험한다.
+실제 층수·두께·품질·600,000~690,000셀·y+ 기준은 모두 다시 검증한다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_11layers_motion production_frame_fit_6um_12layers_motion
+```
+
+### Ø34의 압력 수렴 보정 시험
+
+6 µm·11층 시도 `c3bf655d46fe4c8abf7037618f6fd53c`는 662,352셀·육면체
+89.3907%로 메시 검증을 통과했다. S0 9,500회에서 y+<1 면적은 95.3181%였지만,
+마지막 200회의 압력 초기 잔차 최댓값은 4.6699e-4로 1e-4 기준을 넘었다.
+다른 유동 잔차와 질량수지·압력차 안정성 검사는 통과했으며 결과는 게시하지 않았다.
+
+`pressure_limited_0p5`는 같은 메시 프로필을 새로 생성하고 S0·S1의
+`laplacian(rhorAUf,p_rgh)`만 `Gauss linear limited 0.5`로 바꾸는 수치 시험이다.
+다른 방정식의 이산화·완화계수·물리 조건·합격 기준·9,500회 상한은 유지한다.
+OpenFOAM v2512의 `chtMultiRegionSimpleFoam` 소스에서 압력 연산자 이름을
+확인했다. [OpenCFD 설명](https://api.openfoam.com/2506/classFoam_1_1fv_1_1limitedSnGrad.html)에
+따르면 계수 0.5는 비직교 보정의 크기를 직교 성분 이하로 제한한다.
+압력 잔차 정체가 이 보정 때문에 생겼는지는 아직 확정되지 않았으며 성공을 보장하지 않는다.
+시안 비교 시 이 수치 설정 차이도 함께 기록한다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_11layers_motion --steady-numerics-profile pressure_limited_0p5
+```
+
+이 명시적 재시험은 9,500회에서 압력 잔차만 실패하고 메시와 나머지 S0 검사가
+모두 통과한 경우에만 허용한다. 같은 수치 프로필을 반복하거나 동시에 메시
+프로필을 바꾸는 요청은 거부한다. 진단 필드·보고서에 더해 S0 솔버 로그와 실제
+설정도 보존한 뒤 실패 작업을 삭제하고 새 ID에서 메시부터 실행한다.
+생성된 `case/reports/steady_numerics.json`에는 변경한 파일과 전후 해시를 기록한다.
+
+새 YAML 실험은 전체 또는 개별 case에 `steady_numerics_profile: pressure_limited_0p5`를
+명시할 수 있다. 생략하면 기존 설정을 그대로 사용하며 자동 재시도 범위를 늘리지 않는다.
+
+#### 압력 보정 시험 결과와 다음 메시 후보
+
+`fb607bcbbd384bccb8501768ab494663`은 2026-09-30 11:49 KST에 S0 9,500회에서
+실패했다. y+<1 면적 95.2332%와 메시·질량수지·압력차 안정성 검사는 통과했으나,
+마지막 200회의 초기 잔차 최댓값은 압력 1.5042e-3, Ux 1.6225e-4,
+Uy 1.3192e-4였다. 압력 잔차는 원래 보정 방식의 4.6699e-4보다 커졌으므로
+`pressure_limited_0p5`를 이 시안의 개선안으로 채택하지 않는다.
+
+다음 검토된 후보는 `production_frame_fit_6um_12layers_motion`이며 수치 보정은
+기존 `Gauss linear corrected`로 되돌린다. 비교 기준은 원래 수치 설정을 쓴
+6 µm·11층 시도 `c3bf655d46fe4c8abf7037618f6fd53c`이다. 실패 진단을 보존하고
+새 ID의 빈 폴더에서 메시부터 생성한다. 기존 물리 입력과 모든 합격 기준을
+유지하며, 12층 후보 역시 실제 검증을 통과하기 전까지는 미검증 시험이다.
+
+#### 12층 결과와 압력 내부 풀이 정확도 시험
+
+12층 시도 `55c6f73943a341389064203269d1ec40`은 2026-09-30 13:23 KST에
+S0 6,000회에서 실패했다. 663,024셀·육면체 89.3841%로 메시 검증은 통과했으나,
+y+<1 면적은 92.7160%로 감소했다. 압력 초기 잔차의 마지막 200회 최댓값도
+4.4098e-4로 기준 1e-4에 미달했다. 요청 층수를 늘린 것이 개선으로 이어지지 않았다.
+
+다음 시험은 y+ 검사를 통과한 6 µm·11층 프로필로 새 메시를 생성하고,
+`steady_numerics_profile: pressure_reltol_zero`을 적용한다. S0·S1의 `p_rgh`
+선형 솔버에서 `relTol`만 0.05에서 0으로 바꾸고 `tolerance 1e-8`은 유지한다.
+원래 비직교 보정, 완화계수, 9,500회 상한과 합격 기준도 유지한다.
+기준 11층 시도의 압력 첫 내부 풀이는 후반부에 2회 반복 후 약 1.8e-5에서
+종료됐다. 이 변경은 상대오차 조건에 따른 종료를 없애는 수치 시험이며,
+전체 유동 수렴이나 y+ 통과를 보장하지 않는다. 내부 반복 증가로 계산이 느려질 수 있다.
+[OpenCFD 선형 솔버 잔차 설명](https://doc.openfoam.com/2306/tools/processing/numerics/solvers/residuals/)을 따른다.
+
+#### 압력 내부 정확도 결과와 출구 역류 진단
+
+`2bbb7ad9f42d4654b9580f280cfa9398`은 2026-09-30 15:12 KST에 9,500회에서
+압력 초기 잔차 4.6581e-4로 다시 실패했다. 기준 11층의 4.6699e-4 대비 감소는
+약 0.25%뿐이며, y+<1 면적은 95.3181%였다. 내부 선형 풀이 정확도를 높이는
+것만으로는 이번 수렴 정체를 해결하지 못했다.
+
+재구성된 출구 `phi`와 `U`를 같은 면 번호로 비교하면 다음과 같다.
+
+| 시안·반복 | 출구 면 수 | 역류 면 수 | 역류량/순 출구 유량 | 역류 면 중 속도 0인 면 |
+| --- | ---: | ---: | ---: | ---: |
+| Ø28 · 6,000 | 992 | 0 | 0% | 0 |
+| Ø31 · 6,000 | 1,212 | 41 | 0.1515% | 41 |
+| Ø34 · 9,500 | 1,447 | 105 | 0.4876% | 105 |
+
+기존 출구 속도는 `inletOutlet`과 `inletValue uniform (0 0 0)`이다. 압력 보정된
+`phi`가 음수인 출구 면에서 속도 전체를 0으로 고정하는 차이가 확인됐다.
+이는 압력 잔차 정체의 후보 원인이며 아직 인과관계가 확정된 것은 아니다.
+
+`outlet_velocity_profile: pressure_backflow`는 **출구 U의 경계조건만**
+`pressureInletOutletVelocity`로 바꾼다. 출구 압력 101325 Pa, 입구 유속 0.4 m/s,
+수온 293 K, CAD와 메시 프로필, 수렴·y+·열 검증 기준은 그대로 유지한다.
+v2512 구현은 역류 시 접선 성분을 제한하면서 법선 속도를 허용한다.
+[OpenCFD 경계조건 설명](https://doc.openfoam.com/2312/tools/processing/boundary-conditions/rtm/derived/outlet/pressureInletOutletVelocity/).
+기존 수치 프로필 `pressure_reltol_zero`도 유지해 직전 시도 대비 한 설정만 바꾼다.
+
+```sh
+python tools/resume_frame_fit_batch.py --diameter 34 --profiles production_frame_fit_6um_11layers_motion --outlet-velocity-profile pressure_backflow
+```
+
+이 명령은 메시·y+·안전성·유량·압력차 검사를 통과하고 9,500회에서 압력 잔차만
+실패한 작업에 대해, 새 경계조건과 같은 메시 프로필을 지정한 경우에만 허용된다.
+기존 실패 출력은 진단 보존 후 삭제하고 새 UUID에서 CAD·메시부터 다시 생성한다.
+1,500회 및 이후 S0 검증 지점마다 `case/diagnostics/outlet/<반복>.json`에 실제
+역류량과 역류 면의 속도를 저장한다. 합격 판정을 대신하는 진단값은 아니다.
+
+경계조건 변경은 `case/reports/outlet_boundary.json`과 결과 manifest에 기록하며,
+검증 통과 후 웹 결과 이름에 `출구 역류 대응`을 표시한다. 원래 Ø28·Ø31 결과는
+유지한다. 정량적인 시안 비교에는 이 경계조건 차이의 영향도 검토해야 한다.
+새 YAML 실험에도 위 `outlet_velocity_profile`을 명시할 수 있으며 기본값은 바꾸지 않는다.

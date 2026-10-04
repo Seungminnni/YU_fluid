@@ -6,10 +6,11 @@ verified snapshot of that directory, not a second viewer to maintain by hand.
 
 from __future__ import annotations
 
-import fcntl
+from .file_lock import lock_file, unlock_file
 import json
 import os
 import re
+import shutil
 import tempfile
 from contextlib import contextmanager
 from html.parser import HTMLParser
@@ -17,7 +18,73 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from .multi_case_viewer import append_validated_run, dataset_paths, read_viewer_model
+from .multi_case_viewer import append_validated_run, dataset_paths, read_viewer_model, write_four_case_model
+
+
+def _initialize_publication(viewer: Path, source: Path, **run_options) -> None:
+    """Build and validate the first cumulative viewer before exposing any files."""
+    markers = ("results.html", "model.js", "four_case_manifest.json", "data")
+    if any((viewer / name).exists() for name in markers):
+        raise ValueError("Existing incomplete publication must be repaired before adding results")
+    with tempfile.TemporaryDirectory(prefix=".first-viewer-", dir=viewer.parent) as temporary:
+        staged = Path(temporary) / "viewer"
+        shutil.copytree(source, staged, ignore=shutil.ignore_patterns("data", ".release.lock"))
+        model, _ = read_viewer_model(source)
+        model["mesh_runs"] = []
+        model.pop("archived_mesh_runs", None)
+        model.pop("interactive_cfd", None)
+        for key in list(model):
+            if key.endswith("_by_mesh") or key == "mesh_wireframes":
+                model[key] = {}
+        write_four_case_model(staged, model)
+        # append_validated_run checks source validation, datasets and geometry.
+        append_validated_run(staged, source, **run_options)
+        run_id = run_options["run_id"]
+        model, _ = read_viewer_model(staged)
+        model["interactive_cfd"] = model["interactive_cfd_by_mesh"][run_id]
+        write_four_case_model(staged, model)
+        cad = staged / "cad"
+        cad.mkdir(exist_ok=True)
+        reference = Path(__file__).with_name("assets") / "cad_reference"
+        html = (reference / "index.html").read_text(encoding="utf-8")
+        html = html.replace("cad_exact_phi23_", f"cad_{run_id}_")
+        # Only show measured CAD projections when the source actually has them.
+        for view in ("top_XY", "side_XZ"):
+            name = f"actual_{run_id}_{view}.png"
+            if (cad / name).is_file():
+                html = html.replace(f"actual_phi23_{view}.png", name)
+            else:
+                html = re.sub(r"<details>.*?" + re.escape(f"actual_phi23_{view}.png") + r".*?</details>", "", html)
+        (cad / "index.html").write_text(html, encoding="utf-8")
+        shutil.copy2(reference / "style.css", cad / "style.css")
+        i18n = Path(__file__).with_name("workflow_assets") / "i18n.js"
+        shutil.copy2(i18n, staged / "i18n.js")
+        results = staged / "results.html"
+        results.write_text(results.read_text(encoding="utf-8").replace('href="cad/index.html" hidden', 'href="cad/index.html"'), encoding="utf-8")
+        mesh = staged / "mesh.html"
+        html = mesh.read_text(encoding="utf-8")
+        html = html.replace('<script src="mesh-data.js"></script>', '<script src="four_case_data.js"></script>')
+        html = html.replace('<script src="mesh-volume-data.js"></script>', '')
+        if 'id="mesh-case-select"' not in html:
+            html = html.replace('<h1>메시 보기</h1>', '<h1>메시 보기</h1><select id="mesh-case-select" aria-label="결과 선택"></select>')
+        mesh.write_text(html, encoding="utf-8")
+        validate_server_viewer(staged)
+        # The release lock file stays in place on Windows. Publish the manifest
+        # last; a missing manifest cannot be advertised as a validated result.
+        items = sorted(staged.iterdir(), key=lambda item: item.name == "four_case_manifest.json")
+        collisions = [item.name for item in items if (viewer / item.name).exists()]
+        if collisions:
+            raise ValueError(f"First publication would overwrite existing files: {collisions}")
+        installed = []
+        try:
+            for item in items:
+                destination = viewer / item.name
+                os.replace(item, destination)
+                installed.append(destination)
+        except Exception:
+            for destination in reversed(installed):
+                os.replace(destination, staged / destination.name)
+            raise
 
 
 class _PageAssets(HTMLParser):
@@ -121,11 +188,11 @@ def release_lock(viewer_dir: str | Path):
     viewer = Path(viewer_dir).resolve()
     viewer.mkdir(parents=True, exist_ok=True)
     with (viewer / ".release.lock").open("a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock_file(lock, blocking=True)
         try:
             yield
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            unlock_file(lock)
 
 
 def package_demo_viewer(viewer_dir: str | Path, zip_path: str | Path) -> dict[str, object]:
@@ -181,6 +248,8 @@ def publish_experiment_and_demo(
         if source_viewer is not None:
             if not run_id:
                 raise ValueError("run_id is required when adding a source viewer")
+            if not (viewer / "results.html").is_file():
+                _initialize_publication(viewer, Path(source_viewer).resolve(), run_id=run_id, label=label, label_en=label_en)
             current, _ = read_viewer_model(viewer)
             if not any(str(run.get("id")) == run_id for run in current.get("mesh_runs", [])):
                 append_validated_run(

@@ -22,8 +22,10 @@ from .case_builder import _docker_command
 from .cad_import import STEP_ROLES, import_step_bundle, imported_config_overrides, inspect_imported_steps
 from .config import load_config
 from .errors import CfdTwinError
-from .production_mesh import write_production_mesh_source_bundle
-from .steady_convergence import continuation_decision
+from .production_mesh import MESH_PRESETS, write_production_mesh_source_bundle
+from .steady_convergence import continuation_decision, validate_maximum_iterations
+from .steady_numerics import apply_profile as apply_steady_numerics, validate_profile as validate_steady_numerics
+from .outlet_boundary import apply_profile as apply_outlet_boundary, validate_profile as validate_outlet_boundary, record_outlet
 from .workflow_publish import publish_completed_run
 
 
@@ -47,20 +49,9 @@ def _check_cancel(cancel_path: Path | None) -> None:
 def _lock_solver_file(stream: object) -> None:
     """Non-blocking single-job lock on both POSIX and Windows hosts."""
 
-    if os.name == "nt":
-        import msvcrt
+    from .file_lock import lock_file
 
-        stream.seek(0)
-        if not stream.read(1):
-            stream.seek(0)
-            stream.write(b"1")
-            stream.flush()
-        stream.seek(0)
-        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-    else:
-        import fcntl
-
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    lock_file(stream)
 
 
 def _worker_process_options(platform_name: str | None = None) -> dict[str, object]:
@@ -132,8 +123,13 @@ def _compose_service(
             _check_cancel(cancel_path)
 
 
-def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None = None) -> None:
+def _run_steady_stages(
+    case: Path, output: object, *, cancel_path: Path | None = None,
+    cold_flow_maximum_iterations: int | None = None,
+) -> None:
     """Run S0/S1 with the same measured, bounded gate on Mac and Windows."""
+
+    cold_flow_maximum = validate_maximum_iterations(cold_flow_maximum_iterations)
 
     for stage, run_name, pilot, continuation, report_name, env_name in (
         ("cold", "steady_cold_flow", "cold-flow-pilot", "cold-flow-continue", "cold_flow_validation.json", "COLD_FLOW_ADDITIONAL_ITERATIONS"),
@@ -151,7 +147,21 @@ def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None =
             raise CfdTwinError(f"{run_name}: existing run has no validation report")
         while True:
             _check_cancel(cancel_path)
-            decision = continuation_decision(_read_json(report_path), stage=stage)
+            if stage == "cold" and (case / "reports/outlet_boundary.json").is_file():
+                measured = _read_json(report_path).get("final_iteration")
+                if measured is not None:
+                    record_outlet(case, f"{measured:g}")
+            if stage == "cold" and (case / "diagnostics/wall/layer_faces.json.gz").is_file():
+                from .wall_diagnostics import compare
+                measured = _read_json(report_path).get("final_iteration")
+                if measured is not None:
+                    # Preserve correspondence even when the eventual y+ gate
+                    # fails. Keep diagnostic_only until the full gate passes.
+                    compare(case, f"{measured:g}", diagnostic_only=_read_json(report_path).get("status") != "COLD_FLOW_VALIDATION_PASSED")
+            decision = continuation_decision(
+                _read_json(report_path), stage=stage,
+                maximum=cold_flow_maximum if stage == "cold" else 9500,
+            )
             _write_json(decision_path, decision)
             if decision["action"] == "pass":
                 break
@@ -168,6 +178,45 @@ def _run_steady_stages(case: Path, output: object, *, cancel_path: Path | None =
                 raise CfdTwinError(f"{run_name}: continuation failed with {status}")
             if not isinstance(current, (int, float)) or current <= decision["iteration"]:
                 raise CfdTwinError(f"{run_name}: validation did not advance past {decision['iteration']}")
+
+
+def _run_wall_diagnostic(case: Path, output: object, iterations: int, *, cancel_path: Path) -> None:
+    """A short S0 checkpoint is diagnostic, never an acceptance shortcut."""
+    from .wall_diagnostics import compare
+
+    if not isinstance(iterations, int) or not 100 <= iterations < 5000:
+        raise CfdTwinError("Wall diagnostic requires 100--4999 iterations")
+    profile = case / "profiles/steady_cold_flow/system/controlDict"
+    original = profile.read_text()
+    maximum = int(re.search(r"\bendTime\s+(\d+)\s*;", original).group(1))
+    shortened, count = re.subn(r"\bendTime\s+\d+\s*;", f"endTime {iterations};", original)
+    if count != 1 or maximum < 5000:
+        raise CfdTwinError("Invalid cold-flow control dictionary")
+    profile.write_text(shortened, encoding="utf-8", newline="\n")
+    try:
+        _compose_service(case, "cold-flow-pilot", output, cancel_path=cancel_path)
+    finally:
+        profile.write_text(original, encoding="utf-8", newline="\n")
+    report_path = case / "runs/steady_cold_flow/reports/solver/cold_flow_validation.json"
+    report = _read_json(report_path)
+    if report.get("final_iteration") != iterations:
+        raise CfdTwinError("Short wall diagnostic did not finish")
+    compare(case, str(iterations), diagnostic_only=True)
+    if (case / "reports/outlet_boundary.json").is_file():
+        record_outlet(case, str(iterations))
+    destination = case / "diagnostics/wall" / str(iterations)
+    shutil.copy2(report_path, destination / "cold_flow_validation.json")
+    shutil.copy2(report_path.with_name("yplus.json"), destination / "yplus.json")
+    for check in ("solver_clean_end", "final_fields_finite", "final_turbulence_fields_nonnegative"):
+        if report.get("checks", {}).get(check) is not True:
+            raise CfdTwinError(f"Unsafe diagnostic field: {check}")
+    # A developing y+ distribution at 1500 iterations is not the final result.
+    # Continue to the original 6000-iteration checkpoint before normal gates.
+    environment = os.environ.copy()
+    environment["COLD_FLOW_ADDITIONAL_ITERATIONS"] = str(maximum - iterations)
+    _compose_service(case, "cold-flow-continue", output, environment=environment, cancel_path=cancel_path)
+    if _read_json(report_path).get("final_iteration") != maximum:
+        raise CfdTwinError("Cold flow did not reach the original checkpoint")
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
@@ -412,6 +461,9 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
     """Create the real STL/mesh/solver input bundle without running Docker."""
 
     job = _read_json(job_dir / "job.json")
+    validate_steady_numerics(job.get("steady_numerics_profile"))
+    validate_outlet_boundary(job.get("outlet_velocity_profile"))
+    validate_maximum_iterations(job.get("cold_flow_maximum_iterations"))
     files = {role: Path(job["files"][role]) for role in STEP_ROLES}
     base_overrides = _validated_geometry_overrides(job.get("geometry_overrides"))
     imported = import_step_bundle(
@@ -425,8 +477,12 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
         overrides=base_overrides + geometry_overrides + _operation_overrides(inputs),
     )
     case = job_dir / "case"
-    profile = f"production_{inputs['mesh_target_cells']//1000}k"
+    profile = job.get("mesh_profile", f"production_{inputs['mesh_target_cells']//1000}k")
+    if profile not in MESH_PRESETS or MESH_PRESETS[profile].target_cells != inputs['mesh_target_cells']:
+        raise CfdTwinError("Mesh profile must match the requested cell-count target")
     write_production_mesh_source_bundle(config, imported["cad_dir"], case, mesh_level=profile)
+    apply_steady_numerics(case, job.get("steady_numerics_profile"))
+    apply_outlet_boundary(case, job.get("outlet_velocity_profile"))
     (job_dir / "resolved_config.json").write_text(config.to_json() + "\n", encoding="utf-8")
     return {"case": case, "cad": imported["cad_dir"], "config": config}
 
@@ -467,7 +523,16 @@ def run_imported_case(job_manifest: Path) -> None:
                     environment.update(TRANSIENT_DELTA_T="1", ENERGY_COUPLING_ITERATIONS="200")
                 with (job_dir / "worker.log").open("ab") as output:
                     if stage == "steady":
-                        _run_steady_stages(case, output, cancel_path=cancel_path)
+                        job_options = _read_json(job_manifest)
+                        diagnostic_iterations = job_options.get("wall_diagnostic_iterations")
+                        if diagnostic_iterations is not None:
+                            _run_wall_diagnostic(case, output, diagnostic_iterations, cancel_path=cancel_path)
+                        _run_steady_stages(
+                            case, output, cancel_path=cancel_path,
+                            cold_flow_maximum_iterations=job_options.get(
+                                "cold_flow_maximum_iterations"
+                            ),
+                        )
                         result_code = 0
                     else:
                         result_code = _compose_service(
@@ -486,8 +551,10 @@ def run_imported_case(job_manifest: Path) -> None:
                     actual = composition.get("actual", {})
                     count = actual.get("total_cells") if isinstance(actual, dict) else None
                     target = _read_json(job_dir / "job.json")["inputs"]["mesh_target_cells"]
-                    if not isinstance(count, int) or abs(count - target) / target > 0.1:
-                        raise CfdTwinError(f"mesh: actual {count} is outside requested {target} ±10%")
+                    job = _read_json(job_manifest)
+                    preset = MESH_PRESETS[job.get("mesh_profile", f"production_{target//1000}k")]
+                    if not isinstance(count, int) or abs(count - target) / target > preset.total_tolerance_fraction or (preset.minimum_total_cells is not None and count < preset.minimum_total_cells):
+                        raise CfdTwinError(f"mesh: actual {count} is outside profile {target} ±{100*preset.total_tolerance_fraction:g}%")
                 if stage == "steady":
                     _gate(case / "runs/steady_cold_flow/reports/solver/cold_flow_validation.json", "COLD_FLOW_VALIDATION_PASSED")
                     _gate(case / "runs/steady_cht/reports/solver/steady_cht_validation.json", "STEADY_CHT_VALIDATION_PASSED")
@@ -507,11 +574,16 @@ def run_imported_case(job_manifest: Path) -> None:
 
                 write_mesh_only_viewer(case, job_dir / "viewer")
                 project_root = Path(__file__).resolve().parents[2]
+                labels = {}
+                if (case / "reports/outlet_boundary.json").is_file():
+                    diameter = config.geometry.ports.inlet_diameter_m * 1000
+                    labels = {"label": f"Ø{diameter:g} mm · 출구 역류 대응", "label_en": f"Ø{diameter:g} mm · pressure-outlet backflow"}
                 publish_experiment_and_demo(
                     project_root / "viewer",
                     project_root / "YU_fluid_데모.zip",
                     source_viewer=job_dir / "viewer",
                     run_id=f"run_{job_dir.name}",
+                    **labels,
                 )
             except Exception as exc:
                 _write_json(job_dir / "status.json", {

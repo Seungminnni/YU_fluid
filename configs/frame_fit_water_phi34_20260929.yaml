@@ -1,0 +1,18 @@
+# Approved frame-fit coordinates; use with baseline_23cell.yaml and ppt_bernardi_udf.yaml.
+case_name: frame_fit_water_phi34_20260929
+mode: imported_23cell
+geometry:
+  ports:
+    inlet_diameter: 34 mm
+    outlet_diameter: 34 mm
+    inlet_face: top
+    outlet_face: bottom
+    inlet_center_xy_mm:
+    - 18.0
+    - 94.0
+    outlet_center_xy_mm:
+    - 92.75
+    - 18.0
+    inlet_column: 1
+    placement: end_cell_center
+    center_source: APPROVED_FRAME_FIT_PREVIEW_20260929

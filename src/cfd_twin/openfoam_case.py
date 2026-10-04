@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .config import ResolvedConfig
 from .geometry import cell_placements
+from .parallelism import default_solver_mpi_ranks
 from .heat_source import (
     ConstantVolumetricSource,
     render_openfoam_fvoptions,
@@ -27,7 +28,7 @@ STRICT_STEADY_RESIDUAL_TARGET = 1.0e-6
 # Run a conservative 6k primary solve, then use the existing 500-iteration
 # continuation path only when the compound convergence gate still fails.
 STEADY_MAXIMUM_ITERATIONS = 6000
-DEFAULT_SOLVER_MPI_RANKS = 4
+DEFAULT_SOLVER_MPI_RANKS = default_solver_mpi_ranks()
 
 
 def _steady_qvol(config: ResolvedConfig) -> float:
@@ -39,7 +40,7 @@ def _steady_qvol(config: ResolvedConfig) -> float:
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(content, encoding="utf-8")
+    temporary.write_text(content, encoding="utf-8", newline="\n")
     os.replace(temporary, path)
 
 

@@ -1,0 +1,25 @@
+# Copy this file, edit conditions/cases, and choose a NEW --output directory.
+schema_version: 1
+name: frame_fit_water
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+  mesh_target_cells: 600000
+# Optional diagnostic S0 cap. The default is 9500. Use 6000--50000 in
+# 500-iteration steps. A larger value does not relax validation or publish a
+# failed result; it only keeps a safe residual/mass-balance plateau running.
+# cold_flow_maximum_iterations: 20000
+# A: original shrinker; B: displacementMotionSolver. Failed mesh/y+ attempts
+# are archived for diagnostics, deleted, and regenerated with a new run UUID.
+mesh_profiles:
+  - production_frame_fit_8um_10layers_ab_A
+  - production_frame_fit_8um_10layers_ab_B
+cases:
+  - name: phi28
+    overlays: [../frame_fit_water_phi28_20260929.yaml]
+  - name: phi31
+    overlays: [../frame_fit_water_phi31_20260929.yaml]
+  - name: phi34
+    overlays: [../frame_fit_water_phi34_20260929.yaml]

@@ -13,7 +13,7 @@ import json
 import math
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .config import ResolvedConfig
@@ -68,6 +68,11 @@ class MeshPreset:
     surface_max_level: int
     battery_inside_level: int
     first_layer_thickness_m: float
+    prism_layer_count: int = PRISM_LAYER_COUNT
+    refined_battery_cells: tuple[str, ...] = ()
+    preserve_wall_diagnostics: bool = False
+    mesh_shrinker: str = "displacementMedialAxis"
+    port_cap_refinement_level: int | None = None
     target_solid_cells: int | None = None
     target_fluid_cells: int | None = None
     target_points: int | None = None
@@ -212,10 +217,141 @@ MESH_PRESETS = {
 }
 
 
+# New larger-port geometries can require thinner first cells. These are trial
+# meshes, not inherited calibration passes; every existing gate still applies.
+for _microns in (6, 4):
+    _name = f"production_600k_frame_fit_{_microns}um"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_600k"],
+        first_layer_thickness_m=_microns * 1e-6,
+        calibration_status="FRAME_FIT_YPLUS_REFINEMENT_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+# Preserve a boundary-layer envelope comparable to the 10 µm × 10-layer
+# baseline while reducing the first wall cell. Validate actual coverage,
+# total cell count and y+ afresh; requested layer count is not actual coverage.
+for _microns, _layers in ((6, 12), (8, 10), (6, 14)):
+    _name = f"production_600k_frame_fit_{_microns}um_{_layers}layers"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_600k"],
+        first_layer_thickness_m=_microns * 1e-6,
+        prism_layer_count=_layers,
+        calibration_status="FRAME_FIT_LAYER_ENVELOPE_TRIAL_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+
+# Latest retained y+ diagnostics identify C04 and C09 as the worst surfaces.
+# Start with their rims, then expand to the adjacent inlet-side batteries.
+# The first layer and count stay at the best prior 8 µm / 10-layer setting.
+for _suffix, _cells, _target in (
+    ("local2", ("C04", "C09"), 600_000),
+    ("local4", ("C04", "C05", "C08", "C09"), 600_000),
+    ("local5_700k", ("C03", "C04", "C05", "C08", "C09"), 700_000),
+):
+    _name = f"production_frame_fit_8um_10layers_{_suffix}"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_600k_frame_fit_8um_10layers"],
+        target_cells=_target,
+        refined_battery_cells=_cells,
+        calibration_status="LOCAL_BATTERY_SURFACE_REFINEMENT_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+
+# Paired trial: identical geometry, grid and layer dimensions. B changes only
+# the shrinker and its necessary motion-solver numerics. The user explicitly
+# permits 600k--690k cells for these trials; all quality gates are unchanged.
+for _suffix, _shrinker in (("A", "displacementMedialAxis"), ("B", "displacementMotionSolver")):
+    _name = f"production_frame_fit_8um_10layers_ab_{_suffix}"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_600k_frame_fit_8um_10layers"],
+        total_tolerance_fraction=0.15,
+        preserve_wall_diagnostics=True,
+        mesh_shrinker=_shrinker,
+        calibration_status="PAIRED_WALL_DIAGNOSTIC_TRIAL_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+
+# The Ø34 8 µm motion-shrinker run passed the 662,674-cell mesh gate,
+# but only 94.5825% of wall area was below y+=1 at S0 iteration 6000.
+# Keep the B shrinker and ten layers; vary only the first-cell height.
+# These are fresh trials, never inherited y+ or convergence passes.
+for _microns in (6, 4):
+    _name = f"production_frame_fit_{_microns}um_10layers_motion"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_frame_fit_8um_10layers_ab_B"],
+        first_layer_thickness_m=_microns * 1e-6,
+        calibration_status="MOTION_SHRINKER_THINNER_WALL_TRIAL_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+
+# Ø34's 6/4 µm × 10-layer motion trials lost layer coverage before any CFD.
+# At expansionRatio=1.2, 6 µm × 11/12 layers requests 193/237 µm overall,
+# bracketing the 208 µm envelope of the mesh-passing 8 µm × 10-layer case.
+# Test coverage, composition and y+ afresh; a thicker envelope is no guarantee.
+for _layers in (11, 12):
+    _name = f"production_frame_fit_6um_{_layers}layers_motion"
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_frame_fit_6um_10layers_motion"],
+        prism_layer_count=_layers,
+        calibration_status="MOTION_SHRINKER_LAYER_ENVELOPE_TRIAL_REQUIRES_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+
+# Ø34 passed the 6 µm / 11-layer wall and quality gates at 662k cells, but its
+# pressure residual plateau remained above the unchanged acceptance target.
+# The higher-resolution trial keeps that wall treatment and motion shrinker;
+# only the background grid/count class changes.  It is not an inherited pass.
+_name = "production_frame_fit_800k_6um_11layers_motion"
+MESH_PRESETS[_name] = replace(
+    MESH_PRESETS["production_800k"],
+    first_layer_thickness_m=6e-6,
+    prism_layer_count=11,
+    preserve_wall_diagnostics=True,
+    mesh_shrinker="displacementMotionSolver",
+    minimum_total_cells=800_000,
+    total_tolerance_fraction=0.15,
+    minimum_hexahedron_fraction=0.88,
+    calibration_status="FRAME_FIT_800K_PRESSURE_PLATEAU_TRIAL_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (_name,)
+
+# The first Ø34 800k attempt produced 935,507 post-split cells and twelve
+# low-twist coolant faces, all clustered at the two port rims.  Keep the same
+# global grid and wall layers, but reduce only the short port-cap volume boxes
+# from level 2 to level 1.  The outerDomain surface itself remains level 2, so
+# the circular inlet/outlet geometry is still resolved and revalidated.
+_name = "production_frame_fit_800k_6um_11layers_motion_port_l1"
+MESH_PRESETS[_name] = replace(
+    MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"],
+    port_cap_refinement_level=1,
+    calibration_status="FRAME_FIT_800K_PORT_RIM_QUALITY_TRIAL_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (_name,)
+
+# Lowering only the cap-box level retained the same twelve low-twist faces and
+# produced 920,006 post-split cells, six above the 15% count ceiling.  Shift the
+# global block grid from 2.90 to 3.00 mm while keeping the cap-box correction.
+# The observed cubic count ratio predicts roughly 831k cells and the changed
+# grid phase targets the port-rim faces without altering wall treatment.
+_name = "production_frame_fit_800k_6um_11layers_motion_3mm_port_l1"
+MESH_PRESETS[_name] = replace(
+    MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion_port_l1"],
+    background_cell_m=0.00300,
+    calibration_status="FRAME_FIT_800K_3MM_PORT_RIM_QUALITY_TRIAL_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (_name,)
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(content, encoding="utf-8")
+    temporary.write_text(content, encoding="utf-8", newline="\n")
     os.replace(temporary, path)
 
 
@@ -374,11 +510,11 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
     )
 
     port_refinement_regions: list[str] = []
-    port_refinement_level: int | None = None
-    if preset.background_cell_m <= 0.0027:
+    port_refinement_level: int | None = preset.port_cap_refinement_level
+    if port_refinement_level is None and preset.background_cell_m <= 0.0027:
         port_refinement_level = 3
-    elif (
-        preset.minimum_total_cells == 600_000
+    elif port_refinement_level is None and (
+        preset.minimum_total_cells is not None
         and max(config.ports.inlet_diameter_m, config.ports.outlet_diameter_m) >= 0.023
     ):
         # At the calibrated 39x42x49 background grid the 23 mm outlet cap was
@@ -423,11 +559,17 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
         }}'''
             )
 
+    refined_names = {f"battery_{cell}" for cell in preset.refined_battery_cells}
+    def surface_levels(name: str) -> tuple[int, int]:
+        if name.removesuffix(".stl") in refined_names:
+            return max(1, preset.surface_min_level), max(2, preset.surface_max_level)
+        return preset.surface_min_level, preset.surface_max_level
+
     feature_entries = [
         f'''        {{ file "outerDomain.eMesh"; level {outer_surface_max_level}; }}'''
     ]
     feature_entries.extend(
-        f'''        {{ file "{name.removesuffix(".stl")}.eMesh"; level {preset.surface_max_level}; }}'''
+        f'''        {{ file "{name.removesuffix(".stl")}.eMesh"; level {surface_levels(name)[1]}; }}'''
         for name in EXPECTED_BATTERY_FILES
     )
 
@@ -441,7 +583,7 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
     surface_entries.extend(
         f'''        {name.removesuffix(".stl")}
         {{
-            level ({preset.surface_min_level} {preset.surface_max_level});
+            level ({surface_levels(name)[0]} {surface_levels(name)[1]});
             faceZone {name.removesuffix(".stl")}_interface;
             cellZone {name.removesuffix(".stl")};
             cellZoneInside inside;
@@ -461,6 +603,16 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
     region_entries += "\n" + "\n".join(port_refinement_regions)
     inlet_x, inlet_y = config.ports.inlet_center_xy_m
     coolant_z = config.enclosure.height_z_m + config.ports.external_length_m * 0.5
+    motion_controls = ""
+    if preset.mesh_shrinker == "displacementMotionSolver":
+        motion_controls = '''    meshShrinker displacementMotionSolver;
+    motionSolverLibs ("libfvMotionSolvers.so");
+    solver displacementLaplacian;
+    displacementLaplacianCoeffs
+    {
+        diffusivity quadratic inverseDistance 1("battery_C[0-9][0-9]_slave");
+    }
+'''
     return _foam_header("snappyHexMeshDict") + f'''castellatedMesh true;
 snap            true;
 addLayers       true;
@@ -531,6 +683,7 @@ snapControls
 
 addLayersControls
 {{
+{motion_controls}
     relativeSizes false;
     layers
     {{
@@ -540,7 +693,7 @@ addLayersControls
         // prisms inside the solid and leaves coolant-side y+ undefined.
         "battery_C[0-9][0-9]_slave"
         {{
-            nSurfaceLayers {PRISM_LAYER_COUNT};
+            nSurfaceLayers {preset.prism_layer_count};
         }}
     }}
     expansionRatio          1.2;
@@ -895,6 +1048,10 @@ def _allmesh_production(config: ResolvedConfig, preset: MeshPreset) -> str:
     component_targets = "".join(
         f" \\{chr(10)}    {option}" for option in target_options
     )
+    diagnostic_capture = (
+        'python3 "$case_dir/tools/wall_diagnostics.py" --case "$case_dir"\n'
+        if preset.preserve_wall_diagnostics else ""
+    )
     return f'''#!/bin/sh
 set -eu
 
@@ -919,6 +1076,8 @@ esac
 # activate the mesh-only dictionary before blockMesh/snappyHexMesh. Solver
 # launchers later copy their own controlDict into each isolated run directory.
 cp "$case_dir/system/controlDict.mesh-only" "$case_dir/system/controlDict"
+cp "$case_dir/system/fvSchemes.mesh-only" "$case_dir/system/fvSchemes"
+cp "$case_dir/system/fvSolution.mesh-only" "$case_dir/system/fvSolution"
 
 surfaceCheck -case "$case_dir" "$case_dir/constant/triSurface/outerDomain.stl" \
     >"$log_dir/surfaceCheck_outerDomain.log" 2>&1
@@ -980,18 +1139,20 @@ else
 fi
 topoSet -case "$case_dir" -constant -dict system/topoSetDict.coolantZone \
     >"$log_dir/topoSet_coolantZone.log" 2>&1
+{diagnostic_capture}
 python3 "$case_dir/tools/parse_layercheck.py" \
     --log "$log_dir/snappyHexMesh.log" \
     --mesh-dir "$case_dir/constant/polyMesh" \
     --field-dir "$case_dir/0" \
-    --expected-target-layers {PRISM_LAYER_COUNT} \
+    --expected-target-layers {preset.prism_layer_count} \
     --minimum-layer-coverage {MINIMUM_LAYER_COVERAGE} \
     --minimum-thickness-fraction {MINIMUM_WANTED_THICKNESS_FRACTION} \
     --output "$report_dir/layer_coverage.json"
 
 # These are snappyHexMesh diagnostics, not solver fields.  Keeping them after
 # inlet/outlet repatching makes splitMeshRegions try to remap stale boundary
-# dictionaries and fail.  Their validated statistics are preserved in JSON.
+# dictionaries and fail. Trial profiles preserve a raw snapshot and per-face
+# coordinates above before these active copies are removed.
 rm -f "$case_dir/0/nSurfaceLayers" \
     "$case_dir/0/thickness" \
     "$case_dir/0/thicknessFraction" \
@@ -1521,6 +1682,11 @@ def write_production_mesh_source_bundle(
     output = Path(output_dir).resolve()
     cad_result = _verify_cad(cad, config)
     preset = MESH_PRESETS[mesh_level]
+    if preset.preserve_wall_diagnostics:
+        _atomic_write(output / "diagnostic_identity.json", json.dumps({
+            "attempt_id": output.parent.name, "mesh_profile": mesh_level,
+            "geometry_sha256": config.geometry_sha256,
+        }, indent=2) + "\n")
 
     tri_surface = output / "constant" / "triSurface"
     tri_surface.mkdir(parents=True, exist_ok=True)
@@ -1570,6 +1736,24 @@ def write_production_mesh_source_bundle(
     )
     _atomic_write(output / "system" / "controlDict.mesh-only", _control_dict())
     _atomic_write(output / "system" / "fvSchemes", _mesh_fv_schemes())
+    mesh_schemes = _mesh_fv_schemes()
+    if preset.mesh_shrinker == "displacementMotionSolver":
+        mesh_schemes = mesh_schemes.replace(
+            "    default Gauss linear corrected;",
+            "    default Gauss linear corrected;\n    laplacian(diffusivity,cellDisplacement) Gauss linear limited 0.5;",
+        )
+    _atomic_write(output / "system/fvSchemes.mesh-only", mesh_schemes)
+    _atomic_write(output / "system/fvSolution.mesh-only", _foam_header("fvSolution") + '''solvers
+{
+    cellDisplacement
+    {
+        solver GAMG;
+        smoother GaussSeidel;
+        tolerance 1e-7;
+        relTol 0.01;
+    }
+}
+''')
     _atomic_write(output / "system" / "decomposeParDict", _decompose_par_dict())
     _atomic_write(output / "system" / "meshQualityDict", _mesh_quality_dict(preset))
 
@@ -1589,6 +1773,7 @@ def write_production_mesh_source_bundle(
 
     validator_destination = output / "tools" / "validate_cell_zones.py"
     validator_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(__file__).with_name("wall_diagnostics.py"), output / "tools/wall_diagnostics.py")
     shutil.copy2(
         Path(__file__).with_name("openfoam_zone_validation.py"), validator_destination
     )
@@ -1842,13 +2027,20 @@ def write_production_mesh_source_bundle(
         },
         "prism_layers": {
             "enabled_in_source": True,
-            "surface_layers": PRISM_LAYER_COUNT,
+            "surface_layers": preset.prism_layer_count,
             "first_layer_thickness_m": preset.first_layer_thickness_m,
             "expansion_ratio": 1.2,
             "minimum_average_layer_coverage_fraction": MINIMUM_LAYER_COVERAGE,
             "minimum_average_wanted_thickness_fraction": MINIMUM_WANTED_THICKNESS_FRACTION,
             "validated": False,
             "required_gate": "coverage plus actual y+ distribution",
+        },
+        "local_battery_surface_refinement": {
+            "cells": list(preset.refined_battery_cells),
+            "surface_levels": [max(1, preset.surface_min_level), max(2, preset.surface_max_level)]
+                if preset.refined_battery_cells else None,
+            "feature_level": max(2, preset.surface_max_level) if preset.refined_battery_cells else None,
+            "validated": False,
         },
         "direct_zone_path": (
             "snappyHexMesh closed-surface battery cellZone/faceZone plus "

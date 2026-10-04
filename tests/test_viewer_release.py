@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import copy
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +13,7 @@ from cfd_twin.multi_case_viewer import (
     add_temperature_display_variant, append_validated_run, read_viewer_model,
     refresh_four_case_manifest, write_four_case_model,
 )
-from cfd_twin.viewer_release import package_demo_viewer, validate_server_viewer
+from cfd_twin.viewer_release import package_demo_viewer, publish_experiment_and_demo, validate_server_viewer
 from cfd_twin.workflow_app import workflow_status
 
 
@@ -69,6 +71,41 @@ def _viewer(path: Path, diameter: int) -> None:
 
 
 class ViewerReleaseTests(unittest.TestCase):
+    def test_first_result_creates_publication_then_second_result_is_added(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, server = root / "source", root / "server"
+            _viewer(source, 28)
+            # Match the real isolated source: top-level dataset fallback and
+            # no bundled reference drawings for the new CAD geometry.
+            model, _ = read_viewer_model(source)
+            model["interactive_cfd"] = copy.deepcopy(model["interactive_cfd_by_mesh"]["precision"])
+            write_four_case_model(source, model)
+            shutil.rmtree(source / "cad")
+            archive = root / "demo.zip"
+            first = publish_experiment_and_demo(server, archive, source_viewer=source, run_id="new_28")
+            self.assertEqual(first["runs"], ["new_28"])
+            self.assertFalse((server / "data/precision").exists())
+            self.assertIn('cad_new_28_top.svg', (server / "cad/index.html").read_text(encoding="utf-8"))
+            second = publish_experiment_and_demo(server, archive, source_viewer=source, run_id="new_31")
+            self.assertEqual(second["runs"], ["new_28", "new_31"])
+            with ZipFile(archive) as zipped:
+                self.assertEqual(zipped.read("viewer/data/new_28/a.u16"), b"binary")
+                self.assertEqual(zipped.read("viewer/data/new_31/a.u16"), b"binary")
+
+    def test_invalid_first_result_leaves_no_publication_and_can_be_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, server = root / "source", root / "server"
+            _viewer(source, 28)
+            portable = source / "data/precision/a.u16.js"
+            portable.unlink()
+            with self.assertRaises(FileNotFoundError):
+                publish_experiment_and_demo(server, root / "demo.zip", source_viewer=source, run_id="new_28")
+            self.assertEqual([p.name for p in server.iterdir()], [".release.lock"])
+            portable.write_text("portable", encoding="utf-8")
+            result = publish_experiment_and_demo(server, root / "demo.zip", source_viewer=source, run_id="new_28")
+            self.assertEqual(result["runs"], ["new_28"])
     def test_comparison_variant_uses_source_mesh_and_cad_without_duplicate_cfd_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             viewer = Path(temporary) / "viewer"

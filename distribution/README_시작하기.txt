@@ -16,9 +16,9 @@ data, src 폴더를 따로 옮기면 화면 또는 새 계산이 동작하지 �
 
 [2] 새 CAD 계산까지 실행할 때 필요한 것
 
-- macOS 또는 Windows PC의 Python 3.12. 제공된 실행기는 macOS에서
-  python3.12, Windows에서 py -3.12 명령을 사용합니다. Python 3.13만
-  설치한 경우에도 별도로 3.12가 필요합니다.
+- macOS 또는 Windows PC의 Python 3.12 이상. 3.13·3.14도 허용하며
+  3.12를 별도로 설치할 필요는 없습니다. 외부 패키지 설치 성공 여부는
+  실행기의 pip 결과로 확인합니다.
 - Docker Desktop 설치 및 실행. Docker Engine과 Docker Compose 명령이
   모두 동작해야 합니다. Windows에서는 Linux 컨테이너 모드가 필요합니다.
   호스트 PC에 OpenFOAM을 별도 설치할 필요는 없습니다.
@@ -32,8 +32,8 @@ data, src 폴더를 따로 옮기면 화면 또는 새 계산이 동작하지 �
 
 설치 확인 명령(터미널 또는 PowerShell):
 
-  macOS:   python3.12 --version
-  Windows: py -3.12 --version
+  macOS:   python3 --version
+  Windows: py -3 --version
   공통:    docker --version
            docker compose version
            docker info
@@ -63,9 +63,9 @@ STL만으로 새 CFD 계산을 시작할 수 없습니다. 냉각수 종류도 �
 탱크 X·Y·Z 또는 목표 외곽 체적, 입구 Ø, 출구 Ø를 입력하고 형상·조건을
 확인한 뒤 'STEP/STL 생성'을 누르세요. CadQuery가 영역별 STEP/STL을 만들고
 셀/벽/포트 간섭, 닫힌 냉각수 체적, 23개 배터리 고체, 입·출구 면적을
-검사합니다. 생성 파일은 data/imported_runs/parametric/<생성 ID>/에
-보존됩니다. 현재 이 파라메트릭 화면은 디스크 보호를 위해 CAD 생성까지만
-수행하며 메시·S0·S1·S2 계산은 자동으로 시작하지 않습니다.
+검사합니다. 생성 파일은 build/imported_runs/parametric/<생성 ID>/에
+보존됩니다. 형상·운전조건 확인 후 새 CFD 계산을 명시적으로 시작하면
+메시·S0·S1·S2·검증·결과 게시까지 이어집니다.
 
 [4] 실제 계산 단계와 수렴 종료
 
@@ -113,7 +113,7 @@ cfd-twin-openfoam-v2512-python3:local 이미지를 빌드합니다.
 - 디스크 여유 부족: 기존 결과를 자동 삭제하지 않습니다. 최소 55 GiB를
   확보한 뒤 새 계산을 시작하세요.
 
-새 계산의 기록은 data/imported_runs/runs/<작업 ID>/에 저장됩니다.
+새 계산의 기록은 build/imported_runs/runs/<작업 ID>/에 저장됩니다.
 worker.log는 Docker·메시·솔버 오류, status.json은 현재 상태,
 cancel.request는 중지 요청 접수 여부를 보여줍니다. 서버 실행기 창의
 Python 오류와 worker.log를 함께 확인해야 원인을 구분할 수 있습니다.
@@ -129,3 +129,12 @@ Python 오류와 worker.log를 함께 확인해야 원인을 구분할 수 있�
 취급하지 마세요. 또한 현재 저장 결과는 수정 전 포트 CAD로 계산됐으므로,
 새 포트 위치의 메시·S0·S1·S2 재계산 전에는 비교·UI 시연용입니다.
 이전 기준선 3D 결과는 중복 포함하지 않았습니다.
+
+[8] Git 체크아웃에서 새 실험
+
+Python 3.12 이상에서 distribution/run_windows.cmd 또는
+distribution/run_mac.command를 실행하세요. 기존 viewer/가 없어도
+결과 0개 상태로 시작할 수 있습니다. 첫 검증된 계산이 결과 뷰어를 만들고
+이후 결과를 누적합니다. configs/experiments/frame_fit_water.yaml과
+tools/run_experiment.py로 이전 batch.json 없이 시안을 준비할 수 있습니다.
+자세한 명령은 docs/windows_and_new_experiments.md를 확인하세요.

@@ -132,6 +132,10 @@ def publish_completed_run(
         },
     }
     adaptive_audit = _read_json(report_dir / "energy_coupling_audit.json")
+    boundary_report = case / "reports/outlet_boundary.json"
+    if boundary_report.is_file():
+        result_manifest["outlet_boundary_trial"] = _read_json(boundary_report)
+        result_manifest["source_reports"].append(str(boundary_report))
     if adaptive_audit.get("status") == "ENERGY_COUPLING_HISTORY_EXTRACTED":
         cap_failures = (
             int(adaptive_audit.get("cap_reached_count", 0))

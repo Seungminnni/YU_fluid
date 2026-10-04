@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from cfd_twin.config import load_config
+from cfd_twin.openfoam_case import DEFAULT_SOLVER_MPI_RANKS
 from cfd_twin.openfoam_zone_validation import (
     EXPECTED_BATTERY_ZONES,
     validate_cell_zones,
@@ -222,6 +223,33 @@ class ProductionMeshTests(unittest.TestCase):
             preset.calibration_status,
             "CALIBRATED_EXECUTED_849284_YPLUS_PASSED",
         )
+
+    def test_frame_fit_800k_trial_keeps_the_passing_wall_treatment(self) -> None:
+        preset = MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"]
+        self.assertEqual(preset.target_cells, 800_000)
+        self.assertEqual(preset.minimum_total_cells, 800_000)
+        self.assertEqual(preset.background_cell_m, 0.00290)
+        self.assertEqual(preset.first_layer_thickness_m, 6e-6)
+        self.assertEqual(preset.prism_layer_count, 11)
+        self.assertEqual(preset.mesh_shrinker, "displacementMotionSolver")
+        self.assertTrue(preset.preserve_wall_diagnostics)
+        self.assertEqual(preset.minimum_hexahedron_fraction, 0.88)
+
+        port_retry = MESH_PRESETS[
+            "production_frame_fit_800k_6um_11layers_motion_port_l1"
+        ]
+        self.assertEqual(port_retry.port_cap_refinement_level, 1)
+        self.assertEqual(port_retry.target_cells, preset.target_cells)
+        self.assertEqual(port_retry.background_cell_m, preset.background_cell_m)
+        self.assertEqual(port_retry.first_layer_thickness_m, preset.first_layer_thickness_m)
+        self.assertEqual(port_retry.prism_layer_count, preset.prism_layer_count)
+
+        three_mm_retry = MESH_PRESETS[
+            "production_frame_fit_800k_6um_11layers_motion_3mm_port_l1"
+        ]
+        self.assertEqual(three_mm_retry.background_cell_m, 0.003)
+        self.assertEqual(three_mm_retry.port_cap_refinement_level, 1)
+        self.assertEqual(three_mm_retry.target_cells, 800_000)
 
     def test_600k_profile_is_recalibrated_above_the_minimum(self) -> None:
         preset = MESH_PRESETS["production_600k"]
@@ -486,7 +514,7 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("relaxationFactors.equations.h -set 0.5", cold_continuation)
             self.assertIn("validate_cold_flow.py", cold_continuation)
             decompose = (output / "system" / "decomposeParDict").read_text()
-            self.assertIn("numberOfSubdomains 4;", decompose)
+            self.assertIn(f"numberOfSubdomains {DEFAULT_SOLVER_MPI_RANKS};", decompose)
             self.assertIn("method scotch;", decompose)
             self.assertEqual(
                 (output / "system" / "coolant" / "decomposeParDict").read_text(),
@@ -501,7 +529,7 @@ class ProductionMeshTests(unittest.TestCase):
                 ).read_text(),
                 decompose,
             )
-            self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], 4)
+            self.assertEqual(manifest["parallel_execution"]["default_mpi_ranks"], DEFAULT_SOLVER_MPI_RANKS)
             self.assertEqual(manifest["parallel_execution"]["default_mesh_mpi_ranks"], 1)
             self.assertTrue(
                 (output / "heat_source_reference" / "heat_source_manifest.json").is_file()
