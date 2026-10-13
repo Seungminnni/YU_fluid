@@ -682,6 +682,15 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v31_c07"] = replace(
     refined_battery_cells=("C06", "C07", "C09", "C12", "C13", "C15", "C18"),
     calibration_status="PHI19_800K_6UM_11L_C07_LAYER_RETRY_REQUIRES_VALIDATION",
 )
+# v31 resolved C07 and left C11 as the sole wall below both unchanged layer
+# gates.  Add only that measured wall to the bounded local-refinement list.
+# The resulting count and full quality gates remain authoritative and must be
+# checked after layer validation; no limit or physical input is changed.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v32_c11"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v31_c07"],
+    refined_battery_cells=("C06", "C07", "C09", "C11", "C12", "C13", "C15", "C18"),
+    calibration_status="PHI19_800K_6UM_11L_C11_LAYER_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -761,6 +770,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v29_medial",
     "production_phi19_mesh_study_800k_yplus_v30_local_layers",
     "production_phi19_mesh_study_800k_yplus_v31_c07",
+    "production_phi19_mesh_study_800k_yplus_v32_c11",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
