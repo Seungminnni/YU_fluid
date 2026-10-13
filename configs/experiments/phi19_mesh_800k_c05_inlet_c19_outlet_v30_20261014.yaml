@@ -1,0 +1,23 @@
+schema_version: 1
+name: phi19_mesh_800k_c05_inlet_c19_outlet_v30_20261014
+
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+
+overlays:
+  - ../recalculation_800k_c05_inlet_c19_outlet_phi19_20261013.yaml
+
+steady_numerics_profile: pressure_relaxation_0p15
+cold_flow_maximum_iterations: 20000
+automatic_retry:
+  maximum_retries: 12
+
+cases:
+  - name: phi19_mesh_800k_c05_inlet_c19_outlet_v30
+    inputs:
+      mesh_target_cells: 800000
+    mesh_profiles:
+      - production_phi19_mesh_study_800k_yplus_v30_local_layers

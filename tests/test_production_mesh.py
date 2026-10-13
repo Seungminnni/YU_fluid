@@ -797,6 +797,28 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertEqual(retry.maximum_skewness, 5.0)
         self.assertEqual(retry.total_tolerance_fraction, 0.12)
 
+    def test_phi19_mesh_study_v30_refines_only_measured_layer_failures(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v27_6um_11layers"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v30_local_layers"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"refined_battery_cells", "calibration_status"})
+        self.assertEqual(
+            retry.refined_battery_cells,
+            ("C06", "C09", "C12", "C13", "C15", "C18"),
+        )
+        self.assertEqual(retry.mesh_shrinker, "displacementMotionSolver")
+        self.assertEqual(retry.n_buffer_cells_no_extrude, 1)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertEqual(retry.background_cell_m, 0.00292)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_skewness, 5.0)
+        self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
     def test_frame_fit_800k_trial_keeps_the_passing_wall_treatment(self) -> None:
         preset = MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"]
         self.assertEqual(preset.target_cells, 800_000)
