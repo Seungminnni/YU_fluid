@@ -649,6 +649,19 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v28_layer_continuity"] = re
     n_buffer_cells_no_extrude=0,
     calibration_status="PHI19_800K_6UM_11L_LAYER_CONTINUITY_RETRY_REQUIRES_VALIDATION",
 )
+# v28 showed that removing the termination buffer is incompatible with this
+# corrected-port motion mesh: layer coverage/thickness failed on twenty of 23
+# batteries and illegal faces rose from 308 to 492.  Return to v27's bounded
+# buffer and change only the layer shrinker.  The 1000k 6 um x 11-layer trial
+# using the medial-axis shrinker previously retained all walls with only one
+# local thickness miss, so it is the next measured topology correction.  No
+# wall dimension, background phase, refinement, acceptance gate or physics is
+# changed, and the new mesh starts from an empty job.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v29_medial"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v27_6um_11layers"],
+    mesh_shrinker="displacementMedialAxis",
+    calibration_status="PHI19_800K_6UM_11L_MEDIAL_LAYER_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -725,6 +738,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v26_y45",
     "production_phi19_mesh_study_800k_yplus_v27_6um_11layers",
     "production_phi19_mesh_study_800k_yplus_v28_layer_continuity",
+    "production_phi19_mesh_study_800k_yplus_v29_medial",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
