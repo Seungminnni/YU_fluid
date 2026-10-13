@@ -621,6 +621,21 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v26_y45"] = replace(
     background_cell_m=0.00292,
     calibration_status="PHI19_800K_CORRECTED_PORTS_Y45_RETRY_REQUIRES_VALIDATION",
 )
+# v26 passed every mesh gate at 834,922 cells, but all four approved S0
+# stabilisation profiles developed the same accelerating pressure/velocity
+# mode.  The longest finite checkpoint also measured only 90.572% of battery
+# area below y+=1; the failure was distributed over the battery walls rather
+# than confined to one tangential patch.  Rebuild from empty with the proven
+# bounded wall-normal correction: 6 um first cells and eleven prism layers
+# keep the requested outer prism scale comparable to v26 while improving y+
+# resolution.  The corrected C05/C19 ports, quantized Y phase, motion
+# shrinker, C18 treatment, cell-count/quality gates and physics are unchanged.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v27_6um_11layers"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v26_y45"],
+    first_layer_thickness_m=6e-6,
+    prism_layer_count=11,
+    calibration_status="PHI19_800K_6UM_11L_S0_YPLUS_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -695,6 +710,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v24_transition6",
     "production_phi19_mesh_study_800k_yplus_v25_phase_2p91",
     "production_phi19_mesh_study_800k_yplus_v26_y45",
+    "production_phi19_mesh_study_800k_yplus_v27_6um_11layers",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
