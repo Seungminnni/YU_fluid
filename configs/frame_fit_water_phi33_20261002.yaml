@@ -1,0 +1,19 @@
+# Frame-fit coordinates generated with the same 1.00 mm clearance rule used
+# for the approved Ø28/Ø31/Ø34 family.
+case_name: frame_fit_water_phi33_20261002
+mode: imported_23cell
+geometry:
+  ports:
+    inlet_diameter: 33 mm
+    outlet_diameter: 33 mm
+    inlet_face: top
+    outlet_face: bottom
+    inlet_center_xy_mm:
+    - 17.5
+    - 95.0
+    outlet_center_xy_mm:
+    - 92.25
+    - 17.75
+    inlet_column: 1
+    placement: end_cell_center
+    center_source: FRAME_FIT_1MM_CLEARANCE_RULE_20261002

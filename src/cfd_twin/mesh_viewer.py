@@ -50,7 +50,7 @@ HTML = """<!doctype html>
       <div id="loading" role="status">실제 계산 격자를 불러오는 중…</div>
       <div class="legend"><span class="fluid"></span> 냉각수 영역 <span class="solid"></span> 배터리 영역</div>
     </div>
-    <div class="foot"><span id="detail">3D 전체 격자는 유체·고체의 모든 셀 에지를 표시합니다. 겹쳐 보일 때는 내부 절개·단면을 사용하세요.</span>
+    <div class="foot"><span id="detail">3D 전체 격자는 모든 셀 에지를 유지하며 깊이와 외곽 경계를 구분해 표시합니다.</span>
       <span>드래그: 회전 · 휠: 확대</span></div>
   </main>
   <script src="mesh-data.js"></script>
@@ -60,6 +60,38 @@ HTML = """<!doctype html>
 </body>
 </html>
 """
+
+
+def enable_multi_case_mesh_selection(html: str) -> str:
+    """Add the result selector and switch to per-run mesh assets.
+
+    The standalone mesh viewer keeps its two default assets.  A combined
+    viewer instead loads ``four_case_data.js`` first; ``mesh.js`` then loads
+    the boundary and full-volume mesh belonging to the selected result ID.
+    """
+
+    if 'id="mesh-case-select"' not in html:
+        marker = '<h1>메시 보기</h1><span id="count"></span>'
+        if html.count(marker) != 1:
+            raise ValueError("mesh page title marker missing")
+        html = html.replace(
+            marker,
+            '<h1>메시 보기</h1><label class="mesh-case-control" for="mesh-case-select">'
+            '결과 선택 <select id="mesh-case-select"></select></label><span id="count"></span>',
+        )
+    static_scripts = (
+        '  <script src="mesh-data.js"></script>\n'
+        '  <script src="mesh-volume-data.js"></script>'
+    )
+    if static_scripts in html:
+        html = html.replace(
+            static_scripts,
+            '  <script src="four_case_data.js"></script>',
+            1,
+        )
+    elif 'src="four_case_data.js"' not in html:
+        raise ValueError("mesh page has no case-data script marker")
+    return html
 
 _home_template = (Path(__file__).with_name("workflow_assets") / "index.html").read_text(encoding="utf-8")
 _home_template = re.sub(r'href="/style\.css[^\"]*"', 'href="portal.css?v=button-text-1"', _home_template)
@@ -385,23 +417,31 @@ function loadMeshAsset(filename){return new Promise((resolve,reject)=>{
   script.onload=resolve;script.onerror=()=>reject(Error(`${filename}: 파일을 불러올 수 없습니다.`));
   document.head.appendChild(script);
 });}
-let mesh=null,mode="surface",yaw=0.55,pitch=0.70,zoom=1,baseScale=1,dragging=false,lastX=0,lastY=0;
+let mesh=null,mode="surface",yaw=0.55,pitch=0.70,zoom=1,baseScale=1,depthScale=1,dragging=false,lastX=0,lastY=0;
 let geometry=[],centre=[0,0,0],bounds=[],program,attribute,uniforms;
 function shader(type,source){const item=gl.createShader(type);gl.shaderSource(item,source);gl.compileShader(item);
   if(!gl.getShaderParameter(item,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(item));return item;}
 function initGL(){program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,`
-  attribute vec3 aPoint;uniform vec3 uCentre;uniform float uYaw,uPitch,uScale,uAspect;
+  attribute vec3 aPoint;uniform vec3 uCentre;uniform float uYaw,uPitch,uScale,uAspect,uDepthScale;
+  varying float vDepth;
   void main(){vec3 p=aPoint-uCentre;float c=cos(uYaw),s=sin(uYaw);
-  float x=c*p.x-s*p.y,y=s*p.x+c*p.y,z=cos(uPitch)*y+sin(uPitch)*p.z;
-  gl_Position=vec4(x*uScale/uAspect,z*uScale,0.0,1.0);}`));
+  float x=c*p.x-s*p.y,y=s*p.x+c*p.y;
+  float vertical=cos(uPitch)*y+sin(uPitch)*p.z;
+  float depth=-sin(uPitch)*y+cos(uPitch)*p.z;
+  vDepth=clamp(.5+.5*depth*uDepthScale,0.0,1.0);
+  gl_Position=vec4(x*uScale/uAspect,vertical*uScale,-depth*uDepthScale,1.0);}`));
   gl.attachShader(program,shader(gl.FRAGMENT_SHADER,`
-  precision mediump float;uniform vec4 uColour;void main(){gl_FragColor=uColour;}`));
+  precision mediump float;uniform vec4 uColour;uniform float uDepthCue;varying float vDepth;
+  void main(){float shade=mix(1.0,mix(.30,1.0,smoothstep(0.0,1.0,vDepth)),uDepthCue);
+  gl_FragColor=vec4(uColour.rgb*shade,uColour.a);}`));
   gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
   gl.useProgram(program);attribute=gl.getAttribLocation(program,"aPoint");uniforms={
     centre:gl.getUniformLocation(program,"uCentre"),yaw:gl.getUniformLocation(program,"uYaw"),
     pitch:gl.getUniformLocation(program,"uPitch"),scale:gl.getUniformLocation(program,"uScale"),
-    aspect:gl.getUniformLocation(program,"uAspect"),colour:gl.getUniformLocation(program,"uColour")};
-  gl.enableVertexAttribArray(attribute);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);}
+    aspect:gl.getUniformLocation(program,"uAspect"),depthScale:gl.getUniformLocation(program,"uDepthScale"),
+    depthCue:gl.getUniformLocation(program,"uDepthCue"),colour:gl.getUniformLocation(program,"uColour")};
+  gl.enableVertexAttribArray(attribute);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);}
 function displayMode(which,keepView=false){mode=which;for(const entry of geometry)gl.deleteBuffer(entry.buffer);geometry=[];
   const groups=mesh.modes[mode].groups,used=new Set();
   for(const group of groups)for(const edge of group.edges){used.add(edge[0]);used.add(edge[1]);}
@@ -409,6 +449,7 @@ function displayMode(which,keepView=false){mode=which;for(const entry of geometr
   for(const index of used){const point=mesh.points_mm[index];for(let j=0;j<3;j++){
     low[j]=Math.min(low[j],point[j]);high[j]=Math.max(high[j],point[j]);}}
   centre=low.map((value,j)=>(value+high[j])/2);bounds=[];
+  depthScale=.9/Math.max(Math.hypot(...high.map((value,j)=>value-low[j])),.001);
   for(const x of [low[0],high[0]])for(const y of [low[1],high[1]])for(const z of [low[2],high[2]])bounds.push([x,y,z]);
   for(const group of groups){const vertices=new Float32Array(group.edges.length*6);let i=0;
     for(const edge of group.edges)for(const index of edge)for(const coordinate of mesh.points_mm[index])vertices[i++]=coordinate;
@@ -449,10 +490,18 @@ async function displayCompleteVolume(){
       const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,vertices,gl.STATIC_DRAW);
       geometry.push({buffer,count:nEdges*2,kind});total+=nEdges;
     }
+    // The volume buffers contain every edge. Add the boundary edges as a
+    // separate final pass so the enclosure and battery silhouettes remain
+    // legible without discarding or sampling any volume cells.
+    for(const group of mesh.modes.surface.groups){const vertices=new Float32Array(group.edges.length*6);let i=0;
+      for(const edge of group.edges)for(const index of edge)for(const coordinate of mesh.points_mm[index])vertices[i++]=coordinate;
+      const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,vertices,gl.STATIC_DRAW);
+      geometry.push({buffer,count:vertices.length/3,kind:`${group.kind}_outline`,outline:true});}
     mode="volume";centre=low.map((value,j)=>(value+high[j])/2);bounds=[];
+    depthScale=.9/Math.max(Math.hypot(...high.map((value,j)=>value-low[j])),.001);
     for(const x of [low[0],high[0]])for(const y of [low[1],high[1]])for(const z of [low[2],high[2]])bounds.push([x,y,z]);
     document.getElementById("plane").textContent="실제 polyMesh · 전체 3D 체적 격자";
-    document.getElementById("detail").textContent=`유체·고체 전체 ${total.toLocaleString()}개 고유 에지 · 표본화 없음`;
+    document.getElementById("detail").textContent=`유체·고체 전체 ${total.toLocaleString()}개 고유 에지 · 표본화 없음 · 깊이 판정 및 경계 강조`;
     document.getElementById("cut-controls").hidden=true;
     for(const button of document.querySelectorAll("[data-mode]"))button.setAttribute("aria-pressed",button.dataset.mode==="volume");
     setView("iso");loading.hidden=true;
@@ -471,17 +520,23 @@ function fitScale(aspect){let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-I
 function render(){if(!mesh||!gl)return;const ratio=Math.min(2,window.devicePixelRatio||1);
   const width=Math.max(1,Math.round(canvas.clientWidth*ratio)),height=Math.max(1,Math.round(canvas.clientHeight*ratio));
   if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;}
-  gl.viewport(0,0,width,height);gl.clearColor(0.047,0.090,0.129,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.viewport(0,0,width,height);gl.clearColor(0.047,0.090,0.129,1);gl.clearDepth(1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   const aspect=width/height;gl.useProgram(program);gl.uniform3fv(uniforms.centre,centre);
   gl.uniform1f(uniforms.yaw,yaw);gl.uniform1f(uniforms.pitch,pitch);
   // 드래그할 때마다 현재 투영 외접상자를 다시 맞추면 물체가 갑자기 확대된다.
   // 시점 선택·'맞춤'·창 크기 변경 때만 기준 배율을 갱신한다.
   gl.uniform1f(uniforms.scale,baseScale*zoom);gl.uniform1f(uniforms.aspect,aspect);
-  const palette={fluid:[1,.79,.27,mode==="volume"?.12:mode==="surface"?.42:.84],solid:[.35,.92,.57,mode==="volume"?.24:.90],port:[1,.56,.28,.95],
-    fluid_shell:[1,.79,.27,.22],solid_shell:[.35,.92,.57,.22],port_shell:[1,.56,.28,.35]};
-  for(const item of geometry){gl.bindBuffer(gl.ARRAY_BUFFER,item.buffer);
+  gl.uniform1f(uniforms.depthScale,depthScale);gl.uniform1f(uniforms.depthCue,mode==="volume"?1:.35);
+  const palette={fluid:[1,.74,.20,mode==="volume"?1:mode==="surface"?.42:.84],solid:[.25,.92,.50,mode==="volume"?1:.90],port:[1,.56,.28,.95],
+    fluid_shell:[1,.79,.27,.22],solid_shell:[.35,.92,.57,.22],port_shell:[1,.56,.28,.35],
+    fluid_outline:[1,.82,.31,1],solid_outline:[.35,1,.59,1],port_outline:[1,.60,.30,1]};
+  if(mode==="volume"){gl.disable(gl.BLEND);gl.depthMask(true);}else{gl.enable(gl.BLEND);gl.depthMask(false);}
+  for(const item of geometry){if(mode==="volume"&&item.outline)continue;gl.bindBuffer(gl.ARRAY_BUFFER,item.buffer);
     gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,0,0);gl.uniform4fv(uniforms.colour,palette[item.kind]||palette.fluid);
-    gl.drawArrays(gl.LINES,0,item.count);}}
+    gl.drawArrays(gl.LINES,0,item.count);}
+  if(mode==="volume"){gl.depthMask(false);for(const item of geometry){if(!item.outline)continue;gl.bindBuffer(gl.ARRAY_BUFFER,item.buffer);
+      gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,0,0);gl.uniform4fv(uniforms.colour,palette[item.kind]||palette.fluid_outline);
+      gl.drawArrays(gl.LINES,0,item.count);}gl.depthMask(true);gl.enable(gl.BLEND);}}
 canvas.addEventListener("pointerdown",event=>{dragging=true;lastX=event.clientX;lastY=event.clientY;canvas.setPointerCapture(event.pointerId);});
 canvas.addEventListener("pointerup",()=>{dragging=false;});canvas.addEventListener("pointercancel",()=>{dragging=false;});
 canvas.addEventListener("pointermove",event=>{if(!dragging)return;

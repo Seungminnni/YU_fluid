@@ -22,7 +22,15 @@ from .config import ResolvedConfig
 from .geometry import cell_placements, geometry_report
 from .heat_source import source_from_config
 from .mesh_wireframe import mesh_wireframes_for_viewer
-from .mesh_viewer import HOME_HTML, HTML as MESH_HTML, CSS as MESH_CSS, JAVASCRIPT as MESH_JAVASCRIPT, OFFLINE_JAVASCRIPT, write_mesh_only_viewer
+from .mesh_viewer import (
+    HOME_HTML,
+    HTML as MESH_HTML,
+    CSS as MESH_CSS,
+    JAVASCRIPT as MESH_JAVASCRIPT,
+    OFFLINE_JAVASCRIPT,
+    enable_multi_case_mesh_selection,
+    write_mesh_only_viewer,
+)
 from .openfoam_cold_flow_validation import parse_cold_flow_log
 from .openfoam_results import (
     LEGACY_DISPLAY_TEMPERATURE_OFFSET_C,
@@ -220,6 +228,24 @@ def _mesh_runs_payload(
             ),
         },
     ]
+    runtime_path = case / "reports/execution_runtime.json"
+    if runtime_path.is_file():
+        runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+        analysis_seconds = runtime.get("analysis_wall_seconds")
+        stages = runtime.get("stage_wall_seconds", {})
+        if isinstance(analysis_seconds, (int, float)) and analysis_seconds >= 0:
+            runs[0]["analysis_runtime"] = {
+                "wall_seconds": float(analysis_seconds),
+                "stage_wall_seconds": {
+                    str(name): float(value)
+                    for name, value in stages.items()
+                    if isinstance(value, (int, float)) and value >= 0
+                    and name in {"cad", "mesh", "steady", "transient"}
+                },
+                "solver_mpi_ranks": runtime.get("solver_mpi_ranks"),
+                "mesh_mpi_ranks": runtime.get("mesh_mpi_ranks"),
+                "semantics": runtime.get("semantics"),
+            }
     comparison_path = case / "comparison_manifest.json"
     if comparison_path.is_file():
         comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
@@ -271,6 +297,13 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         case / "production/single/runs/steady_cht",
         case / "production/L3/runs/steady_cht",
         case / "production/L0/runs/steady_cht",
+        # Failed cold-flow attempts are never published as selectable CFD
+        # results, but their preserved solver logs can still be rendered as a
+        # clearly labelled diagnostic convergence history.
+        case / "runs/steady_cold_flow",
+        case / "production/single/runs/steady_cold_flow",
+        case / "production/L3/runs/steady_cold_flow",
+        case / "production/L0/runs/steady_cold_flow",
     )
     run_dir = next(
         (
@@ -322,9 +355,13 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         )
         scope = f"{result_kind} · {calculation_kind}"
     elif run_dir is not None:
-        if "single" in run_dir.parts:
+        cold_flow_only = run_dir.name == "steady_cold_flow"
+        if cold_flow_only:
+            scope = "실패 진단 · 유동 초기화"
+        elif "single" in run_dir.parts:
             scope = "새 표준 결과 · 정상상태 CHT 초기화"
-        for log_path in sorted((run_dir / "logs/solver").glob("steady_cht*.log")):
+        log_prefix = "steady_cold_flow" if cold_flow_only else "steady_cht"
+        for log_path in sorted((run_dir / "logs/solver").glob(f"{log_prefix}*.log")):
             parsed = parse_cold_flow_log(log_path)
             if not parsed["records"]:
                 continue
@@ -344,7 +381,12 @@ def _convergence_payload(case: Path) -> dict[str, object]:
                     value = abs(float(continuity_values["global"]))
                     if value > 0:
                         continuity[iteration] = value
-        validation_path = run_dir / "reports/solver/steady_cht_validation.json"
+        validation_name = (
+            "cold_flow_validation.json"
+            if cold_flow_only
+            else "steady_cht_validation.json"
+        )
+        validation_path = run_dir / f"reports/solver/{validation_name}"
         if validation_path.is_file():
             validation = json.loads(validation_path.read_text(encoding="utf-8"))
 
@@ -422,6 +464,8 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         if axis_mode == "transient_time_step_iteration"
         else "full_transient"
         if axis_mode == "cumulative_pimple_outer_iteration"
+        else "cold_flow"
+        if run_dir is not None and run_dir.name == "steady_cold_flow"
         else "steady_cht"
     )
     primary_label = (
@@ -429,6 +473,8 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         if primary_id == "transient_energy"
         else "전체 과도 CHT"
         if primary_id == "full_transient"
+        else "유동 초기화 · U/p/k/ω"
+        if primary_id == "cold_flow"
         else "정상 CHT · 유동+에너지"
     )
     payload = {
@@ -441,8 +487,11 @@ def _convergence_payload(case: Path) -> dict[str, object]:
         "series": series,
         "axis_mode": axis_mode,
         "iteration_count": len(all_iterations),
-        "first_iteration": min(all_iterations),
-        "last_iteration": max(all_iterations),
+        # A solver can retain a residual CSV containing only auxiliary fields
+        # that are intentionally not plotted.  Keep the saved steady-stage
+        # histories available instead of crashing publication on min(empty).
+        "first_iteration": min(all_iterations) if all_iterations else None,
+        "last_iteration": max(all_iterations) if all_iterations else None,
         "linear_iteration_total": linear_iteration_total or None,
         "time_step_count": transient_summary.get("time_step_count"),
         "first_time_s": transient_summary.get("first_time_s"),
@@ -927,12 +976,26 @@ def _interactive_legacy_cfd_payload(
         ]
 
     plane_specs = {
+        "xy04": {
+            "kind": "xy",
+            "columns": 37,
+            "rows": 41,
+            "fixed_fraction": 3.5 / 82.0,
+            "label": "Z = 3.5 mm · 하부 냉각수 간극",
+        },
         "xy": {
             "kind": "xy",
             "columns": 37,
             "rows": 41,
             "fixed_fraction": 0.5,
             "label": "Z = 41.0 mm",
+        },
+        "xy96": {
+            "kind": "xy",
+            "columns": 37,
+            "rows": 41,
+            "fixed_fraction": 78.5 / 82.0,
+            "label": "Z = 78.5 mm · 상부 냉각수 간극",
         },
         "xz15": {
             "kind": "xz",
@@ -1125,6 +1188,7 @@ def _interactive_legacy_cfd_payload(
     for name, section in sections.items():
         samples = plane_sources[name]
         velocity, velocity_valid = probe(final_fluid, samples, "U")
+        pressure, pressure_valid = probe(final_fluid, samples, "p")
         speed = np.linalg.norm(velocity, axis=1)
         section["velocity_m_s"] = json_values(speed, velocity_valid)
         section["velocity_vectors_m_s"] = [
@@ -1137,6 +1201,19 @@ def _interactive_legacy_cfd_payload(
             float(value) for value, valid in zip(speed, velocity_valid) if valid
         ]
         section["velocity_range_m_s"] = [0.0, max(valid_speed)]
+        pressure_gauge = pressure - port_flow["outlet_area_average_pressure_pa"]
+        section["pressure_gauge_pa"] = json_values(
+            pressure_gauge, pressure_valid
+        )
+        valid_pressure = [
+            float(value)
+            for value, valid in zip(pressure_gauge, pressure_valid)
+            if valid
+        ]
+        section["pressure_range_pa"] = [
+            min(valid_pressure),
+            max(valid_pressure),
+        ]
 
     final_cell_velocity = backend.vtk_to_numpy(
         final_fluid.GetCellData().GetArray("U")
@@ -1189,6 +1266,12 @@ def _interactive_legacy_cfd_payload(
         "velocity_scale_semantics": (
             "shared global range from every coolant cell-centred U magnitude; "
             "used by streamlines, XY sections, XZ sections, vectors, and ports"
+        ),
+        "pressure_available": True,
+        "pressure_reference_pa": port_flow["outlet_area_average_pressure_pa"],
+        "pressure_semantics": (
+            "direct coolant-cell absolute p minus outlet area-average p; "
+            "displayed as gauge pressure on XY/XZ/YZ sections"
         ),
         "streamlines": browser_paths,
         "streamline_count": len(browser_paths),
@@ -1467,12 +1550,16 @@ def _interactive_actual_cfd_payload(
     x_values = centred_axis(config.enclosure.width_x_m, 0.001)
     y_values = centred_axis(config.enclosure.length_y_m, 0.001)
     z_values = centred_axis(config.enclosure.height_z_m, 0.0015)
+    lower_gap_z_m = (config.enclosure.height_z_m - config.cells.length_m) / 4
+    upper_gap_z_m = config.enclosure.height_z_m - lower_gap_z_m
     plane_specs = {
+        "xy04": ("xy", x_values, y_values, lower_gap_z_m / config.enclosure.height_z_m, f"Z = {1000 * lower_gap_z_m:.1f} mm · 하부 냉각수 간극"),
         "xy15": ("xy", x_values, y_values, 0.15, "Z = 12.3 mm"),
         "xy33": ("xy", x_values, y_values, 0.325, "Z = 26.7 mm"),
         "xy": ("xy", x_values, y_values, 0.5, "Z = 41.0 mm"),
         "xy68": ("xy", x_values, y_values, 0.675, "Z = 55.4 mm"),
         "xy85": ("xy", x_values, y_values, 0.85, "Z = 69.7 mm"),
+        "xy96": ("xy", x_values, y_values, upper_gap_z_m / config.enclosure.height_z_m, f"Z = {1000 * upper_gap_z_m:.1f} mm · 상부 냉각수 간극"),
         "xz15": ("xz", x_values, z_values, 0.15, "Y = 18.2 mm"),
         "xz33": ("xz", x_values, z_values, 0.325, "Y = 39.3 mm"),
         "xz50": ("xz", x_values, z_values, 0.5, "Y = 60.5 mm"),
@@ -1488,6 +1575,10 @@ def _interactive_actual_cfd_payload(
     locator.SetDataSet(fluid)
     locator.BuildLocator()
     cell_velocity = backend.vtk_to_numpy(fluid.GetCellData().GetArray("U"))
+    pressure_array = fluid.GetCellData().GetArray("p")
+    if pressure_array is None:
+        raise RuntimeError("validated steady coolant field has no pressure p")
+    cell_pressure = backend.vtk_to_numpy(pressure_array)
     velocity_max_m_s = float(backend.np.linalg.norm(cell_velocity, axis=1).max())
     sections: dict[str, dict[str, object]] = {}
     for name, (kind, horizontal, vertical, fraction, label) in plane_specs.items():
@@ -1516,6 +1607,7 @@ def _interactive_actual_cfd_payload(
         )
         velocity_vectors: list[list[float] | None] = []
         velocity_magnitudes: list[float | None] = []
+        pressure_gauge_pa: list[float | None] = []
         fluid_temperature_1800_c: list[float | None] = []
         solid_temperature_1800_c: list[float | None] = []
         for point in coordinates:
@@ -1538,6 +1630,7 @@ def _interactive_actual_cfd_payload(
             if cell_id < 0:
                 velocity_vectors.append(None)
                 velocity_magnitudes.append(None)
+                pressure_gauge_pa.append(None)
                 continue
             vector = cell_velocity[cell_id]
             velocity_vectors.append(
@@ -1546,7 +1639,11 @@ def _interactive_actual_cfd_payload(
             velocity_magnitudes.append(
                 round(float(backend.np.linalg.norm(vector)), 7)
             )
+            pressure_gauge_pa.append(
+                round(float(cell_pressure[cell_id]) - outlet_pressure, 7)
+            )
         valid_velocity = [value for value in velocity_magnitudes if value is not None]
+        valid_pressure = [value for value in pressure_gauge_pa if value is not None]
         valid_solid_temperature = [
             value for value in solid_temperature_1800_c if value is not None
         ]
@@ -1582,10 +1679,14 @@ def _interactive_actual_cfd_payload(
             "fluid_temperature_1800_c": fluid_temperature_1800_c,
             "solid_temperature_1800_c": solid_temperature_1800_c,
             "solid_temperature_time_s": 1800,
-            "solid_temperature_range_c": [
-                min(valid_solid_temperature),
-                max(valid_solid_temperature),
-            ],
+            # The user-requested horizontal cuts above and below the battery
+            # pack intentionally contain coolant only.  An empty solid sample
+            # set is therefore valid geometry, not a failed CFD field.
+            "solid_temperature_range_c": (
+                [min(valid_solid_temperature), max(valid_solid_temperature)]
+                if valid_solid_temperature
+                else None
+            ),
             "solid_temperature_semantics": (
                 f"direct containing {mesh_label}-mesh batterySolid cell T at 1800 s; "
                 "other integer seconds use the direct per-cell volume average"
@@ -1593,6 +1694,8 @@ def _interactive_actual_cfd_payload(
             "velocity_m_s": velocity_magnitudes,
             "velocity_vectors_m_s": velocity_vectors,
             "velocity_range_m_s": [0.0, max(valid_velocity)],
+            "pressure_gauge_pa": pressure_gauge_pa,
+            "pressure_range_pa": [min(valid_pressure), max(valid_pressure)],
             "spatial_sampling": f"direct containing {mesh_label}-mesh cell; no interpolation or padding",
         }
 
@@ -1601,6 +1704,31 @@ def _interactive_actual_cfd_payload(
         specification["file"] = f"data/{specification['file']}"
     temperatures = [value for series in cell_temperature.values() for value in series]
     surface_spec = datasets["cell_surface"]
+    heat_transfer_spec = datasets.get("cell_surface_heat_transfer_coefficient")
+    surface_heat_transfer = None
+    if heat_transfer_spec is not None:
+        surface_heat_transfer = {
+            "angular_segments": heat_transfer_spec["angular_segments"],
+            "axial_segments": heat_transfer_spec["axial_segments"],
+            "actual_dataset": "cell_surface_heat_transfer_coefficient",
+            "value_range_w_m2k": heat_transfer_spec["value_range_w_m2k"],
+            "distribution_percentiles_w_m2k": heat_transfer_spec.get(
+                "distribution_percentiles_w_m2k", {}
+            ),
+            "recommended_fixed_display_upper_w_m2k": heat_transfer_spec.get(
+                "recommended_fixed_display_upper_w_m2k"
+            ),
+            # A run-level range is fixed over the complete 1..1800 s result.
+            # The cumulative viewer merger later replaces this with one shared
+            # range for every run that has the direct interface dataset.
+            "fixed_legend_range_w_m2k": [
+                0.0,
+                heat_transfer_spec["value_range_w_m2k"][1],
+            ],
+            "definition": heat_transfer_spec["definition"],
+            "scope": "coolant-facing C01-C23 battery interface only",
+            "sample_semantics": heat_transfer_spec["sampling"],
+        }
     return {
         "enabled": True,
         "semantics": (
@@ -1652,6 +1780,7 @@ def _interactive_actual_cfd_payload(
             "temperature_range_c": surface_spec["temperature_range_c"],
             "sample_semantics": "direct containing batterySolid cell at 32 angles x 16 heights; invalid samples omitted",
         },
+        "cell_surface_heat_transfer": surface_heat_transfer,
         "actual_one_second": {
             "validation_status": validation["status"],
             "mesh_cell_count": manifest["mesh_cell_count"],
@@ -1672,6 +1801,12 @@ def _interactive_actual_cfd_payload(
             "cell-centred U magnitude; used by streamlines, XY sections, "
             "XZ sections, vectors, and ports"
         ),
+        "pressure_available": True,
+        "pressure_reference_pa": outlet_pressure,
+        "pressure_semantics": (
+            "direct coolant-cell absolute p minus outlet area-average p; "
+            "displayed as gauge pressure on XY/XZ/YZ sections"
+        ),
         "streamlines": browser_paths,
         "streamline_count": len(browser_paths),
         "source_streamline_count": len(all_paths),
@@ -1681,7 +1816,7 @@ def _interactive_actual_cfd_payload(
         "direct_xy_velocity": _direct_precision_xy_velocity_cut(
             config, case, production_profile=production_profile
         ),
-        "horizontal_section_keys": ["xy15", "xy33", "xy", "xy68", "xy85"],
+        "horizontal_section_keys": ["xy04", "xy15", "xy33", "xy", "xy68", "xy85", "xy96"],
         "vertical_section_keys": ["xz15", "xz33", "xz50", "xz68", "xz85"],
         "transverse_section_keys": ["yz15", "yz33", "yz50", "yz68", "yz85"],
     }
@@ -1723,11 +1858,19 @@ HTML = '''<!doctype html>
           <legend>결과 화면</legend>
           <label><input type="radio" name="viz-mode" value="combined" checked><span>종합 화면</span></label>
           <label><input type="radio" name="viz-mode" value="cell-temperature"><span>셀 온도</span></label>
+          <label><input type="radio" name="viz-mode" value="cell-extrema-map"><span>셀 최고·최저 온도</span></label>
           <label><input type="radio" name="viz-mode" value="velocity-streamlines"><span>유체 유선</span></label>
+          <label><input type="radio" name="viz-mode" value="xy-location"><span>가로 단면 위치</span></label>
           <label><input type="radio" name="viz-mode" value="xy-temperature"><span>가로 단면 온도</span></label>
           <label><input type="radio" name="viz-mode" value="xy-velocity"><span>가로 단면 유속</span></label>
+          <label><input type="radio" name="viz-mode" value="xy-mass-flow"><span>가로 단면 질량유량</span></label>
+          <label><input type="radio" name="viz-mode" value="xy-pressure"><span>가로 단면 압력</span></label>
+          <label><input type="radio" name="viz-mode" value="surface-heat-transfer"><span>배터리 표면 열전달계수</span></label>
+          <label><input type="radio" name="viz-mode" value="xz-location"><span>세로 단면 위치</span></label>
           <label><input type="radio" name="viz-mode" value="xz-temperature"><span>세로 단면 온도</span></label>
           <label><input type="radio" name="viz-mode" value="xz-velocity"><span>세로 단면 유속</span></label>
+          <label><input type="radio" name="viz-mode" value="xz-mass-flow"><span>세로 단면 질량유량</span></label>
+          <label><input type="radio" name="viz-mode" value="xz-pressure"><span>세로 단면 압력</span></label>
         </fieldset>
         <div class="control-head">
           <div class="toolbar" aria-label="camera views">
@@ -1747,12 +1890,15 @@ HTML = '''<!doctype html>
             <label><input id="show-grid" type="checkbox"> 샘플선</label>
             <input id="show-mesh" type="checkbox" hidden>
             <label title="셀 표면과 실제 유효 단면 샘플 사이만 부드럽게 연결하며 무효영역은 채우지 않습니다"><input id="smooth-section" type="checkbox" checked> 부드러운 색상</label>
-            <label id="section-3d-option" title="가로 단면을 회전·확대 가능한 3D 평면으로 표시합니다" hidden><input id="section-3d" type="checkbox" checked> 3D 단면</label>
+            <label id="section-3d-option" title="가로·세로 단면을 회전·확대 가능한 3D 평면으로 표시합니다" hidden><input id="section-3d" type="checkbox" checked> 3D 단면</label>
             <label><input id="show-enclosure" type="checkbox" checked> 외곽선</label>
             <label><input id="show-temperature-legend" type="checkbox" checked> 온도 범례</label>
             <label><input id="show-velocity-legend" type="checkbox" checked> 속도 범례</label>
+            <label><input id="show-mass-flow-legend" type="checkbox" checked> 질량유량 범례</label>
+            <label><input id="show-pressure-legend" type="checkbox" checked> 압력 범례</label>
+            <label><input id="show-heat-transfer-legend" type="checkbox" checked> 열전달계수 범례</label>
             <label><input id="show-port-callouts" type="checkbox" checked> 입·출구 정보</label>
-            <label><input id="show-extrema-callouts" type="checkbox" checked> 최대·최소</label>
+            <label><input id="show-extrema-callouts" type="checkbox" checked> 최고 온도 지점</label>
             <button id="reset-overlays" type="button">표시 위치 초기화</button>
             <button id="flow-only" type="button">유동만</button>
             <button id="show-all" type="button">전체</button>
@@ -1774,11 +1920,13 @@ HTML = '''<!doctype html>
         </fieldset>
         <fieldset id="horizontal-sections" class="section-positions horizontal-sections" aria-label="horizontal XY section positions" hidden>
           <legend>가로 XY 위치</legend>
+          <label><input type="radio" name="horizontal-section" value="xy04"> 하부 간극 3.5 mm</label>
           <label><input type="radio" name="horizontal-section" value="xy15"> Z 15%</label>
           <label><input type="radio" name="horizontal-section" value="xy33"> Z 32.5%</label>
           <label><input type="radio" name="horizontal-section" value="xy" checked> Z 50%</label>
           <label><input type="radio" name="horizontal-section" value="xy68"> Z 67.5%</label>
           <label><input type="radio" name="horizontal-section" value="xy85"> Z 85%</label>
+          <label><input type="radio" name="horizontal-section" value="xy96"> 상부 간극 78.5 mm</label>
           <button id="horizontal-centre" type="button">중앙</button>
           <output id="horizontal-section-state">Z = 41.0 mm · 직접 단면</output>
         </fieldset>
@@ -1860,6 +2008,7 @@ HTML = '''<!doctype html>
               <option value="per-cell">5. 각 배터리별 온도</option>
               <option value="energy-balance">6. 에너지 수지</option>
               <option value="key-cells">7. 주요 배터리 5셀 온도</option>
+              <option value="cell-extrema">8. 각 셀 최고·최저 온도</option>
             </select>
             <label id="per-cell-metric-label" for="per-cell-metric" hidden>셀 기준</label>
             <select id="per-cell-metric" hidden>
@@ -1867,6 +2016,8 @@ HTML = '''<!doctype html>
               <option value="surface_area_average_c">표면 면적평균</option>
               <option value="mesh_maximum_c">mesh 최고값</option>
             </select>
+            <label id="cell-extrema-cell-label" for="cell-extrema-cell" hidden>배터리 셀</label>
+            <select id="cell-extrema-cell" hidden aria-label="battery cell for maximum and minimum temperature"></select>
             <button id="temperature-chart-png" type="button">PNG 추출</button>
             <button id="temperature-chart-csv" type="button">현재 CSV</button>
             <button id="temperature-chart-all-csv" type="button">전체 CSV</button>
@@ -1903,9 +2054,16 @@ HTML = '''<!doctype html>
         <div class="kpi-grid" aria-label="주요 CFD 결과">
           <article><span>출구 평균 온도</span><strong id="kpi-outlet-temperature">—</strong><small id="kpi-outlet-time">현재 시점</small></article>
           <article><span>최고 셀 온도</span><strong id="kpi-cell-maximum">—</strong><small id="kpi-cell-time">23개 셀 · 현재 시점</small></article>
+          <article><span>표면 최고온도 지점</span><strong id="kpi-cell-hotspot">—</strong><small id="kpi-cell-hotspot-location">배터리 표면 실제 샘플 좌표</small></article>
           <article><span>입구 유속</span><strong id="kpi-inlet-velocity">—</strong><small>면적 평균</small></article>
           <article><span>압력 강하</span><strong id="kpi-pressure-drop">—</strong><small>입구 − 출구</small></article>
+          <article><span>입구 질량유량</span><strong id="kpi-inlet-mass-flow">—</strong><small>면적 적분 |φ|</small></article>
+          <article><span>출구 질량유량</span><strong id="kpi-outlet-mass-flow">—</strong><small>질량보존 확인</small></article>
+          <article id="kpi-htc-average-card" hidden><span>표면 평균 h</span><strong id="kpi-htc-average">—</strong><small>현재 시각 · 전체 유효 표본</small></article>
+          <article id="kpi-htc-minimum-card" hidden><span>표면 최소 h</span><strong id="kpi-htc-minimum">—</strong><small>현재 시각 · 직접 표본</small></article>
+          <article id="kpi-htc-maximum-card" hidden><span>표면 최대 h</span><strong id="kpi-htc-maximum">—</strong><small>현재 시각 · 직접 표본</small></article>
         </div>
+        <p class="result-meta"><a href="battery_hotspots_1800s.csv" download>Ø19–Ø34 · 1800 s 최고온도 지점 CSV</a></p>
         <p id="calculation-summary" class="result-meta"><strong>CFD 미실행</strong></p>
         <p id="calculation-note" hidden></p>
       </section>
@@ -1924,6 +2082,15 @@ HTML = '''<!doctype html>
         <h2>CFD 수렴 모니터</h2>
         <dl id="convergence-summary"></dl>
         <button id="convergence-chart-open" type="button">수렴 그래프 열기</button>
+      </section>
+      <section id="failed-convergence-card" class="card failed-convergence-card" hidden>
+        <div class="card-title-row">
+          <h2>Ø34 실패 수렴 기록</h2>
+          <span class="result-badge failed">검증 실패</span>
+        </div>
+        <dl id="failed-convergence-summary"></dl>
+        <p>합격 결과 목록과 분리된 진단 자료이며, 실제 OpenFOAM 로그를 표시합니다.</p>
+        <button id="failed-convergence-chart-open" type="button">실패 수렴 그래프 열기</button>
       </section>
       <section class="card temperature-export-card">
         <h2>온도 그래프</h2>
@@ -2028,6 +2195,8 @@ main { display:grid; grid-template-columns:minmax(0,1fr) 330px; align-items:star
 .viz-modes label:has(input:checked) { border-bottom-color:var(--accent); color:#0a638d; background:var(--accent-soft); }
 .viz-modes label:focus-within { outline:2px solid #168ac155; outline-offset:-2px; }
 .viz-modes input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+.viz-modes label:has(input[value="cell-extrema-map"]) { flex-basis:150px; font-weight:750; }
+.control-head[hidden] { display:none; }
 .display-options { display:flex; align-items:center; justify-content:flex-end; gap:6px 10px; flex-wrap:wrap;
   margin:0; padding:0; border:0; color:#4d5d67; font-size:11px; }
 .display-options[hidden] { display:none; }
@@ -2104,6 +2273,10 @@ button.active { color:#fff; background:#167dac; border-color:#167dac; }
 #temperature-chart-status,#convergence-chart-status { min-height:20px; color:#536874; font-size:11px; font-variant-numeric:tabular-nums; }
 .temperature-export-card dl { margin-bottom:11px; }
 #temperature-chart-open,#convergence-chart-open { width:100%; border-color:#1685b3; color:#fff; background:#1685b3; }
+#failed-convergence-chart-open { width:100%; border-color:#b42318; color:#fff; background:#b42318; }
+.failed-convergence-card { border-left:4px solid #b42318; background:#fff8f7; }
+.failed-convergence-card p { margin:8px 0 11px; color:#7a271a; font-size:11px; line-height:1.5; }
+.result-badge.failed { color:#b42318; background:#fee4e2; }
 .mesh-run-card label { display:block; margin-bottom:5px; color:var(--muted); font-size:10px; font-weight:700; }
 .mesh-run-card select { width:100%; margin-bottom:11px; padding:8px; border:1px solid #b9cbd4; border-radius:4px; color:#243946; background:#f8fbfc; font-weight:700; }
 .mesh-run-card dl,.convergence-card dl { margin-bottom:11px; }
@@ -2277,10 +2450,13 @@ const activeCalculationNote=(model.calculation_note_by_mesh||{})[activeMeshRunId
 const activeDerived=(model.derived_by_mesh||{})[activeMeshRunId]||model.derived;
 const activeInputs=(model.inputs_by_mesh||{})[activeMeshRunId]||model.inputs;
 const flow=(model.interactive_cfd_by_mesh||{})[activeMeshRunId]||{enabled:false};
+const flowLegendContract=model.flow_legend_contract||{};
 const temperatureGraphs=flow.temperature_graphs||null;
 const energyBalance=(model.energy_balance_by_mesh||{})[activeMeshRunId]||model.energy_balance||{available:false};
 const convergenceBundle=(model.convergence_by_mesh||{})[activeMeshRunId]||model.convergence||{available:false};
-const convergenceHistories=convergenceBundle.histories?.length?convergenceBundle.histories:[convergenceBundle];
+const validatedConvergenceHistories=convergenceBundle.histories?.length?convergenceBundle.histories:[convergenceBundle];
+const failedConvergenceHistories=(model.failed_convergence_histories||[]).filter(history=>history?.available);
+const convergenceHistories=[...validatedConvergenceHistories,...failedConvergenceHistories];
 let convergence=convergenceHistories.find(history=>history.id===convergenceBundle.default_history_id)||convergenceHistories[0]||{available:false};
 const meshRunSelect=document.getElementById("mesh-run-select");
 const meshRunDetail=document.getElementById("mesh-run-detail");
@@ -2299,6 +2475,7 @@ const portState = document.getElementById("port-state");
 const dataLoadStatus = document.getElementById("data-load-status");
 const modeFieldset = document.getElementById("viz-modes");
 const modeInputs = Array.from(document.querySelectorAll('input[name="viz-mode"]'));
+const controlHead = document.querySelector(".control-head");
 const displayOptions = document.getElementById("display-options");
 const smoothSectionInput = document.getElementById("smooth-section");
 const section3DInput = document.getElementById("section-3d");
@@ -2321,15 +2498,19 @@ const canvasNote = document.getElementById("canvas-note");
 const cellToast = document.getElementById("cell-toast");
 const dashboard={
   outlet:document.getElementById("kpi-outlet-temperature"),cellMaximum:document.getElementById("kpi-cell-maximum"),
+  cellHotspot:document.getElementById("kpi-cell-hotspot"),cellHotspotLocation:document.getElementById("kpi-cell-hotspot-location"),
   inletVelocity:document.getElementById("kpi-inlet-velocity"),pressureDrop:document.getElementById("kpi-pressure-drop"),
-  outletTime:document.getElementById("kpi-outlet-time"),cellTime:document.getElementById("kpi-cell-time")
+  inletMassFlow:document.getElementById("kpi-inlet-mass-flow"),outletMassFlow:document.getElementById("kpi-outlet-mass-flow"),
+  outletTime:document.getElementById("kpi-outlet-time"),cellTime:document.getElementById("kpi-cell-time"),
+  htcAverage:document.getElementById("kpi-htc-average"),htcMinimum:document.getElementById("kpi-htc-minimum"),htcMaximum:document.getElementById("kpi-htc-maximum"),
+  htcCards:[document.getElementById("kpi-htc-average-card"),document.getElementById("kpi-htc-minimum-card"),document.getElementById("kpi-htc-maximum-card")]
 };
-const visibility={cells:true,flow:true,particles:true,section:true,grid:false,mesh:false,enclosure:true,temperatureLegend:true,velocityLegend:true,ports:true,extrema:true};
+const visibility={cells:true,flow:true,particles:true,section:true,grid:false,mesh:false,enclosure:true,temperatureLegend:true,velocityLegend:true,massFlowLegend:true,pressureLegend:true,heatTransferLegend:true,ports:true,extrema:true};
 const optionInputs={
   cells:document.getElementById("show-cells"),flow:document.getElementById("show-flow"),
   particles:document.getElementById("show-particles"),section:document.getElementById("show-section"),
   grid:document.getElementById("show-grid"),mesh:document.getElementById("show-mesh"),enclosure:document.getElementById("show-enclosure"),
-  temperatureLegend:document.getElementById("show-temperature-legend"),velocityLegend:document.getElementById("show-velocity-legend"),ports:document.getElementById("show-port-callouts"),extrema:document.getElementById("show-extrema-callouts")
+  temperatureLegend:document.getElementById("show-temperature-legend"),velocityLegend:document.getElementById("show-velocity-legend"),massFlowLegend:document.getElementById("show-mass-flow-legend"),pressureLegend:document.getElementById("show-pressure-legend"),heatTransferLegend:document.getElementById("show-heat-transfer-legend"),ports:document.getElementById("show-port-callouts"),extrema:document.getElementById("show-extrema-callouts")
 };
 // Overlay dimensions and default anchors changed with the large-screen UI.
 // Use a new key so positions saved for the smaller boxes do not stack the
@@ -2353,9 +2534,11 @@ function overlayAt(x,y){return [...overlayHitboxes].reverse().find(box=>x>=box.l
 // reversed when the viewer first opens.
 let yaw = -0.96, pitch = 0.52, zoom = 1, dragging = false, lastX = 0, lastY = 0;
 let highlightedCellId=null,cellHighlightTimer=null,cellExtremaCache={frame:-1,value:null};
+const cellTemperatureExtremaCache=new Map();
 const requestedCell=initialParams.get("cell");
 if(sceneCells.some(cell=>cell.id===requestedCell))highlightedCellId=requestedCell;
-const requestedMode=initialParams.get("mode");
+const requestedModeRaw=initialParams.get("mode");
+const requestedMode=requestedModeRaw==="xy-mass-flux"?"xy-mass-flow":requestedModeRaw==="xz-mass-flux"?"xz-mass-flow":requestedModeRaw;
 if(requestedMode){const requestedInput=modeInputs.find(input=>input.value===requestedMode);if(requestedInput){for(const input of modeInputs)input.checked=input===requestedInput;}}
 const requestedTime=Number(initialParams.get("t"));
 const overlayTargetFps=90;
@@ -2411,7 +2594,7 @@ async function loadActualDataset(name){
   if(!specification)return null;
   actualDatasetErrors.delete(name);
   const promise=actualDatasetBuffer(name,specification).then(buffer=>{
-    const encoded=new Uint16Array(buffer);
+    const encoded=specification.dtype==="float32-little-endian"?new Float32Array(buffer):new Uint16Array(buffer);
     const expected=specification.frame_count*specification.valid_count;
     if(encoded.length!==expected)throw new Error(`${name}: expected ${expected} samples, found ${encoded.length}`);
     const lookup=new Int32Array(specification.point_count);lookup.fill(-1);
@@ -2425,8 +2608,11 @@ async function loadActualDataset(name){
 function actualDatasetValue(name,pointIndex){
   const dataset=actualDatasets.get(name);if(!dataset)return null;
   const validIndex=dataset.lookup[pointIndex];if(validIndex<0)return null;
-  const frame=clamp(Math.round(simulationTime),0,dataset.specification.frame_count-1);
+  const step=Number(dataset.specification.time_step_s)||1,first=Number(dataset.specification.first_time_s)||0;
+  const frame=Math.round((simulationTime-first)/step);
+  if(frame<0||frame>=dataset.specification.frame_count)return null;
   const encoded=dataset.encoded[frame*dataset.specification.valid_count+validIndex];
+  if(dataset.specification.dtype==="float32-little-endian")return Number.isFinite(encoded)?encoded:null;
   const scale=actualOneSecond.temperature_encoding;
   return scale.minimum_k+encoded*scale.quantum_k-273.15;
 }
@@ -2470,6 +2656,7 @@ function cylinderFaces(cell,segments=24,axialSegments=1){
   return faces;
 }
 const cellSurface=flow.cell_surface||null;
+const cellSurfaceHeatTransfer=flow.cell_surface_heat_transfer||null;
 const waterTemperatureRunIds=new Set(["precision","single","exact_phi21","exact_phi23","exact_phi25"]);
 function sharedTemperatureRange(){
   // Display scales only: preserve every original CFD temperature sample.
@@ -2494,11 +2681,23 @@ for(let i=0;i<n;i++){const j=(i+1)%n;edges.push([i,j],[i+n,j+n],[i,i+n]);}
 
 function clamp(value,low=0,high=1){return Math.max(low,Math.min(high,value));}
 function velocityDisplayRange(){
-  const range=flow.velocity_range_m_s;
+  const range=flow.fixed_velocity_legend_range_m_s||flowLegendContract.fixed_velocity_legend_range_m_s;
   if(Array.isArray(range)&&range.length===2&&Number.isFinite(range[1])&&range[1]>range[0])return range;
   return [0,Math.max(1e-9,Number(flow.velocity_max_m_s)||0)];
 }
 function velocityDisplayMaximum(){return Math.max(1e-9,velocityDisplayRange()[1]);}
+function fluidDensity(){return Math.max(0,Number(activeInputs.fluid_density_kg_m3)||0);}
+function massFlowDisplayRange(){
+  const range=flow.fixed_mass_flow_legend_range_kg_s||flowLegendContract.fixed_mass_flow_legend_range_kg_s;
+  return Array.isArray(range)&&range.length===2&&Number.isFinite(range[1])&&range[1]>range[0]?range:[0,.0006];
+}
+function pressureDisplayRange(){
+  const range=flow.fixed_pressure_legend_range_pa||flowLegendContract.fixed_pressure_legend_range_pa;
+  return Array.isArray(range)&&range.length===2&&Number.isFinite(range[0])&&Number.isFinite(range[1])&&range[1]>range[0]?range:null;
+}
+function pressureAvailable(){
+  return Boolean(flow.pressure_available)&&Object.values(sections).some(section=>Array.isArray(section?.pressure_gauge_pa));
+}
 function jet(value){
   const t=clamp(value),r=clamp(1.5-Math.abs(4*t-3)),g=clamp(1.5-Math.abs(4*t-2)),b=clamp(1.5-Math.abs(4*t-1));
   return [Math.round(255*r),Math.round(255*g),Math.round(255*b)];
@@ -2519,10 +2718,10 @@ function temperaturePalette(value){
   return temperaturePaletteStops.at(-1)[1];
 }
 function cellSurfacePalette(value){
-  // Fluent's lit solid surfaces look a touch richer than their flat legend.
-  // Apply this only to the 3-D cylinders; the scalar mapping and legend stay fixed.
-  const colour=temperaturePalette(value),midpoint=(Math.max(...colour)+Math.min(...colour))/2;
-  return colour.map(channel=>Math.round(Math.max(0,Math.min(255,midpoint+(channel-midpoint)*1.10))));
+  // The rendered battery and the legend must use the exact same colour map.
+  // Do not apply a separate saturation or lighting correction here: doing so
+  // makes a colour on the 3-D model correspond to a different legend value.
+  return temperaturePalette(value);
 }
 function scalarPalette(value,field){return field==="temperature"?temperaturePalette(value):jet(value);}
 function activeMeshRun(){return meshRuns.find(run=>run.id===activeMeshRunId)||meshRuns[0]||null;}
@@ -2634,7 +2833,7 @@ function sectionRaster(section,field,range){
     const canvas=document.createElement("canvas");canvas.width=section.columns;canvas.height=section.rows;
     const context=canvas.getContext("2d");raster={canvas,context,pixels:context.createImageData(section.columns,section.rows),fixedReady:false};fields[field]=raster;
   }
-  if(field==="velocity"&&raster.fixedReady)return raster.canvas;
+  if(field!=="temperature"&&raster.fixedReady)return raster.canvas;
   raster.pixels.data.fill(0);
   // The smooth XY texture is placed with screen X decreasing and screen Y
   // increasing.  Reflected runs reverse the sampled Y row step, so derive
@@ -2642,13 +2841,13 @@ function sectionRaster(section,field,range){
   const flipColumn=section.column_step_mm[0]>0;
   const flipRow=section.row_step_mm[1]<0;
   for(let row=0;row<section.rows;row++)for(let column=0;column<section.columns;column++){
-    const index=row*section.columns+column,value=field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];
+    const index=row*section.columns+column,value=sectionFieldValue(section,field,index);
     if(!Number.isFinite(value))continue;
     const imageRow=flipRow?section.rows-1-row:row,imageColumn=flipColumn?section.columns-1-column:column;
     const colour=scalarPalette((value-range[0])/Math.max(1e-12,range[1]-range[0]),field),pixel=4*(imageRow*section.columns+imageColumn);
     raster.pixels.data[pixel]=colour[0];raster.pixels.data[pixel+1]=colour[1];raster.pixels.data[pixel+2]=colour[2];raster.pixels.data[pixel+3]=255;
   }
-  raster.context.putImageData(raster.pixels,0,0);if(field==="velocity")raster.fixedReady=true;return raster.canvas;
+  raster.context.putImageData(raster.pixels,0,0);if(field!=="temperature")raster.fixedReady=true;return raster.canvas;
 }
 function buildDirectXYVelocityCache(){
   if(directXYVelocityCache||!directXYVelocity)return directXYVelocityCache;
@@ -2730,7 +2929,7 @@ function drawDirectXYVelocity(w,h,showScalar=true){
 }
 function drawDirectXYGrid(section,field,w,h,showScalar=true){
   if(!section)return false;
-  const layout=directXYLayout(w,h),range=field==="temperature"?temperatureSectionRange(section):velocityDisplayRange();
+  const layout=directXYLayout(w,h),range=field==="temperature"?temperatureSectionRange(section):field==="pressure"?pressureDisplayRange():field==="mass-flow"?massFlowDisplayRange():velocityDisplayRange();
   ctx.save();ctx.beginPath();ctx.rect(layout.plotLeft,layout.plotTop,layout.plotRight-layout.plotLeft,layout.plotBottom-layout.plotTop);ctx.clip();
   ctx.fillStyle="rgba(7,16,27,.98)";ctx.fillRect(layout.left,layout.top,layout.width,layout.height);
   if(showScalar&&range){
@@ -2739,7 +2938,7 @@ function drawDirectXYGrid(section,field,w,h,showScalar=true){
       const fieldCanvas=sectionRaster(section,field,range);ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
       ctx.drawImage(fieldCanvas,layout.left,layout.top,layout.width,layout.height);
     }else for(let index=0;index<section.columns*section.rows;index++){
-      const value=field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];if(!Number.isFinite(value))continue;
+      const value=sectionFieldValue(section,field,index);if(!Number.isFinite(value))continue;
       const point=planePoint(section,index),x=layout.left+(box.x-point[0])*layout.scale,y=layout.top+point[1]*layout.scale;
       const colour=scalarPalette((value-range[0])/Math.max(1e-12,range[1]-range[0]),field);
       ctx.fillStyle=`rgb(${colour[0]},${colour[1]},${colour[2]})`;ctx.fillRect(x-stepX/2,y-stepY/2,stepX+.35,stepY+.35);
@@ -2854,6 +3053,39 @@ function temperatureColour(value,range,alpha=1){
   const [r,g,b]=temperaturePalette((value-range[0])/Math.max(1e-9,range[1]-range[0]));
   return alpha>=1?`rgb(${r},${g},${b})`:`rgba(${r},${g},${b},${alpha})`;
 }
+function surfaceHeatTransferValue(id,index){
+  if(!actualOneSecond||!cellSurfaceHeatTransfer?.actual_dataset||!Number.isInteger(index))return null;
+  const cellIndex=sceneCells.findIndex(cell=>cell.id===id);if(cellIndex<0)return null;
+  const specification=actualOneSecond.datasets?.[cellSurfaceHeatTransfer.actual_dataset];
+  if(!specification)return null;
+  return actualDatasetValue(cellSurfaceHeatTransfer.actual_dataset,cellIndex*specification.samples_per_cell+reflectedSurfaceIndex(index));
+}
+function heatTransferRange(){
+  const range=cellSurfaceHeatTransfer?.fixed_legend_range_w_m2k;
+  return Array.isArray(range)&&range.length===2&&range.every(Number.isFinite)&&range[1]>range[0]?range:null;
+}
+function heatTransferColour(value,range,alpha=1){
+  if(!Number.isFinite(value)||!range)return null;
+  const [r,g,b]=jet((value-range[0])/Math.max(1e-9,range[1]-range[0]));
+  return alpha>=1?`rgb(${r},${g},${b})`:`rgba(${r},${g},${b},${alpha})`;
+}
+let surfaceHeatTransferStatsCache={frame:null,value:null};
+function surfaceHeatTransferFrameStats(){
+  if(!cellSurfaceHeatTransfer?.actual_dataset)return null;
+  const dataset=actualDatasets.get(cellSurfaceHeatTransfer.actual_dataset);if(!dataset)return null;
+  const specification=dataset.specification,step=Number(specification.time_step_s)||1,first=Number(specification.first_time_s)||0;
+  const frame=Math.round((simulationTime-first)/step);
+  if(frame<0||frame>=specification.frame_count)return null;
+  if(surfaceHeatTransferStatsCache.frame===frame)return surfaceHeatTransferStatsCache.value;
+  const offset=frame*specification.valid_count,end=offset+specification.valid_count;
+  let minimum=Infinity,maximum=-Infinity,sum=0,count=0;
+  for(let index=offset;index<end;index++){
+    const value=dataset.encoded[index];if(!Number.isFinite(value))continue;
+    minimum=Math.min(minimum,value);maximum=Math.max(maximum,value);sum+=value;count++;
+  }
+  const value=count?{minimum,maximum,average:sum/count,count,total:specification.point_count}:null;
+  surfaceHeatTransferStatsCache={frame,value};return value;
+}
 function cellSurfaceRingIndex(cell,z){
   if(!cellSurface)return null;
   const rows=cellSurface.axial_segments,lower=cell.z-cell.length/2;
@@ -2869,15 +3101,53 @@ function cellSurfaceAtCut(cell,z,angle){
   if(!Number.isInteger(axial)||!Number.isInteger(angular))return null;
   return surfaceThermalValue(cell.id,axial*cellSurface.angular_segments+angular);
 }
+const horizontalCutAngularSubdivisions=4,horizontalCutRadialBands=8;
+const verticalCutAxialSubdivisions=4,verticalCutTransverseBands=16;
+function interpolatedCellSurfaceAtCut(cell,z,angle){
+  if(!cellSurface)return null;
+  const axial=cellSurfaceRingIndex(cell,z),segments=cellSurface.angular_segments;
+  if(!Number.isInteger(axial)||!segments)return null;
+  const turn=((angle%(2*Math.PI))+2*Math.PI)%(2*Math.PI),position=turn/(2*Math.PI)*segments-.5;
+  const left=Math.floor(position),weight=position-left;
+  const sample=column=>surfaceThermalValue(cell.id,axial*segments+((column%segments)+segments)%segments);
+  const a=sample(left),b=sample(left+1);
+  if(Number.isFinite(a)&&Number.isFinite(b))return a+weight*(b-a);
+  return Number.isFinite(a)?a:Number.isFinite(b)?b:null;
+}
+function projectedHorizontalCellTemperature(cell,surfaceValue,radialFraction){
+  const centreValue=cellSectionTemperature(cell.id);
+  if(!Number.isFinite(centreValue))return surfaceValue;
+  if(!Number.isFinite(surfaceValue))return centreValue;
+  return centreValue+clamp(radialFraction)*(surfaceValue-centreValue);
+}
+function interpolatedCellSurfaceAtAxial(cell,angular,axialFraction){
+  if(!cellSurface||!Number.isInteger(angular))return null;
+  const rows=cellSurface.axial_segments,segments=cellSurface.angular_segments,position=clamp(axialFraction)*rows-.5;
+  const lower=Math.floor(position),weight=position-lower;
+  const sample=row=>surfaceThermalValue(cell.id,clamp(row,0,rows-1)*segments+angular);
+  const a=sample(lower),b=sample(lower+1);
+  if(Number.isFinite(a)&&Number.isFinite(b))return a+weight*(b-a);
+  return Number.isFinite(a)?a:Number.isFinite(b)?b:null;
+}
+function projectedVerticalCellTemperature(cell,leftValue,rightValue,transverseFraction){
+  const centreValue=cellSectionTemperature(cell.id),fraction=clamp(transverseFraction);
+  if(Number.isFinite(centreValue)){
+    const edge=fraction<=.5?leftValue:rightValue,weight=fraction<=.5?fraction*2:(1-fraction)*2;
+    if(Number.isFinite(edge))return edge+weight*(centreValue-edge);
+    return centreValue;
+  }
+  if(Number.isFinite(leftValue)&&Number.isFinite(rightValue))return leftValue+fraction*(rightValue-leftValue);
+  return Number.isFinite(leftValue)?leftValue:rightValue;
+}
 function meanFinite(values){
   const valid=values.filter(Number.isFinite);return valid.length?valid.reduce((sum,value)=>sum+value,0)/valid.length:null;
 }
-function surfaceCornerTemperatures(face){
+function surfaceCornerValues(face,valueAt){
   if(!cellSurface||!Number.isInteger(face.surfaceIndex))return null;
   const segments=cellSurface.angular_segments,rows=cellSurface.axial_segments,sideCount=segments*rows;
   if(face.kind.endsWith("-side")&&Number.isInteger(face.axialIndex)){
     const axial=face.axialIndex,angular=face.angularIndex;
-    const sample=(row,column)=>surfaceThermalValue(face.id,clamp(row,0,rows-1)*segments+((column%segments)+segments)%segments);
+    const sample=(row,column)=>valueAt(face.id,clamp(row,0,rows-1)*segments+((column%segments)+segments)%segments);
     return [
       meanFinite([sample(axial,angular),sample(axial-1,angular),sample(axial,angular-1),sample(axial-1,angular-1)]),
       meanFinite([sample(axial,angular),sample(axial-1,angular),sample(axial,angular+1),sample(axial-1,angular+1)]),
@@ -2887,13 +3157,15 @@ function surfaceCornerTemperatures(face){
   }
   if(face.kind.endsWith("-cap")){
     const top=face.surfaceIndex>=sideCount+segments,base=sideCount+(top?segments:0),angular=face.surfaceIndex-base;
-    const sample=column=>surfaceThermalValue(face.id,base+((column%segments)+segments)%segments);
+    const sample=column=>valueAt(face.id,base+((column%segments)+segments)%segments);
     const centre=meanFinite(Array.from({length:segments},(_,index)=>sample(index)));
     const before=meanFinite([sample(angular-1),sample(angular)]),after=meanFinite([sample(angular),sample(angular+1)]);
     return top?[centre,before,after]:[centre,after,before];
   }
   return null;
 }
+function surfaceCornerTemperatures(face){return surfaceCornerValues(face,surfaceThermalValue);}
+function surfaceCornerHeatTransfer(face){return surfaceCornerValues(face,surfaceHeatTransferValue);}
 function surfaceSamplePoint(cell,surfaceIndex){
   surfaceIndex=reflectedSurfaceIndex(surfaceIndex);
   const segments=cellSurface.angular_segments,rows=cellSurface.axial_segments,sideCount=segments*rows;
@@ -2925,7 +3197,8 @@ function portMetrics(id){
   return {
     temperatureC:portTemperature(id),
     velocityMS:flow.port_flow?.[`${prefix}_mean_velocity_m_s`],
-    pressurePa:flow.port_flow?.[`${prefix}_area_average_pressure_pa`]
+    pressurePa:flow.port_flow?.[`${prefix}_area_average_pressure_pa`],
+    massFlowKgS:flow.port_flow?.[`${prefix}_mass_flow_kg_s`]
   };
 }
 function updateDashboardMetrics(inletMetrics=portMetrics("IN"),outletMetrics=portMetrics("OUT")){
@@ -2934,14 +3207,28 @@ function updateDashboardMetrics(inletMetrics=portMetrics("IN"),outletMetrics=por
   const cellMaximum=temperatureGraphs?.battery_mesh_maximum_c?.[timeIndex];
   dashboard.outlet.textContent=Number.isFinite(outletTemperature)?`${outletTemperature.toFixed(3)} °C`:"—";
   dashboard.cellMaximum.textContent=Number.isFinite(cellMaximum)?`${cellMaximum.toFixed(3)} °C`:"—";
+  const hotspot=cellSurfaceExtrema()?.maximum,hotspotPoint=hotspot?.point;
+  dashboard.cellHotspot.textContent=hotspot?`${hotspot.cellId} · ${hotspot.value.toFixed(3)} °C`:"—";
+  dashboard.cellHotspotLocation.textContent=hotspotPoint
+    ?`X ${hotspotPoint[0].toFixed(1)} · Y ${hotspotPoint[1].toFixed(1)} · Z ${hotspotPoint[2].toFixed(1)} mm · ${timeLabel}`
+    :`배터리 표면 실제 샘플 좌표 · ${timeLabel}`;
   dashboard.inletVelocity.textContent=Number.isFinite(inletMetrics.velocityMS)?`${inletMetrics.velocityMS.toFixed(3)} m/s`:"—";
   dashboard.pressureDrop.textContent=Number.isFinite(flow.port_flow?.pressure_drop_pa)?`${flow.port_flow.pressure_drop_pa.toFixed(1)} Pa`:"—";
+  dashboard.inletMassFlow.textContent=Number.isFinite(inletMetrics.massFlowKgS)?`${inletMetrics.massFlowKgS.toFixed(5)} kg/s`:"—";
+  dashboard.outletMassFlow.textContent=Number.isFinite(outletMetrics.massFlowKgS)?`${outletMetrics.massFlowKgS.toFixed(5)} kg/s`:"—";
   dashboard.outletTime.textContent=timeLabel;
   dashboard.cellTime.textContent=`23개 셀 · ${timeLabel}`;
+  const showHeatTransfer=visualMode==="surface-heat-transfer";
+  for(const card of dashboard.htcCards)card.hidden=!showHeatTransfer;
+  const heatTransferStats=showHeatTransfer?surfaceHeatTransferFrameStats():null;
+  dashboard.htcAverage.textContent=heatTransferStats?`${heatTransferStats.average.toFixed(1)} W/(m²·K)`:"—";
+  dashboard.htcMinimum.textContent=heatTransferStats?`${heatTransferStats.minimum.toFixed(1)} W/(m²·K)`:"—";
+  dashboard.htcMaximum.textContent=heatTransferStats?`${heatTransferStats.maximum.toFixed(1)} W/(m²·K)`:"—";
 }
 function updatePortStateText(inletMetrics=portMetrics("IN"),outletMetrics=portMetrics("OUT")){
   const temperatureSemantics=actualOneSecond?"T 원본(무보정)":"T 표시보정 +"+flow.temperature_display_offset_c.toFixed(3)+" K";
-  portState.textContent=`${temperatureSemantics} · IN T ${inletMetrics.temperatureC.toFixed(3)} °C / Ū ${inletMetrics.velocityMS.toFixed(3)} m/s / p̄ ${(inletMetrics.pressurePa/1000).toFixed(3)} kPa · OUT T ${outletMetrics.temperatureC.toFixed(3)} °C / Ū ${outletMetrics.velocityMS.toFixed(3)} m/s / p̄ ${(outletMetrics.pressurePa/1000).toFixed(3)} kPa · Δp ${flow.port_flow.pressure_drop_pa.toFixed(3)} Pa`;
+  const massFlow=value=>Number.isFinite(value)?`${value.toFixed(5)} kg/s`:"—";
+  portState.textContent=`${temperatureSemantics} · IN T ${inletMetrics.temperatureC.toFixed(3)} °C / Ū ${inletMetrics.velocityMS.toFixed(3)} m/s / ṁ ${massFlow(inletMetrics.massFlowKgS)} / p̄ ${(inletMetrics.pressurePa/1000).toFixed(3)} kPa · OUT T ${outletMetrics.temperatureC.toFixed(3)} °C / Ū ${outletMetrics.velocityMS.toFixed(3)} m/s / ṁ ${massFlow(outletMetrics.massFlowKgS)} / p̄ ${(outletMetrics.pressurePa/1000).toFixed(3)} kPa · Δp ${flow.port_flow.pressure_drop_pa.toFixed(3)} Pa`;
   updateDashboardMetrics(inletMetrics,outletMetrics);
 }
 function drawPortCallout(anchor,id,metrics,accent,w,h){
@@ -2983,18 +3270,33 @@ function thermalFaceGradient(face,points,range,fallback){
   }
   return gradient;
 }
+function heatTransferFaceGradient(face,points,range,fallback){
+  if(flowPlaying)return fallback;
+  const values=surfaceCornerHeatTransfer(face);
+  if(!smoothSectionInput.checked||!values||!values.every(Number.isFinite))return fallback;
+  let low=0,high=0;for(let index=1;index<values.length;index++){if(values[index]<values[low])low=index;if(values[index]>values[high])high=index;}
+  if(Math.abs(values[high]-values[low])<1e-10)return fallback;
+  const gradient=ctx.createLinearGradient(points[low].x,points[low].y,points[high].x,points[high].y);
+  for(const [position,index] of [[0,low],[.5,-1],[1,high]]){
+    const value=index<0?meanFinite(values):values[index],colour=jet((value-range[0])/Math.max(1e-9,range[1]-range[0]));
+    gradient.addColorStop(position,`rgb(${colour[0]},${colour[1]},${colour[2]})`);
+  }
+  return gradient;
+}
 function drawCellExtremumCallout(sample,title,accent,basis,scale,cx,cy,w,h,upper){
   if(!sample)return;
-  const uiScale=w>=1100?1.3:w>=760?1.15:1,anchor=projected(sample.point,basis,scale,cx,cy),boxWidth=Math.round(164*uiScale),boxHeight=Math.round(49*uiScale),pad=Math.round(8*uiScale);
+  const uiScale=w>=1100?1.3:w>=760?1.15:1,anchor=projected(sample.point,basis,scale,cx,cy),boxWidth=Math.round(224*uiScale),boxHeight=Math.round(67*uiScale),pad=Math.round(8*uiScale);
   const overlayId=upper?"extrema-max":"extrema-min";
   const position=overlayBoxPosition(overlayId,w,h,boxWidth,boxHeight,116,upper?22:h-boxHeight-22),left=position.left,top=position.top;
   registerOverlayHitbox(overlayId,left,top,boxWidth,boxHeight);
   const targetX=anchor.x<left?left:anchor.x>left+boxWidth?left+boxWidth:anchor.x,targetY=anchor.y<top?top:anchor.y>top+boxHeight?top+boxHeight:anchor.y;
   ctx.save();ctx.strokeStyle=accent;ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(anchor.x,anchor.y);ctx.lineTo(targetX,targetY);ctx.stroke();
-  ctx.beginPath();ctx.arc(anchor.x,anchor.y,5,0,2*Math.PI);ctx.fillStyle="rgba(6,16,25,.95)";ctx.fill();ctx.strokeStyle=accent;ctx.lineWidth=2;ctx.stroke();
+  ctx.beginPath();ctx.arc(anchor.x,anchor.y,6,0,2*Math.PI);ctx.fillStyle="rgba(6,16,25,.95)";ctx.fill();ctx.strokeStyle=accent;ctx.lineWidth=2.4;ctx.stroke();
+  ctx.beginPath();ctx.moveTo(anchor.x-10,anchor.y);ctx.lineTo(anchor.x+10,anchor.y);ctx.moveTo(anchor.x,anchor.y-10);ctx.lineTo(anchor.x,anchor.y+10);ctx.strokeStyle=accent;ctx.lineWidth=1.2;ctx.stroke();
   ctx.fillStyle="rgba(5,14,24,.94)";ctx.fillRect(left,top,boxWidth,boxHeight);ctx.strokeStyle=accent;ctx.lineWidth=1;ctx.strokeRect(left+.5,top+.5,boxWidth-1,boxHeight-1);
   ctx.fillStyle=accent;ctx.font=`800 ${Math.round(10*uiScale)}px system-ui`;ctx.fillText(`${title} · ${sample.cellId}`,left+pad,top+Math.round(16*uiScale));
-  ctx.fillStyle="rgba(239,247,252,.98)";ctx.font=`700 ${Math.round(11*uiScale)}px ui-monospace,monospace`;ctx.fillText(`${sample.value.toFixed(4)} °C · t ${Math.round(simulationTime)} s`,left+pad,top+Math.round(35*uiScale));ctx.restore();
+  ctx.fillStyle="rgba(239,247,252,.98)";ctx.font=`700 ${Math.round(11*uiScale)}px ui-monospace,monospace`;ctx.fillText(`${sample.value.toFixed(4)} °C · t ${Math.round(simulationTime)} s`,left+pad,top+Math.round(35*uiScale));
+  ctx.fillStyle="rgba(199,218,231,.98)";ctx.font=`650 ${Math.round(9*uiScale)}px ui-monospace,monospace`;ctx.fillText(`X ${sample.point[0].toFixed(1)} · Y ${sample.point[1].toFixed(1)} · Z ${sample.point[2].toFixed(1)} mm`,left+pad,top+Math.round(54*uiScale));ctx.restore();
 }
 function prepareFlowPathPhysics(path){
   if(path.physics)return path.physics;
@@ -3022,6 +3324,8 @@ function physicalFlowPoint(path,elapsedTimeS){
 }
 function drawScalarLegend(w,h,title,range,unit,legendId="legend",side="left"){
   if(!flow.enabled||!range)return;
+  const displayUnit=unit==="C"?"°C":unit;
+  const legendTitle=unit==="m/s"?"Velocity [m/s]":unit==="C"?"Temperature [°C]":`${title} [${displayUnit}]`;
   const uiScale=w>=1100?1.34:w>=760?1.17:1,[low,high]=range;
   // Keep the larger type requested for presentations, but adapt the number of
   // labelled ticks to the short embedded viewer. Fixed 19-label legends were
@@ -3035,11 +3339,8 @@ function drawScalarLegend(w,h,title,range,unit,legendId="legend",side="left"){
   const paletteStops=unit==="C"?temperaturePaletteStops:Array.from({length:9},(_,index)=>[index/8,jet(index/8)]);
   for(const [t,[r,g,b]] of paletteStops)gradient.addColorStop(t,`rgb(${r},${g},${b})`);
   ctx.fillStyle=gradient;ctx.fillRect(x,y,width,height);ctx.strokeStyle="rgba(230,240,250,.7)";ctx.strokeRect(x,y,width,height);
-  ctx.fillStyle="rgba(232,242,250,.96)";ctx.font=`700 ${Math.round(11*uiScale)}px system-ui`;ctx.fillText(title,x-1,y-Math.round(24*uiScale));
-  const colourSmooth=smoothSectionInput.checked&&["combined","cell-temperature","xy-temperature","xz-temperature"].includes(visualMode);
-  const scaleLabel=actualOneSecond?(colourSmooth?"RAW SAMPLES · DISPLAY SMOOTH":"RAW CFD · NO INTERPOLATION"):`DISPLAY CAL. +${flow.temperature_display_offset_c.toFixed(3)} K`;
-  ctx.fillStyle="rgba(145,168,188,.96)";ctx.font=`600 ${Math.round(9*uiScale)}px system-ui`;ctx.fillText(unit==="C"?scaleLabel:"ACTUAL CFD · GLOBAL U SCALE",x-1,y-Math.round(10*uiScale));
-  const tickFontPx=Math.round(9*uiScale),preferredIntervals=unit==="C"?10:9;
+  ctx.fillStyle="rgba(232,242,250,.96)";ctx.font=`700 ${Math.round(11*uiScale)}px system-ui`;ctx.fillText(legendTitle,x-1,y-Math.round(24*uiScale));
+  const tickFontPx=Math.round(9*uiScale),preferredIntervals=unit==="C"?10:legendId==="mass-flow-legend"?6:9;
   const intervals=Math.min(preferredIntervals,Math.max(4,Math.floor(height/Math.max(18,tickFontPx*1.7))));
   const fluentWaterTicks=unit==="C"&&Math.abs(low-19.908)<1e-9&&Math.abs(high-21.044)<1e-9
     ?[21.044,20.930,20.817,20.703,20.590,20.476,20.362,20.249,20.135,20.022,19.908]:null;
@@ -3049,13 +3350,13 @@ function drawScalarLegend(w,h,title,range,unit,legendId="legend",side="left"){
   for(let index=0;index<values.length;index++){
     const value=values[index],position=y+height*(high-value)/Math.max(1e-9,high-low);
     ctx.strokeStyle="rgba(235,243,249,.88)";ctx.lineWidth=.8;ctx.beginPath();ctx.moveTo(x+width,position);ctx.lineTo(x+width+Math.round(7*uiScale),position);ctx.stroke();
-    ctx.fillStyle="rgba(232,242,250,.96)";ctx.fillText(value.toFixed(3),x+width+Math.round(10*uiScale),position+Math.round(3*uiScale));
+    const tickLabel=legendId==="mass-flow-legend"?value.toFixed(6):value.toFixed(3);
+    ctx.fillStyle="rgba(232,242,250,.96)";ctx.fillText(tickLabel,x+width+Math.round(10*uiScale),position+Math.round(3*uiScale));
     if(!fluentWaterTicks&&index<values.length-1)for(let minor=1;minor<5;minor++){
       const nextY=y+height*(high-values[index+1])/Math.max(1e-9,high-low);
       const minorY=position+(nextY-position)*minor/5;ctx.strokeStyle="rgba(220,233,242,.58)";ctx.beginPath();ctx.moveTo(x+width,minorY);ctx.lineTo(x+width+Math.round(3*uiScale),minorY);ctx.stroke();
     }
   }
-  ctx.fillStyle="rgba(232,242,250,.96)";ctx.font=`700 ${Math.round(10*uiScale)}px system-ui`;ctx.fillText(`[${unit}]`,x-1,y+height+Math.round(18*uiScale));
 }
 function planePoint(section,index){
   const row=Math.floor(index/section.columns),column=index%section.columns;
@@ -3082,7 +3383,16 @@ function sectionTemperature(section,index){
   return Number.isFinite(a)?a:Number.isFinite(b)?b:null;
 }
 function sectionFieldValue(section,field,index){
-  return field==="temperature"?sectionTemperature(section,index):section.velocity_m_s[index];
+  if(field==="temperature")return sectionTemperature(section,index);
+  if(field==="pressure")return section.pressure_gauge_pa?.[index]??null;
+  if(field==="mass-flow"){
+    const vector=section.velocity_vectors_m_s?.[index],column=section.column_step_mm,row=section.row_step_mm;
+    if(!Array.isArray(vector)||vector.length<3||!Array.isArray(column)||column.length<3||!Array.isArray(row)||row.length<3)return null;
+    const areaVectorMm2=[column[1]*row[2]-column[2]*row[1],column[2]*row[0]-column[0]*row[2],column[0]*row[1]-column[1]*row[0]];
+    const normalVolumeFlow=Math.abs(vector[0]*areaVectorMm2[0]+vector[1]*areaVectorMm2[1]+vector[2]*areaVectorMm2[2])*1e-6;
+    return Number.isFinite(normalVolumeFlow)?fluidDensity()*normalVolumeFlow:null;
+  }
+  return section.velocity_m_s[index];
 }
 function bilinear(values,u,v){
   return values[0]*(1-u)*(1-v)+values[1]*u*(1-v)+values[2]*u*v+values[3]*(1-u)*v;
@@ -3114,8 +3424,8 @@ function drawDirectSampleTiles(section,field,basis,scale,cx,cy,range,alpha){
 }
 function drawSection(section,field,basis,scale,cx,cy,rangeOverride=null,alpha=.82,subdivisions=3){
   if(!section)return;
-  const range=rangeOverride||(field==="temperature"?section.temperature_range_c:velocityDisplayRange());
-  const directlySampled=field==="velocity"||(field==="temperature"&&actualOneSecond&&(section.actual_dataset||Math.round(simulationTime)===section.solid_temperature_time_s));
+  const range=rangeOverride||(field==="temperature"?section.temperature_range_c:field==="pressure"?pressureDisplayRange():field==="mass-flow"?massFlowDisplayRange():velocityDisplayRange());
+  const directlySampled=field!=="temperature"||(field==="temperature"&&actualOneSecond&&(section.actual_dataset||Math.round(simulationTime)===section.solid_temperature_time_s));
   if(directlySampled&&!smoothSectionInput.checked){drawDirectSampleTiles(section,field,basis,scale,cx,cy,range,alpha);return;}
   const quads=[];
   for(let row=0;row<section.rows-1;row++)for(let column=0;column<section.columns-1;column++){
@@ -3141,23 +3451,27 @@ function drawSection(section,field,basis,scale,cx,cy,rangeOverride=null,alpha=.8
   }
 }
 function drawDirectXYCellCuts(section,layout,range){
-  const z=section.origin_mm[2],segments=cellSurface?.angular_segments||32;
+  const z=section.origin_mm[2],sourceSegments=cellSurface?.angular_segments||32,displaySegments=sourceSegments*horizontalCutAngularSubdivisions;
   for(const cell of sceneCells){
     const lower=cell.z-cell.length/2,upper=cell.z+cell.length/2;
     if(z<lower-1e-6||z>upper+1e-6)continue;
     const centreX=layout.left+(box.x-cell.x)*layout.scale,centreY=layout.top+cell.y*layout.scale,radius=cell.radius*layout.scale;
-    const average=cellSectionTemperature(cell.id),baseColour=temperatureColour(average,range,.96);
-    if(baseColour&&!exactSolidSectionActive(section)){ctx.beginPath();ctx.arc(centreX,centreY,radius,0,2*Math.PI);ctx.fillStyle=baseColour;ctx.fill();}
-    // 링은 절단 높이에 가장 가까운 32×16 batterySolid 직접 표면표본이다.
-    // 원 내부 면색은 같은 시각의 직접 계산 셀 체적평균이며, 존재하지 않는
-    // 고체 내부 공간장을 임의 보간해 만든 값이 아니다.
-    for(let index=0;index<segments;index++){
-      const a0=2*Math.PI*index/segments,a1=2*Math.PI*(index+1)/segments;
-      const value=cellSurfaceAtCut(cell,z,.5*(a0+a1)),colour=temperatureColour(value,range,.99);
-      if(!colour)continue;
+    const projectedSurface=!exactSolidSectionActive(section),radialBands=projectedSurface?horizontalCutRadialBands:1;
+    // At intermediate times, colour the complete circular cut by projecting
+    // each directly sampled surface sector radially to the cell centre. At
+    // t=1800 s the stored batterySolid section remains underneath and only a
+    // thin direct-surface ring is overlaid.
+    for(let index=0;index<displaySegments;index++){
+      const a0=2*Math.PI*index/displaySegments,a1=2*Math.PI*(index+1)/displaySegments,midAngle=.5*(a0+a1);
+      const surfaceValue=interpolatedCellSurfaceAtCut(cell,z,midAngle);
       const point=(radial,angle)=>[layout.left+(box.x-(cell.x+radial*Math.cos(angle)))*layout.scale,layout.top+(cell.y+radial*Math.sin(angle))*layout.scale];
-      const points=[point(cell.radius*.84,a0),point(cell.radius,a0),point(cell.radius,a1),point(cell.radius*.84,a1)];
-      ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let item=1;item<points.length;item++)ctx.lineTo(points[item][0],points[item][1]);ctx.closePath();ctx.fillStyle=colour;ctx.fill();
+      for(let radial=0;radial<radialBands;radial++){
+        const r0=projectedSurface?cell.radius*radial/radialBands:cell.radius*.84,r1=projectedSurface?cell.radius*(radial+1)/radialBands:cell.radius;
+        const value=projectedSurface?projectedHorizontalCellTemperature(cell,surfaceValue,(radial+.5)/radialBands):surfaceValue,colour=temperatureColour(value,range,.99);
+        if(!colour)continue;
+        const points=r0<1e-9?[[centreX,centreY],point(r1,a0),point(r1,a1)]:[point(r0,a0),point(r1,a0),point(r1,a1),point(r0,a1)];
+        ctx.beginPath();ctx.moveTo(points[0][0],points[0][1]);for(let item=1;item<points.length;item++)ctx.lineTo(points[item][0],points[item][1]);ctx.closePath();ctx.fillStyle=colour;ctx.fill();
+      }
     }
     ctx.beginPath();ctx.arc(centreX,centreY,radius,0,2*Math.PI);ctx.strokeStyle="rgba(232,242,250,.94)";ctx.lineWidth=1;ctx.stroke();
   }
@@ -3168,23 +3482,24 @@ function fillProjectedCellCut(points,value,range,basis,scale,cx,cy,alpha){
   ctx.beginPath();ctx.moveTo(projectedPoints[0].x,projectedPoints[0].y);for(let index=1;index<projectedPoints.length;index++)ctx.lineTo(projectedPoints[index].x,projectedPoints[index].y);ctx.closePath();ctx.fillStyle=colour;ctx.fill();
 }
 function drawHorizontalCellCuts(section,basis,scale,cx,cy,range,alpha=.96){
-  const z=section.origin_mm[2],segments=cellSurface?.angular_segments||32;
+  const z=section.origin_mm[2],sourceSegments=cellSurface?.angular_segments||32,displaySegments=sourceSegments*horizontalCutAngularSubdivisions;
   for(const cell of sceneCells){
     const lower=cell.z-cell.length/2,upper=cell.z+cell.length/2;
     if(z<lower-1e-6||z>upper+1e-6)continue;
-    const ring=Array.from({length:segments},(_,index)=>{
-      const angle=2*Math.PI*index/segments;return [cell.x+cell.radius*Math.cos(angle),cell.y+cell.radius*Math.sin(angle),z];
+    const ring=Array.from({length:displaySegments},(_,index)=>{
+      const angle=2*Math.PI*index/displaySegments;return [cell.x+cell.radius*Math.cos(angle),cell.y+cell.radius*Math.sin(angle),z];
     });
-    if(!exactSolidSectionActive(section))fillProjectedCellCut(ring,cellSectionTemperature(cell.id),range,basis,scale,cx,cy,alpha);
-    for(let index=0;index<segments;index++){
-      const a0=2*Math.PI*index/segments,a1=2*Math.PI*(index+1)/segments,value=cellSurfaceAtCut(cell,z,.5*(a0+a1));
-      const points=[
-        [cell.x+.84*cell.radius*Math.cos(a0),cell.y+.84*cell.radius*Math.sin(a0),z],
-        [cell.x+cell.radius*Math.cos(a0),cell.y+cell.radius*Math.sin(a0),z],
-        [cell.x+cell.radius*Math.cos(a1),cell.y+cell.radius*Math.sin(a1),z],
-        [cell.x+.84*cell.radius*Math.cos(a1),cell.y+.84*cell.radius*Math.sin(a1),z]
-      ];
-      fillProjectedCellCut(points,value,range,basis,scale,cx,cy,.99);
+    const projectedSurface=!exactSolidSectionActive(section),radialBands=projectedSurface?horizontalCutRadialBands:1;
+    for(let index=0;index<displaySegments;index++){
+      const a0=2*Math.PI*index/displaySegments,a1=2*Math.PI*(index+1)/displaySegments,midAngle=.5*(a0+a1),surfaceValue=interpolatedCellSurfaceAtCut(cell,z,midAngle);
+      for(let radial=0;radial<radialBands;radial++){
+        const r0=projectedSurface?cell.radius*radial/radialBands:cell.radius*.84,r1=projectedSurface?cell.radius*(radial+1)/radialBands:cell.radius;
+        const value=projectedSurface?projectedHorizontalCellTemperature(cell,surfaceValue,(radial+.5)/radialBands):surfaceValue;
+        const points=r0<1e-9
+          ?[[cell.x,cell.y,z],[cell.x+r1*Math.cos(a0),cell.y+r1*Math.sin(a0),z],[cell.x+r1*Math.cos(a1),cell.y+r1*Math.sin(a1),z]]
+          :[[cell.x+r0*Math.cos(a0),cell.y+r0*Math.sin(a0),z],[cell.x+r1*Math.cos(a0),cell.y+r1*Math.sin(a0),z],[cell.x+r1*Math.cos(a1),cell.y+r1*Math.sin(a1),z],[cell.x+r0*Math.cos(a1),cell.y+r0*Math.sin(a1),z]];
+        fillProjectedCellCut(points,value,range,basis,scale,cx,cy,.99);
+      }
     }
     const projectedRing=ring.map(point=>projected(point,basis,scale,cx,cy));
     ctx.beginPath();ctx.moveTo(projectedRing[0].x,projectedRing[0].y);for(let index=1;index<projectedRing.length;index++)ctx.lineTo(projectedRing[index].x,projectedRing[index].y);ctx.closePath();ctx.strokeStyle="rgba(232,242,250,.92)";ctx.lineWidth=.9;ctx.stroke();
@@ -3203,15 +3518,30 @@ function drawVerticalCellCuts(section,basis,scale,cx,cy,range,alpha=.94){
     const lower=cell.z-cell.length/2,upper=cell.z+cell.length/2;
     const edgePoint=(position,z)=>isYZ?[fixed,position,z]:[position,fixed,z];
     const cut=[edgePoint(left,lower),edgePoint(right,lower),edgePoint(right,upper),edgePoint(left,upper)];
-    if(!exactSolidSectionActive(section))fillProjectedCellCut(cut,cellSectionTemperature(cell.id),range,basis,scale,cx,cy,alpha);
-    // 세로 절단면의 좌우 테두리는 그 위치와 높이에 대응하는 직접
-    // batterySolid 표면표본으로 칠한다. 내부 면은 정수 초 셀 체적평균이다.
-    for(const position of [left,right]){
-      const angle=isYZ?Math.atan2(position-cell.y,delta):Math.atan2(delta,position-cell.x),angular=cellSurfaceAngularIndex(angle);
-      for(let axial=0;axial<rows;axial++){
-        const value=Number.isInteger(angular)?surfaceThermalValue(cell.id,axial*segments+angular):null,colour=temperatureColour(value,range,.99);
+    const positions=[left,right],angularIndices=positions.map(position=>cellSurfaceAngularIndex(isYZ?Math.atan2(position-cell.y,delta):Math.atan2(delta,position-cell.x)));
+    const displayRows=rows*verticalCutAxialSubdivisions;
+    // Only t=1800 s has a stored batterySolid internal section. At every
+    // other second, subdivide the vertical cut into 64 x 16 display tiles.
+    // Their colours are constrained by the two directly sampled surfaces and
+    // the measured per-cell internal volume average. They are display
+    // interpolation tiles, not 1,024 independent CFD cells.
+    if(!exactSolidSectionActive(section))for(let axial=0;axial<displayRows;axial++){
+      const z0=lower+cell.length*axial/displayRows,z1=lower+cell.length*(axial+1)/displayRows,axialFraction=(axial+.5)/displayRows;
+      const leftValue=interpolatedCellSurfaceAtAxial(cell,angularIndices[0],axialFraction),rightValue=interpolatedCellSurfaceAtAxial(cell,angularIndices[1],axialFraction);
+      for(let column=0;column<verticalCutTransverseBands;column++){
+        const fraction0=column/verticalCutTransverseBands,fraction1=(column+1)/verticalCutTransverseBands,middleFraction=(column+.5)/verticalCutTransverseBands;
+        const a=left+(right-left)*fraction0,b=left+(right-left)*fraction1,value=projectedVerticalCellTemperature(cell,leftValue,rightValue,middleFraction);
+        fillProjectedCellCut([edgePoint(a,z0),edgePoint(b,z0),edgePoint(b,z1),edgePoint(a,z1)],value,range,basis,scale,cx,cy,alpha);
+      }
+    }
+    // Retain the two directly sampled surface traces so the origin of the
+    // projected colours remains visually explicit.
+    for(let side=0;side<2;side++){
+      const position=positions[side],angular=angularIndices[side];
+      for(let axial=0;axial<displayRows;axial++){
+        const value=interpolatedCellSurfaceAtAxial(cell,angular,(axial+.5)/displayRows),colour=temperatureColour(value,range,.99);
         if(!colour)continue;
-        const z0=lower+cell.length*axial/rows,z1=lower+cell.length*(axial+1)/rows;
+        const z0=lower+cell.length*axial/displayRows,z1=lower+cell.length*(axial+1)/displayRows;
         const a=projected(edgePoint(position,z0),basis,scale,cx,cy),b=projected(edgePoint(position,z1),basis,scale,cx,cy);
         ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.strokeStyle=colour;ctx.lineWidth=2.1;ctx.stroke();
       }
@@ -3252,8 +3582,18 @@ function verticalSelection(){
 function verticalViewName(){
   return verticalSection()?.kind==="yz"?"px":"py";
 }
+function vertical2DView(w,h){
+  const section=verticalSection(),kind=section?.kind||"yz";
+  const horizontalExtent=kind==="yz"?box.y:box.x;
+  const plotLeft=96,plotRight=Math.max(plotLeft+160,w-28),plotTop=58,plotBottom=Math.max(plotTop+160,h-104);
+  const scale=Math.min((plotRight-plotLeft)/Math.max(1,horizontalExtent),(plotBottom-plotTop)/Math.max(1,box.z))*zoom;
+  const basis=kind==="yz"?{direction:[1,0,0],right:[0,1,0],up:[0,0,1]}:{direction:[0,1,0],right:[-1,0,0],up:[0,0,1]};
+  return {basis,scale,cx:(plotLeft+plotRight)/2,cy:(plotTop+plotBottom)/2,plotLeft,plotRight,plotTop,plotBottom};
+}
 function verticalRange(field){
   if(field==="velocity")return velocityDisplayRange();
+  if(field==="mass-flow")return massFlowDisplayRange();
+  if(field==="pressure")return pressureDisplayRange();
   const selected=verticalSelection(),ranges=selected.map(section=>field==="temperature"?temperatureSectionRange(section):section.velocity_range_m_s).filter(Boolean);
   if(!ranges.length)return null;
   return [Math.min(...ranges.map(range=>range[0])),Math.max(...ranges.map(range=>range[1]))];
@@ -3272,6 +3612,69 @@ function drawSectionLabel(section,basis,scale,cx,cy){
   const width=ctx.measureText(label).width+8;
   ctx.fillStyle="rgba(5,14,24,.82)";ctx.fillRect(point.x+4,point.y-15,width,15);
   ctx.fillStyle="rgba(255,215,149,.98)";ctx.fillText(label,point.x+8,point.y-4);ctx.restore();
+}
+function sectionLocationMetrics(section){
+  if(!section)return null;
+  const kind=(section.kind||"xy").toLowerCase();
+  const axis=kind==="xy"?"Z":kind==="yz"?"X":"Y",axisIndex=axis==="X"?0:axis==="Y"?1:2;
+  const length=axis==="X"?box.x:axis==="Y"?box.y:box.z,distance=Number(section.origin_mm?.[axisIndex]);
+  if(!Number.isFinite(length)||!Number.isFinite(distance)||length<=0)return null;
+  return {kind:kind.toUpperCase(),axis,length,distance,ratio:100*distance/length};
+}
+function sectionLocationPlane(section){
+  const marginX=Math.max(7,box.x*.09),marginY=Math.max(7,box.y*.09),marginZ=Math.max(7,box.z*.09),kind=(section?.kind||"xy").toLowerCase();
+  if(kind==="xy"){
+    const z=section.origin_mm[2];return [[-marginX,-marginY,z],[box.x+marginX,-marginY,z],[box.x+marginX,box.y+marginY,z],[-marginX,box.y+marginY,z]];
+  }
+  if(kind==="yz"){
+    const x=section.origin_mm[0];return [[x,-marginY,-marginZ],[x,box.y+marginY,-marginZ],[x,box.y+marginY,box.z+marginZ],[x,-marginY,box.z+marginZ]];
+  }
+  const y=section.origin_mm[1];return [[-marginX,y,-marginZ],[box.x+marginX,y,-marginZ],[box.x+marginX,y,box.z+marginZ],[-marginX,y,box.z+marginZ]];
+}
+function drawLocationMeasureLine(section,metrics,basis,scale,cx,cy){
+  const marginX=Math.max(7,box.x*.09),marginY=Math.max(7,box.y*.09),marginZ=Math.max(7,box.z*.09);
+  let start,end,cut;
+  if(metrics.axis==="Z"){
+    start=[-marginX,-marginY,0];end=[-marginX,-marginY,box.z];cut=[-marginX,-marginY,metrics.distance];
+  }else if(metrics.axis==="X"){
+    start=[0,-marginY,-marginZ];end=[box.x,-marginY,-marginZ];cut=[metrics.distance,-marginY,-marginZ];
+  }else{
+    start=[-marginX,0,-marginZ];end=[-marginX,box.y,-marginZ];cut=[-marginX,metrics.distance,-marginZ];
+  }
+  const a=projected(start,basis,scale,cx,cy),b=projected(end,basis,scale,cx,cy),marker=projected(cut,basis,scale,cx,cy);
+  ctx.save();ctx.lineCap="round";
+  ctx.strokeStyle="rgba(255,255,255,.82)";ctx.lineWidth=1.4;ctx.setLineDash([5,4]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.setLineDash([]);
+  ctx.strokeStyle="rgba(255,52,52,.98)";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(marker.x-7,marker.y-7);ctx.lineTo(marker.x+7,marker.y+7);ctx.moveTo(marker.x+7,marker.y-7);ctx.lineTo(marker.x-7,marker.y+7);ctx.stroke();
+  ctx.fillStyle="rgba(255,255,255,.95)";ctx.font="700 10px ui-monospace,monospace";ctx.fillText("0",a.x+6,a.y-6);ctx.fillText(`${metrics.axis} ${metrics.length.toFixed(1)} mm`,b.x+6,b.y-6);
+  ctx.fillStyle="rgba(255,92,92,.99)";ctx.fillText(`${metrics.distance.toFixed(1)} mm`,marker.x+10,marker.y+14);ctx.restore();
+}
+function drawSectionLocationCard(section,metrics,w){
+  const width=Math.min(292,Math.max(236,w*.34)),height=174,left=Math.max(12,w-width-16),top=15;
+  ctx.save();ctx.fillStyle="rgba(8,18,28,.94)";ctx.strokeStyle="rgba(255,61,61,.92)";ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.roundRect(left,top,width,height,7);ctx.fill();ctx.stroke();
+  ctx.fillStyle="rgba(255,83,83,.99)";ctx.font="800 14px system-ui";ctx.fillText(`${metrics.kind} 절단면 위치`,left+15,top+25);
+  ctx.strokeStyle="rgba(255,83,83,.35)";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(left+14,top+35);ctx.lineTo(left+width-14,top+35);ctx.stroke();
+  const rows=[
+    ["축 전체 길이",`${metrics.axis} = ${metrics.length.toFixed(1)} mm`],
+    ["절단 축",`${metrics.axis}축 (${metrics.kind} 평면)`],
+    ["원점부터 거리",`${metrics.distance.toFixed(1)} mm`],
+    ["위치 비율",`${metrics.ratio.toFixed(1)} %`]
+  ];
+  rows.forEach(([label,value],index)=>{
+    const y=top+58+index*27;ctx.fillStyle="rgba(178,197,211,.96)";ctx.font="650 11px system-ui";ctx.fillText(label,left+15,y);
+    ctx.textAlign="right";ctx.fillStyle="rgba(255,255,255,.98)";ctx.font="800 12px ui-monospace,monospace";ctx.fillText(value,left+width-15,y);ctx.textAlign="left";
+  });
+  ctx.restore();
+}
+function drawSectionLocationGuide(section,basis,scale,cx,cy,w){
+  const metrics=sectionLocationMetrics(section);if(!metrics)return;
+  const points=sectionLocationPlane(section).map(point=>projected(point,basis,scale,cx,cy));
+  ctx.save();ctx.beginPath();ctx.moveTo(points[0].x,points[0].y);for(let index=1;index<points.length;index++)ctx.lineTo(points[index].x,points[index].y);ctx.closePath();
+  ctx.fillStyle="rgba(255,28,28,.13)";ctx.fill();ctx.strokeStyle="rgba(255,50,50,.99)";ctx.lineWidth=3;ctx.stroke();
+  for(const point of points){ctx.fillStyle="rgba(255,58,58,.99)";ctx.fillRect(point.x-3,point.y-3,6,6);}
+  ctx.restore();
+  drawLocationMeasureLine(section,metrics,basis,scale,cx,cy);
+  drawSectionLocationCard(section,metrics,w);
 }
 function drawSectionVelocity(section,basis,scale,cx,cy,movingOnly=false,targetContext=ctx){
   if(!section||!section.velocity_vectors_m_s)return;
@@ -3397,17 +3800,26 @@ function drawScene(){
     ctx.fillText("다른 메시의 결과를 이 옵션에 대신 표시하지 않습니다.",w/2,h/2+21);
     ctx.textAlign="left";return;
   }
+  if(visualMode==="cell-extrema-map"){
+    drawCellExtremaMap(w,h);
+    if(flow.enabled){updatePortStateText();updateFlowClock();}
+    return;
+  }
   const basis=cameraBasis(), scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
   const cx=w/2,cy=h/2+8;
   // 단면 온도 모드에서는 원통 전체 표면을 칠하지 않는다. 절단 평면과
   // 실제로 교차한 셀 단면만 아래 drawCellSectionCuts에서 온도색으로 표시한다.
   const thermalCells=["combined","cell-temperature"].includes(visualMode);
+  const heatTransferSurface=visualMode==="surface-heat-transfer";
   const thermalDisplay=flow.enabled&&(thermalCells||visualMode.endsWith("-temperature"));
-  const velocityDisplay=flow.enabled&&["velocity-streamlines","xy-velocity","xz-velocity"].includes(visualMode);
+  const velocityDisplay=flow.enabled&&["velocity-streamlines","xy-velocity","xz-velocity","xy-mass-flow","xz-mass-flow"].includes(visualMode);
   const sectionMode=visualMode.startsWith("xy-")||visualMode.startsWith("xz-");
-  if(visualMode.startsWith("xy-")&&!section3DInput.checked&&horizontalSection()){
+  const locationGuideMode=visualMode.endsWith("-location");
+  if(visualMode.startsWith("xy-")&&!locationGuideMode&&!section3DInput.checked&&horizontalSection()){
     const selectedHorizontal=horizontalSection();
     if(visualMode==="xy-temperature")drawDirectXYGrid(selectedHorizontal,"temperature",w,h,visibility.section);
+    else if(visualMode==="xy-pressure")drawDirectXYGrid(selectedHorizontal,"pressure",w,h,visibility.section);
+    else if(visualMode==="xy-mass-flow")drawDirectXYGrid(selectedHorizontal,"mass-flow",w,h,visibility.section);
     else if(smoothSectionInput.checked)drawDirectXYGrid(selectedHorizontal,"velocity",w,h,visibility.section);
     else if(horizontalSectionKey()==="xy"&&directXYVelocity)drawDirectXYVelocity(w,h,visibility.section);
     else drawDirectXYGrid(selectedHorizontal,"velocity",w,h,visibility.section);
@@ -3416,6 +3828,30 @@ function drawScene(){
       updatePortStateText();
       if(visibility.temperatureLegend&&visibility.section&&visualMode==="xy-temperature")drawScalarLegend(w,h,"Fluid + cell cut T · XY",temperatureSectionRange(selectedHorizontal),"C");
       if(visibility.velocityLegend&&visibility.section&&visualMode==="xy-velocity")drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
+      if(visibility.massFlowLegend&&visibility.section&&visualMode==="xy-mass-flow")drawScalarLegend(w,h,"Mass flow rate",massFlowDisplayRange(),"kg/s","mass-flow-legend");
+      if(visibility.pressureLegend&&visibility.section&&visualMode==="xy-pressure")drawScalarLegend(w,h,"Gauge pressure · shared scale",pressureDisplayRange(),"Pa(g)","pressure-legend");
+      updateFlowClock();
+    }
+    return;
+  }
+  if(visualMode.startsWith("xz-")&&!locationGuideMode&&!section3DInput.checked&&verticalSection()){
+    const section=verticalSection(),view=vertical2DView(w,h),field=visualMode.slice(3);
+    const range=verticalRange(field),subdivisions=smoothSectionInput.checked?3:1;
+    ctx.fillStyle="rgba(7,16,27,.98)";ctx.fillRect(view.plotLeft,view.plotTop,view.plotRight-view.plotLeft,view.plotBottom-view.plotTop);
+    if(visibility.section&&range){
+      drawSection(section,field,view.basis,view.scale,view.cx,view.cy,range,.98,subdivisions);
+      if(field==="temperature")drawCellSectionCuts(section,view.basis,view.scale,view.cx,view.cy,range,.99);
+      drawSectionLabel(section,view.basis,view.scale,view.cx,view.cy);
+    }
+    if(visibility.flow)drawSectionVelocity(section,view.basis,view.scale,view.cx,view.cy);
+    ctx.strokeStyle="rgba(205,225,238,.86)";ctx.lineWidth=1;
+    ctx.strokeRect(view.plotLeft,view.plotTop,view.plotRight-view.plotLeft,view.plotBottom-view.plotTop);
+    if(flow.enabled){
+      updatePortStateText();
+      if(visibility.temperatureLegend&&visibility.section&&field==="temperature")drawScalarLegend(w,h,`Fluid + cell cut T · ${section.kind.toUpperCase()}`,range,"C");
+      if(visibility.velocityLegend&&visibility.section&&field==="velocity")drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
+      if(visibility.massFlowLegend&&visibility.section&&field==="mass-flow")drawScalarLegend(w,h,"Mass flow rate",massFlowDisplayRange(),"kg/s","mass-flow-legend");
+      if(visibility.pressureLegend&&visibility.section&&field==="pressure")drawScalarLegend(w,h,"Gauge pressure · shared scale",pressureDisplayRange(),"Pa(g)","pressure-legend");
       updateFlowClock();
     }
     return;
@@ -3436,7 +3872,14 @@ function drawScene(){
       const normalised=flow.port_flow[key]/velocityDisplayMaximum(),[r,g,b]=jet(normalised);
       ctx.fillStyle=`rgba(${r},${g},${b},.88)`;
     }
+    else if(isPort&&locationGuideMode){ctx.fillStyle=`rgba(12,28,43,${.08+.07*shade})`;}
+    else if(isPort&&heatTransferSurface){ctx.fillStyle=`rgba(32,50,64,${.24+.08*shade})`;}
     else if(isPort){ctx.fillStyle=`rgba(239,147,43,${0.62+0.14*shade})`;}
+    else if(heatTransferSurface){
+      const range=heatTransferRange(),value=surfaceHeatTransferValue(item.face.id,item.face.surfaceIndex),colour=heatTransferColour(value,range);
+      if(colour)ctx.fillStyle=smoothSectionInput.checked?heatTransferFaceGradient(item.face,pts,range,colour):colour;
+      else ctx.fillStyle="rgb(46,57,66)";
+    }
     else if(thermalCells&&Number.isFinite(temperature)){
       const range=sharedTemperatureRange(),normalised=(temperature-range[0])/Math.max(1e-9,range[1]-range[0]);
       const [r,g,b]=cellSurfacePalette(normalised);
@@ -3476,6 +3919,16 @@ function drawScene(){
       else if(smoothSectionInput.checked)drawXYPlaneTexture(sectionRaster(section,"velocity",velocityDisplayRange()),section,basis,scale,cx,cy,.88);
       else drawSection(section,"velocity",basis,scale,cx,cy,velocityDisplayRange(),.88,1);
     }
+    if(visualMode==="xy-pressure"){
+      const section=horizontalSection();
+      if(smoothSectionInput.checked)drawXYPlaneTexture(sectionRaster(section,"pressure",pressureDisplayRange()),section,basis,scale,cx,cy,.88);
+      else drawSection(section,"pressure",basis,scale,cx,cy,pressureDisplayRange(),.88,1);
+    }
+    if(visualMode==="xy-mass-flow"){
+      const section=horizontalSection();
+      if(smoothSectionInput.checked)drawXYPlaneTexture(sectionRaster(section,"mass-flow",massFlowDisplayRange()),section,basis,scale,cx,cy,.88);
+      else drawSection(section,"mass-flow",basis,scale,cx,cy,massFlowDisplayRange(),.88,1);
+    }
     const selectedVertical=verticalSelection(),verticalAlpha=selectedVertical.length>1?.52:.82;
     const verticalSubdivisions=selectedVertical.length>1?2:3;
     if(visualMode==="xz-temperature")for(const section of selectedVertical){
@@ -3484,13 +3937,15 @@ function drawScene(){
       drawCellSectionCuts(section,basis,scale,cx,cy,range,selectedVertical.length>1?.82:.96);
     }
     if(visualMode==="xz-velocity")for(const section of selectedVertical)drawSection(section,"velocity",basis,scale,cx,cy,verticalRange("velocity"),verticalAlpha,verticalSubdivisions);
-    if(visualMode.startsWith("xz-"))for(const section of selectedVertical)drawSectionLabel(section,basis,scale,cx,cy);
+    if(visualMode==="xz-mass-flow")for(const section of selectedVertical)drawSection(section,"mass-flow",basis,scale,cx,cy,verticalRange("mass-flow"),verticalAlpha,verticalSubdivisions);
+    if(visualMode==="xz-pressure")for(const section of selectedVertical)drawSection(section,"pressure",basis,scale,cx,cy,verticalRange("pressure"),verticalAlpha,verticalSubdivisions);
+    if(visualMode.startsWith("xz-")&&!locationGuideMode)for(const section of selectedVertical)drawSectionLabel(section,basis,scale,cx,cy);
   }
-  if(visibility.flow){
+  if(visibility.flow&&!locationGuideMode){
     // Draw depth-tested streamlines after the cells.  Samples on the camera
     // side stay visible, while samples whose camera ray intersects a cell are
     // omitted.  This works from top, bottom, and oblique views.
-    if(visualMode==="combined")drawFlow(flow.streamlines||[],basis,scale,cx,cy);
+    if(["combined","cell-temperature"].includes(visualMode))drawFlow(flow.streamlines||[],basis,scale,cx,cy);
     if(visualMode.startsWith("xy-")&&visualMode!=="xy-velocity")drawSectionVelocity(horizontalSection(),basis,scale,cx,cy);
     if(visualMode==="xy-velocity"&&horizontalSectionKey()!=="xy")drawSectionVelocity(horizontalSection(),basis,scale,cx,cy);
     if(visualMode.startsWith("xz-"))for(const section of verticalSelection())drawSectionVelocity(section,basis,scale,cx,cy);
@@ -3503,48 +3958,62 @@ function drawScene(){
       ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
     }
   }
+  if(locationGuideMode&&visibility.section){
+    drawSectionLocationGuide(visualMode.startsWith("xy-")?horizontalSection():verticalSection(),basis,scale,cx,cy,w);
+  }
   if(flow.enabled){
     const inlet=projected([scenePorts[0].x,scenePorts[0].y,scenePorts[0].z+scenePorts[0].length/2],basis,scale,cx,cy);
     const outlet=projected([scenePorts[1].x,scenePorts[1].y,scenePorts[1].z-scenePorts[1].length/2],basis,scale,cx,cy);
     const inletMetrics=portMetrics("IN"),outletMetrics=portMetrics("OUT");
-    if(visibility.ports&&visualMode!=="xy-velocity"&&visualMode!=="cell-temperature"){
+    if(visibility.ports&&!locationGuideMode&&visualMode!=="xy-velocity"&&visualMode!=="cell-temperature"){
       drawPortCallout(inlet,"IN",inletMetrics,"rgba(255,189,91,.98)",w,h);
       drawPortCallout(outlet,"OUT",outletMetrics,"rgba(99,215,229,.98)",w,h);
     }
-    if(visibility.extrema&&visualMode==="cell-temperature"&&visibility.cells){
+    if(visibility.extrema&&["combined","cell-temperature","xy-temperature","xz-temperature"].includes(visualMode)&&visibility.cells){
       const extrema=cellSurfaceExtrema();
       if(extrema){
-        drawCellExtremumCallout(extrema.maximum,"CELL SURFACE MAX","rgba(255,119,78,.98)",basis,scale,cx,cy,w,h,true);
-        drawCellExtremumCallout(extrema.minimum,"CELL SURFACE MIN","rgba(86,216,238,.98)",basis,scale,cx,cy,w,h,false);
+        drawCellExtremumCallout(extrema.maximum,"BATTERY HOTTEST POINT","rgba(255,80,52,.99)",basis,scale,cx,cy,w,h,true);
       }
     }
     updatePortStateText(inletMetrics,outletMetrics);
     if(visibility.temperatureLegend&&visualMode==="combined"&&visibility.cells)drawScalarLegend(w,h,"Cell surface T",sharedTemperatureRange(),"C","temperature-legend","right");
     if(visibility.velocityLegend&&visualMode==="combined"&&visibility.flow)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s","velocity-legend","left");
-    if(visibility.temperatureLegend&&visualMode==="cell-temperature"&&visibility.cells)drawScalarLegend(w,h,"Cell surface T",sharedTemperatureRange(),"C");
+    if(visibility.temperatureLegend&&visualMode==="cell-temperature"&&visibility.cells)drawScalarLegend(w,h,"Cell surface T",sharedTemperatureRange(),"C","temperature-legend","right");
+    if(visibility.velocityLegend&&visualMode==="cell-temperature"&&visibility.flow)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s","velocity-legend","left");
     if(visibility.velocityLegend&&visualMode==="velocity-streamlines"&&visibility.flow)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
     if(visibility.temperatureLegend&&visualMode==="xy-temperature"&&visibility.section)drawScalarLegend(w,h,"Fluid + cell cut T",temperatureSectionRange(horizontalSection()),"C");
     if(visibility.velocityLegend&&visualMode==="xy-velocity"&&visibility.section)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
+    if(visibility.massFlowLegend&&visualMode==="xy-mass-flow"&&visibility.section)drawScalarLegend(w,h,"Mass flow rate",massFlowDisplayRange(),"kg/s","mass-flow-legend");
+    if(visibility.pressureLegend&&visualMode==="xy-pressure"&&visibility.section)drawScalarLegend(w,h,"Gauge pressure · shared scale",pressureDisplayRange(),"Pa(g)","pressure-legend");
+    if(visibility.heatTransferLegend&&visualMode==="surface-heat-transfer"&&visibility.cells&&heatTransferRange())drawScalarLegend(w,h,"Local convective h · battery–coolant interface",heatTransferRange(),"W/(m²·K)","heat-transfer-legend","right");
     if(visibility.temperatureLegend&&visualMode==="xz-temperature"&&visibility.section){const section=verticalSection(),plane=section?.kind?.toUpperCase()||"VERTICAL",hasFluidSection=Boolean(section?.actual_dataset)||exactSolidSectionActive(section);drawScalarLegend(w,h,`${hasFluidSection?"Fluid + ":""}cell cut T · ${plane}`,verticalRange("temperature"),"C");}
     if(visibility.velocityLegend&&visualMode==="xz-velocity"&&visibility.section)drawScalarLegend(w,h,"Velocity · shared scale",velocityDisplayRange(),"m/s");
+    if(visibility.massFlowLegend&&visualMode==="xz-mass-flow"&&visibility.section)drawScalarLegend(w,h,"Mass flow rate",massFlowDisplayRange(),"kg/s","mass-flow-legend");
+    if(visibility.pressureLegend&&visualMode==="xz-pressure"&&visibility.section)drawScalarLegend(w,h,"Gauge pressure · shared scale",pressureDisplayRange(),"Pa(g)","pressure-legend");
     updateFlowClock();
   }else{ctx.fillStyle="rgba(255,189,91,.92)";ctx.font="700 11px system-ui";ctx.fillText("Ø19 mm IN / OUT",16,h-34);}
 }
 function drawDynamicOverlay(){
   overlayCtx.save();overlayCtx.setTransform(1,0,0,1,0,0);overlayCtx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);overlayCtx.restore();
   overlayCtx.globalAlpha=1;overlayCtx.globalCompositeOperation="source-over";
+  if(visualMode.endsWith("-location"))return;
   if(!flow.enabled||!visibility.flow||(activeMeshRun()?.id==="single"&&!activeMeshRun()?.data_ready))return;
   if(visualMode.startsWith("xy-")&&!section3DInput.checked&&horizontalSection()){
     drawDirectXYVelocityVectors(directXYLayout(canvas.clientWidth,canvas.clientHeight),true,overlayCtx);
     updateFlowClock();return;
   }
-  if((section3DInput.checked&&visualMode.startsWith("xy-"))||visualMode.startsWith("xz-")){
+  if((section3DInput.checked&&visualMode.startsWith("xy-"))||(section3DInput.checked&&visualMode.startsWith("xz-"))){
     const w=canvas.clientWidth,h=canvas.clientHeight,basis=cameraBasis(),scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
     const selected=visualMode.startsWith("xy-")?[horizontalSection()]:verticalSelection();
     for(const section of selected)drawSectionVelocity(section,basis,scale,w/2,h/2+8,true,overlayCtx);
     updateFlowClock();return;
   }
-  if(!["combined","velocity-streamlines"].includes(visualMode))return;
+  if(visualMode.startsWith("xz-")&&!section3DInput.checked){
+    const w=canvas.clientWidth,h=canvas.clientHeight,view=vertical2DView(w,h);
+    for(const section of verticalSelection())drawSectionVelocity(section,view.basis,view.scale,view.cx,view.cy,true,overlayCtx);
+    updateFlowClock();return;
+  }
+  if(!["combined","cell-temperature","velocity-streamlines"].includes(visualMode))return;
   const w=canvas.clientWidth,h=canvas.clientHeight,basis=cameraBasis(),scale=Math.min(w/(box.x*1.65),h/(box.y*1.65))*zoom;
   drawFlowParticles(flow.streamlines||[],basis,scale,w/2,h/2+8,overlayCtx);
   updateFlowClock();
@@ -3578,17 +4047,36 @@ document.querySelectorAll("[data-view]").forEach(button=>button.addEventListener
 document.getElementById("reset").addEventListener("click",()=>{zoom=1;selectView("iso");});
 const modeDescriptions={
   combined:["종합 화면","셀 온도와 실제 U(x)에 비례해 이동하는 유동 헤드 · 단면과 동일한 U 기준"],
-  "cell-temperature":["셀 온도",`배터리 직접 표면 샘플 ${cellSurface?.angular_segments||28} × ${cellSurface?.axial_segments||12}+캡 · 현재 최고/최저점 표시`],
+  "cell-temperature":["셀 온도",`배터리 직접 표면 샘플 ${cellSurface?.angular_segments||28} × ${cellSurface?.axial_segments||12}+캡 · 현재 최고온도 지점·좌표와 선택한 속도 유선 표시`],
+  "cell-extrema-map":["셀 최고·최저 온도","탱크 평면 배치에서 C01–C23 각각의 최고·최저 온도를 큰 숫자로 표시 · 재생 시간에 따라 매초 갱신"],
   "velocity-streamlines":["유체 유선","전체 유체 셀 공통 U 범위로 색칠한 고정 유동장과 실제 U(x)에 비례하는 이동 헤드"],
+  "xy-location":["가로 단면 위치","탱크보다 크게 표시한 빨간 XY 직사각형과 Z축 전체 길이·원점 기준 절단 거리·위치 비율"],
   "xy-temperature":["가로 단면 온도","선택한 저장 높이의 냉각수 계산값 + 그 높이에서 절단된 셀만 온도색"],
   "xy-velocity":["가로 단면 유속","선택한 높이의 실제 셀 중심 유속 · 전체 유동장 공통 U 범위 · 보간/패딩 없음"],
+  "xy-mass-flow":["가로 단면 질량유량","미세 타일별 ṁ=ρ·|U·n|·ΔA · 단면 법선방향 통과량 [kg/s] · 모든 결과 공통 범례"],
+  "xy-pressure":["가로 단면 압력","선택한 높이의 실제 냉각수 셀 압력 · 출구 면적평균 기준 게이지압 · 모든 결과 공통 범례"],
+  "surface-heat-transfer":["배터리 표면 열전달계수","냉각수 접촉 배터리 표면의 국부 대류 열전달계수 h=|q''|/|Twall−Tfluid| · 범례는 모든 시각과 결과에서 고정"],
+  "xz-location":["세로 단면 위치","탱크보다 크게 표시한 빨간 YZ/XZ 직사각형과 X/Y축 전체 길이·원점 기준 절단 거리·위치 비율"],
   "xz-temperature":["세로 단면 온도","선택한 저장 비율과 방향의 계산 단면 + 그 위치에서 절단된 셀만 온도색"],
-  "xz-velocity":["세로 단면 유속","선택한 세로 위치의 유속 크기와 방향 · 전체 유동장 공통 U 범위"]
+  "xz-velocity":["세로 단면 유속","선택한 세로 위치의 유속 크기와 방향 · 전체 유동장 공통 U 범위"],
+  "xz-mass-flow":["세로 단면 질량유량","미세 타일별 ṁ=ρ·|U·n|·ΔA · 단면 법선방향 통과량 [kg/s] · 모든 결과 공통 범례"],
+  "xz-pressure":["세로 단면 압력","선택한 XZ/YZ 위치의 실제 냉각수 셀 압력 · 출구 면적평균 기준 게이지압 · 모든 결과 공통 범례"]
 };
 function prepareActualMode(mode){
   if(!actualOneSecond)return;
   const names=[];
-  if(["combined","cell-temperature","xy-temperature","xz-temperature"].includes(mode))names.push("cell_surface");
+  if(["combined","cell-temperature","cell-extrema-map","xy-temperature","xz-temperature"].includes(mode))names.push("cell_surface");
+  if(mode==="surface-heat-transfer"&&cellSurfaceHeatTransfer?.actual_dataset)names.push(cellSurfaceHeatTransfer.actual_dataset);
+  if(mode==="surface-heat-transfer"&&!cellSurfaceHeatTransfer?.actual_dataset){
+    currentMode.textContent="이 결과에는 국부 경계면 HTC 데이터 없음";
+    setDataLoadStatus("이 보존 결과에는 wallHeatFlux·벽면 온도·근접 냉각수 온도 표본이 없어 국부 열전달계수를 표시하지 않습니다.","error");
+    return;
+  }
+  if(mode.endsWith("-pressure")&&!pressureAvailable()){
+    currentMode.textContent="이 결과에는 공간 압력장 데이터 없음";
+    setDataLoadStatus("이 보존 결과 패키지에는 단면 p(x) 원본이 없어 압력 분포를 만들지 않습니다. 입·출구 평균 압력만으로 공간장을 합성하지 않습니다.","error");
+    return;
+  }
   if(mode==="xy-temperature")names.push(horizontalSectionKey());
   if(mode==="xz-temperature"&&verticalSection()?.actual_dataset)names.push(verticalSection().actual_dataset);
   const pending=names.filter(name=>!actualDatasets.has(name));
@@ -3605,7 +4093,9 @@ function prepareActualMode(mode){
       setDataLoadStatus(`온도 색상 데이터 로드 실패 · ${failed.join(", ")} · viewer 폴더의 data 파일을 모두 함께 복사하십시오. (${detail})`,"error");
     }else{
       const sectionPosition=mode.startsWith("xy-")?` · ${horizontalSection()?.label||"Z = 50%"}`:mode.startsWith("xz-")?` · ${verticalSection()?.label||"50%"} · ${verticalSection()?.kind?.toUpperCase()||"세로"}`:"";
-      currentMode.textContent=(modeDescriptions[mode]||modeDescriptions.combined)[0]+sectionPosition;
+      const heatTransferDataset=mode==="surface-heat-transfer"?actualDatasets.get(cellSurfaceHeatTransfer?.actual_dataset):null;
+      const coverage=heatTransferDataset?` · ${heatTransferDataset.specification.valid_count.toLocaleString()} / ${heatTransferDataset.specification.point_count.toLocaleString()} 표면점`:"";
+      currentMode.textContent=(modeDescriptions[mode]||modeDescriptions.combined)[0]+sectionPosition+coverage;
       setDataLoadStatus("");
     }
     draw();
@@ -3615,15 +4105,17 @@ function updateCanvasNote(mode=visualMode){
   const description=modeDescriptions[mode]||modeDescriptions.combined;
   const sectionPosition=mode.startsWith("xy-")?` · ${horizontalSection()?.label||"Z = 50%"}`:mode.startsWith("xz-")?` · ${verticalSection()?.label||"50%"} · ${verticalSection()?.kind?.toUpperCase()||"세로"}`:"";
   const temperatureNote=actualOneSecond?"T 원본 · 시간보간/패딩 없음":`온도 표시보정 +${flow.temperature_display_offset_c.toFixed(3)} K`;
-  const sectionRenderNote=mode.startsWith("xy-")||mode.startsWith("xz-")?(smoothSectionInput.checked?" · 실제 샘플 사이 화면만 부드럽게 · 무효영역 채움 없음":" · 실제 샘플 타일 그대로"):"";
+  const sectionRenderNote=mode==="surface-heat-transfer"?" · q''=OpenFOAM wallHeatFlux · Tfluid=벽면 바깥 0.35 mm 냉각수 셀 · 고정 범례":mode.endsWith("-pressure")?" · p−pOUT 면적평균 · 공통 고정 범례 −500–+500 Pa · 범위 밖 값은 색상 포화":mode.endsWith("-mass-flow")?` · 미세 타일별 ṁ=ρ·|U·n|·ΔA · 공통 고정 범례 0–${massFlowDisplayRange()[1].toFixed(6)} kg/s`:mode.startsWith("xy-")||mode.startsWith("xz-")?(smoothSectionInput.checked?" · 실제 샘플 사이 화면만 부드럽게 · 무효영역 채움 없음":" · 실제 샘플 타일 그대로"):"";
   const selectedTemperatureSection=mode.startsWith("xy-")?horizontalSection():mode.startsWith("xz-")?verticalSection():null;
   const exactSolidCut=exactSolidSectionActive(selectedTemperatureSection);
-  const solidCutNote=mode.endsWith("-temperature")&&mode!=="cell-temperature"?(exactSolidCut?" · 셀 전체표면 숨김 · 실제 교차 단면만 표시 · 1,800 s batterySolid 저장 단면값":" · 셀 전체표면 숨김 · 실제 교차 단면만 표시 · 셀 면색=해당 시각 체적평균 · 테두리=직접 표면표본"):"";
+  const horizontalProjectionNote=mode==="xy-temperature"&&!exactSolidCut?` · 배터리당 ${((cellSurface?.angular_segments||32)*horizontalCutAngularSubdivisions).toLocaleString()}방향 × ${horizontalCutRadialBands}반경 표시분할(보간)` :"";
+  const verticalProjectionNote=mode==="xz-temperature"&&!exactSolidCut?` · 배터리당 ${((cellSurface?.axial_segments||16)*verticalCutAxialSubdivisions).toLocaleString()}높이 × ${verticalCutTransverseBands}가로 표시분할(보간)` :"";
+  const solidCutNote=mode.endsWith("-temperature")&&mode!=="cell-temperature"?(exactSolidCut?" · 셀 전체표면 숨김 · 실제 교차 단면만 표시 · 1,800 s batterySolid 저장 단면값":" · 고체 내부 공간장 미저장 · 직접 표면+체적평균 제약 투영(표시 보간, 내부 CFD 셀 아님)"):"";
   const headScale=headDisplayScale(),headNote=visibility.particles?` · 헤드 ${headScale===1?"1× 실제속도":headScale+"× 표시속도"}`:"";
-  const velocityMode=["combined","velocity-streamlines","xy-velocity","xz-velocity"].includes(mode);
+  const velocityMode=["combined","cell-temperature","velocity-streamlines","xy-velocity","xz-velocity","xy-mass-flow","xz-mass-flow"].includes(mode);
   const localPeak=selectedSectionVelocityPeak(mode),velocityNote=velocityMode?` · U 공통범위 0–${velocityDisplayMaximum().toFixed(3)} m/s${Number.isFinite(localPeak)?` · 현재 단면 최고 ${localPeak.toFixed(3)} m/s`:""}`:"";
-  const dimensionNote=mode.startsWith("xy-")?` · ${section3DInput.checked?"3D 회전":"평면 보기"}`:"";
-  canvasNote.textContent=`${description[1]}${sectionPosition}${sectionRenderNote}${solidCutNote}${dimensionNote}${velocityNote}${headNote} · 드래그 회전 · 휠 확대/축소 · ${temperatureNote} · Ū·p̄ 실제 면적평균`;
+  const dimensionNote=mode.endsWith("-location")?" · 3D 절단 위치 안내":(mode.startsWith("xy-")||mode.startsWith("xz-"))?` · ${section3DInput.checked?"3D 회전":"평면 보기"}`:"";
+  canvasNote.textContent=`${description[1]}${sectionPosition}${sectionRenderNote}${solidCutNote}${horizontalProjectionNote}${verticalProjectionNote}${dimensionNote}${velocityNote}${headNote} · 드래그 회전 · 휠 확대/축소 · ${temperatureNote} · Ū·p̄ 실제 면적평균`;
 }
 function selectVisualMode(mode){
   visualMode=mode;
@@ -3633,17 +4125,21 @@ function selectVisualMode(mode){
   currentMode.textContent=description[0]+sectionPosition;
   updateCanvasNote(mode);
   prepareActualMode(mode);
+  controlHead.hidden=mode==="cell-extrema-map";
   horizontalSections.hidden=!mode.startsWith("xy-");
   verticalSections.hidden=!mode.startsWith("xz-");
-  section3DOption.hidden=!mode.startsWith("xy-");
-  if(mode.startsWith("xy-"))selectView(section3DInput.checked?"iso":"pz");
+  section3DOption.hidden=mode.endsWith("-location")||!(mode.startsWith("xy-")||mode.startsWith("xz-"));
+  flowControls.hidden=!flow.enabled||mode.endsWith("-location");
+  if(mode.endsWith("-location"))selectView("iso");
+  else if(mode.startsWith("xy-"))selectView(section3DInput.checked?"iso":"pz");
   else if(mode.startsWith("xz-"))selectView(verticalViewName());
   else selectView("iso");
   requestAnimationFrame(resize);
 }
 modeFieldset.hidden=!flow.enabled;
 for(const input of modeInputs){
-  input.disabled=!flow.enabled;
+  input.disabled=!flow.enabled||(input.value.endsWith("-pressure")&&!pressureAvailable());
+  if(input.value.endsWith("-pressure")&&input.disabled)input.title="이 보존 결과에는 공간 압력장 원본이 없습니다";
   input.addEventListener("change",()=>{if(input.checked)selectVisualMode(input.value);});
 }
 function setLayerVisibility(values){
@@ -3661,7 +4157,11 @@ for(const [name,input] of Object.entries(optionInputs)){
 smoothSectionInput.disabled=!flow.enabled;
 smoothSectionInput.addEventListener("change",()=>{directXYVelocityCache=null;updateCanvasNote();draw();});
 section3DInput.disabled=!flow.enabled;
-section3DInput.addEventListener("change",()=>{prepareActualMode(visualMode);updateCanvasNote();selectView(section3DInput.checked?"iso":"pz");});
+section3DInput.addEventListener("change",()=>{
+  prepareActualMode(visualMode);updateCanvasNote();
+  if(visualMode.startsWith("xz-"))selectView(verticalViewName());
+  else selectView(section3DInput.checked?"iso":"pz");
+});
 headRate.disabled=!flow.enabled;
 headRate.addEventListener("change",()=>{updateCanvasNote();drawDynamicOverlay();});
 function updateHorizontalSection({changeView=true}={}){
@@ -3670,8 +4170,12 @@ function updateHorizontalSection({changeView=true}={}){
     selected=horizontalSectionInputs.find(input=>input.value==="xy"&&!input.disabled)||horizontalSectionInputs.find(input=>!input.disabled);
     if(selected)selected.checked=true;
   }
-  const percent=selected?.parentElement?.textContent?.trim()||"";
-  horizontalSectionState.textContent=selected?`${sections[selected.value]?.label||selected.value} · ${percent}`:"단면 데이터 없음";
+  const section=selected?sections[selected.value]:null,percent=selected?.parentElement?.textContent?.trim()||"";
+  if(visualMode==="xy-temperature"&&Number.isFinite(section?.snapshot_time_s)&&!section?.actual_dataset){
+    simulationTime=Number(section.snapshot_time_s);flowPlaying=false;flowPlay.textContent="▶ 재생";updateFlowClock({force:true});
+  }
+  const snapshotNote=Number.isFinite(section?.snapshot_time_s)&&!section?.actual_dataset?` · ${section.snapshot_time_s} s 원본 고정 단면`:"";
+  horizontalSectionState.textContent=selected?`${section?.label||selected.value} · ${percent}${snapshotNote}`:"단면 데이터 없음";
   if(visualMode==="xy-temperature")prepareActualMode(visualMode);
   if(changeView&&visualMode.startsWith("xy-"))selectVisualMode(visualMode);else draw();
 }
@@ -3691,9 +4195,10 @@ function updateVerticalSection({changeView=true}={}){
     if(selected)selected.checked=true;
   }
   const section=verticalSection(),directTemperature=Math.round(simulationTime)===section?.solid_temperature_time_s,percent=selected?.parentElement?.textContent?.trim()||"";
-  verticalSectionState.textContent=section?`${section.label} · ${percent} · ${section.kind.toUpperCase()} · ${section.actual_dataset||directTemperature?"저장 단면":"셀 계산 온도"}`:"단면 데이터 없음";
+  verticalSectionState.textContent=section?`${section.label} · ${percent} · ${section.kind.toUpperCase()} · ${directTemperature?"저장된 고체 내부 단면":"고체 내부장 미저장 · 직접 표면 온도 투영"}`:"단면 데이터 없음";
   if(visualMode==="xz-temperature")prepareActualMode(visualMode);
-  if(changeView&&visualMode.startsWith("xz-"))selectView(verticalViewName());
+  if(changeView&&visualMode==="xz-location")selectView("iso");
+  else if(changeView&&visualMode.startsWith("xz-"))selectView(verticalViewName());
   else draw();
 }
 for(const input of verticalSectionInputs)input.addEventListener("change",()=>{if(input.checked)updateVerticalSection();});
@@ -3705,15 +4210,15 @@ document.getElementById("vertical-centre").addEventListener("click",()=>{
 updateVerticalSection({changeView:false});
 document.getElementById("flow-only").addEventListener("click",()=>{
   const input=modeInputs.find(candidate=>candidate.value==="velocity-streamlines");if(input)input.checked=true;
-  setLayerVisibility({cells:false,flow:true,particles:true,section:false,grid:false,mesh:false,enclosure:true,temperatureLegend:false,velocityLegend:true,ports:true,extrema:true});selectVisualMode("velocity-streamlines");
+  setLayerVisibility({cells:false,flow:true,particles:true,section:false,grid:false,mesh:false,enclosure:true,temperatureLegend:false,velocityLegend:true,massFlowLegend:false,ports:true,extrema:true});selectVisualMode("velocity-streamlines");
 });
 document.getElementById("show-all").addEventListener("click",()=>{
   const input=modeInputs.find(candidate=>candidate.value==="combined");if(input)input.checked=true;
-  setLayerVisibility({cells:true,flow:true,particles:true,section:true,grid:true,mesh:false,enclosure:true,temperatureLegend:true,velocityLegend:true,ports:true,extrema:true});selectVisualMode("combined");
+  setLayerVisibility({cells:true,flow:true,particles:true,section:true,grid:true,mesh:false,enclosure:true,temperatureLegend:true,velocityLegend:true,massFlowLegend:true,ports:true,extrema:true});selectVisualMode("combined");
 });
 document.getElementById("reset-overlays").addEventListener("click",()=>{overlayPositions={};saveOverlayPositions();draw();});
 if(flow.enabled)selectVisualMode(visualMode);
-flowControls.hidden=!flow.enabled;
+flowControls.hidden=!flow.enabled||visualMode.endsWith("-location");
 function formatWallDuration(seconds){
   const rounded=Math.max(0,Math.round(seconds)),minutes=Math.floor(rounded/60),remainder=rounded%60;
   return `${minutes}:${String(remainder).padStart(2,"0")}`;
@@ -3729,7 +4234,10 @@ function updateFlowClock({force=false}={}){
   flowTime.textContent=`t = ${second} s / 1800 s`;
   if(visualMode.startsWith("xz-")&&verticalSectionState){
     const section=verticalSection(),selected=verticalSectionInputs.find(input=>input.checked),percent=selected?.parentElement?.textContent?.trim()||"";
-    if(section)verticalSectionState.textContent=`${section.label} · ${percent} · ${section.kind.toUpperCase()} · ${section.actual_dataset||second===section.solid_temperature_time_s?"저장 단면":"셀 계산 온도"}`;
+    if(section){
+      const directTemperature=second===section.solid_temperature_time_s;
+      verticalSectionState.textContent=`${section.label} · ${percent} · ${section.kind.toUpperCase()} · ${directTemperature?"저장된 고체 내부 단면":"고체 내부장 미저장 · 직접 표면 온도 투영"}`;
+    }
   }
 }
 if(flow.enabled){
@@ -3747,7 +4255,7 @@ function animate(timestamp){
     simulationTime=(simulationTime+elapsed*Number(flowRate.value))%1800;
     sceneRenderAccumulator+=elapsed;overlayRenderAccumulator+=elapsed;updateFlowClock();
     const actualFrame=Math.round(simulationTime);
-    const timeVaryingScene=["combined","cell-temperature","xy-temperature","xz-temperature"].includes(visualMode);
+    const timeVaryingScene=["combined","cell-temperature","cell-extrema-map","xy-temperature","xz-temperature","surface-heat-transfer"].includes(visualMode);
     const refreshScene=timeVaryingScene&&(actualOneSecond
       ?actualFrame!==lastSceneFrame&&sceneRenderAccumulator>=1/12
       :sceneRenderAccumulator>=1/12);
@@ -3758,16 +4266,25 @@ function animate(timestamp){
   requestAnimationFrame(animate);
 }
 function rows(element,values){ element.innerHTML=Object.entries(values).map(([key,value])=>`<dt>${key}</dt><dd>${value}</dd>`).join(""); }
+function formatAnalysisDuration(seconds){
+  if(!Number.isFinite(Number(seconds)))return "기록 없음";
+  const rounded=Math.max(0,Math.round(Number(seconds))),hours=Math.floor(rounded/3600),minutes=Math.floor((rounded%3600)/60),remainder=rounded%60;
+  return `${hours}시간 ${String(minutes).padStart(2,"0")}분 ${String(remainder).padStart(2,"0")}초`;
+}
 function renderActiveMeshRun(){
   const run=activeMeshRun();if(!run)return;
   const counts=run.counts||{},prefix=run.counts_are_targets?"목표 ":"";
   const count=(value)=>Number.isFinite(value)?Number(value).toLocaleString():"—";
+  const runtime=run.analysis_runtime||null,stageRuntime=runtime?.stage_wall_seconds||{};
   rows(meshRunDetail,{
     "상태":meshRunText(run,"state_label"),
     "전체 셀":`${prefix}${count(counts.total_cells)}`,
     "유체 / 고체":`${prefix}${count(counts.fluid_cells)} / ${count(counts.solid_cells)}`,
     "노드":`${prefix}${count(counts.points)}`,
-    "요소":run.element_family
+    "요소":run.element_family,
+    "해석 벽시계 시간":runtime?formatAnalysisDuration(runtime.wall_seconds):"기존 실행 기록 없음",
+    "시간 구성":runtime?`메시 ${formatAnalysisDuration(stageRuntime.mesh)} · 정상해석 ${formatAnalysisDuration(stageRuntime.steady)} · 과도해석 ${formatAnalysisDuration(stageRuntime.transient)}`:"—",
+    "병렬 계산":runtime?`솔버 ${runtime.solver_mpi_ranks} MPI · 메시 ${runtime.mesh_mpi_ranks} MPI`:"—"
   });
   meshRunNote.textContent=meshRunText(run,"note");
   const waiting=run.data_ready===false;
@@ -3847,6 +4364,8 @@ const temperatureChartClose=document.getElementById("temperature-chart-close");
 const temperatureChartMetric=document.getElementById("temperature-chart-metric");
 const perCellMetric=document.getElementById("per-cell-metric");
 const perCellMetricLabel=document.getElementById("per-cell-metric-label");
+const cellExtremaCell=document.getElementById("cell-extrema-cell");
+const cellExtremaCellLabel=document.getElementById("cell-extrema-cell-label");
 const temperatureChartStatus=document.getElementById("temperature-chart-status");
 const temperatureChartPng=document.getElementById("temperature-chart-png");
 const temperatureChartCsv=document.getElementById("temperature-chart-csv");
@@ -3861,6 +4380,9 @@ const convergenceChartPng=document.getElementById("convergence-chart-png");
 const convergenceChartCsv=document.getElementById("convergence-chart-csv");
 const convergenceSummary=document.getElementById("convergence-summary");
 const convergenceHistorySelect=document.getElementById("convergence-history-select");
+const failedConvergenceCard=document.getElementById("failed-convergence-card");
+const failedConvergenceSummary=document.getElementById("failed-convergence-summary");
+const failedConvergenceChartOpen=document.getElementById("failed-convergence-chart-open");
 const temperatureMetricMeta={
   outlet:{title:"출구 평균 온도",filename:"outlet-average",key:"outlet_mass_weighted_average_c",definition:"출구 phi 질량유량 가중 평균"},
   "battery-maximum":{title:"배터리 최고 온도",filename:"battery-mesh-maximum",key:"battery_mesh_maximum_c",definition:"C01–C23 cell zone의 mesh max(T) 중 최고"},
@@ -3872,6 +4394,140 @@ const perCellMetricMeta={
   surface_area_average_c:["표면 면적평균","per-cell-surface-average"],
   mesh_maximum_c:["mesh 최고값","per-cell-mesh-maximum"]
 };
+for(const cell of [...sceneCells].sort((a,b)=>a.id.localeCompare(b.id))){
+  const option=document.createElement("option");option.value=cell.id;option.textContent=cell.id;cellExtremaCell.appendChild(option);
+}
+function decodedActualTemperature(dataset,encoded){
+  if(dataset.specification.dtype==="float32-little-endian")return Number.isFinite(encoded)?encoded:null;
+  const scale=actualOneSecond?.temperature_encoding;
+  return scale?scale.minimum_k+encoded*scale.quantum_k-273.15:null;
+}
+function buildCellTemperatureExtrema(cellId){
+  const cacheKey=`${activeMeshRun()?.id||"current"}:${cellId}`;
+  const dataset=actualDatasets.get(cellSurface?.actual_dataset);
+  if(cellTemperatureExtremaCache.has(cacheKey))return cellTemperatureExtremaCache.get(cacheKey);
+  // Do not cache an empty fallback while the direct one-second surface data
+  // are still loading.  The map redraws with the real samples after loading.
+  if(actualOneSecond&&cellSurface?.actual_dataset&&!dataset){
+    return {minimum:[],maximum:temperatureGraphs?.per_cell?.mesh_maximum_c?.[cellId]||[]};
+  }
+  let minimum=[],sampledMaximum=[];
+  const cellIndex=sceneCells.findIndex(cell=>cell.id===cellId);
+  if(dataset&&cellIndex>=0){
+    const count=dataset.specification.samples_per_cell,start=cellIndex*count;
+    for(let frame=0;frame<dataset.specification.frame_count;frame++){
+      let low=Infinity,high=-Infinity;
+      const offset=frame*dataset.specification.valid_count;
+      for(let pointIndex=start;pointIndex<start+count;pointIndex++){
+        const validIndex=dataset.lookup[pointIndex];if(validIndex<0)continue;
+        const value=decodedActualTemperature(dataset,dataset.encoded[offset+validIndex]);
+        if(!Number.isFinite(value))continue;low=Math.min(low,value);high=Math.max(high,value);
+      }
+      minimum.push(Number.isFinite(low)?low:null);sampledMaximum.push(Number.isFinite(high)?high:null);
+    }
+  }else{
+    const frames=cellSurface?.temperature_frames_c?.[cellId]||[];
+    minimum=frames.map(values=>Math.min(...values.filter(Number.isFinite)));
+    sampledMaximum=frames.map(values=>Math.max(...values.filter(Number.isFinite)));
+  }
+  const storedMaximum=temperatureGraphs?.per_cell?.mesh_maximum_c?.[cellId]||[];
+  const maximum=storedMaximum.length===minimum.length?storedMaximum:sampledMaximum;
+  const result={minimum,maximum};cellTemperatureExtremaCache.set(cacheKey,result);return result;
+}
+function cellTemperatureExtremaAtTime(cellId){
+  const extrema=buildCellTemperatureExtrema(cellId),dataset=actualDatasets.get(cellSurface?.actual_dataset);
+  const storedMaximum=temperatureGraphs?.per_cell?.mesh_maximum_c?.[cellId]||[];
+  const second=clamp(Math.round(simulationTime),0,1800);
+  let sampleIndex=second;
+  if(dataset){
+    const step=Number(dataset.specification.time_step_s)||1,first=Number(dataset.specification.first_time_s)||0;
+    sampleIndex=Math.round((simulationTime-first)/step);
+  }
+  const seriesValue=(values,index)=>Array.isArray(values)&&values.length
+    ?values[clamp(index,0,values.length-1)]:null;
+  const maximum=storedMaximum.length?seriesValue(storedMaximum,second):seriesValue(extrema.maximum,sampleIndex);
+  const minimum=seriesValue(extrema.minimum,sampleIndex);
+  return {maximum:Number.isFinite(maximum)?maximum:null,minimum:Number.isFinite(minimum)?minimum:null};
+}
+function drawCellExtremaMap(w,h){
+  ctx.save();
+  ctx.fillStyle="#07131e";ctx.fillRect(0,0,w,h);
+  const titleSize=clamp(Math.round(w/62),19,27),subtitleSize=clamp(Math.round(w/92),13,17);
+  ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.fillStyle="#edf7ff";ctx.font=`800 ${titleSize}px system-ui`;
+  ctx.fillText("각 배터리 셀 최고·최저 온도",w/2,27);
+  ctx.fillStyle="#9fc0d5";ctx.font=`700 ${subtitleSize}px system-ui`;
+  ctx.fillText(`t = ${Math.round(simulationTime).toLocaleString()} s · ▲ 최고 · ▼ 최저 · °C · 매초 갱신`,w/2,53);
+
+  const top=74,bottom=44,side=42,rotatedWidth=box.y,rotatedHeight=box.x;
+  const scale=Math.max(.1,Math.min((w-side*2)/rotatedWidth,(h-top-bottom)/rotatedHeight));
+  const left=(w-rotatedWidth*scale)/2,layoutTop=top+Math.max(0,(h-top-bottom-rotatedHeight*scale)/2);
+  // Rotate this plan view in the opposite 90-degree direction: the 5–4–5–4–5
+  // rows run horizontally, IN is lower-left, and OUT is upper-right.
+  const screenPoint=(x,y)=>({x:left+(box.y-y)*scale,y:layoutTop+(box.x-x)*scale});
+  ctx.beginPath();
+  sceneOutline.forEach((point,index)=>{const p=screenPoint(point[0],point[1]);if(index===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y);});
+  ctx.closePath();ctx.fillStyle="#eaf3f9";ctx.fill();ctx.strokeStyle="#7293aa";ctx.lineWidth=2;ctx.stroke();
+
+  const range=sharedTemperatureRange(),portByCell=new Map();
+  for(const port of scenePorts){
+    const nearest=sceneCells.reduce((best,cell)=>{
+      const distance=Math.hypot(cell.x-port.x,cell.y-port.y);
+      return !best||distance<best.distance?{cell,distance}:best;
+    },null);
+    if(nearest)portByCell.set(nearest.cell.id,port);
+  }
+  const cellScreenPoints=sceneCells.map(cell=>screenPoint(cell.x,cell.y));
+  let nearestCellSpacing=Infinity;
+  for(let i=0;i<cellScreenPoints.length;i++)for(let j=i+1;j<cellScreenPoints.length;j++){
+    nearestCellSpacing=Math.min(nearestCellSpacing,Math.hypot(
+      cellScreenPoints[i].x-cellScreenPoints[j].x,
+      cellScreenPoints[i].y-cellScreenPoints[j].y
+    ));
+  }
+  for(const cell of sceneCells){
+    const p=screenPoint(cell.x,cell.y),radius=Math.max(16,cell.radius*scale),values=cellTemperatureExtremaAtTime(cell.id);
+    const colourValue=Number.isFinite(values.maximum)?clamp((values.maximum-range[0])/(range[1]-range[0])):.12;
+    const [red,green,blue]=cellSurfacePalette(colourValue),port=portByCell.get(cell.id);
+    ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fillStyle=`rgb(${red},${green},${blue})`;ctx.fill();
+    ctx.strokeStyle=port?.id==="IN"?"#0878e8":port?.id==="OUT"?"#e52d31":"rgba(8,45,74,.72)";
+    ctx.lineWidth=port?3.4:1.25;ctx.stroke();
+    // Size the labels from both the cell radius and the closest cell-to-cell
+    // spacing.  Values may extend slightly beyond the circle, but the spacing
+    // cap keeps neighbouring cell labels from touching each other.
+    const spacingValueCap=Number.isFinite(nearestCellSpacing)
+      ?clamp(Math.floor(nearestCellSpacing/4.25),16,28):28;
+    const valueSize=Math.min(clamp(Math.floor(radius*.52),16,28),spacingValueCap);
+    const idSize=Math.min(clamp(Math.floor(radius*.46),15,23),Math.max(15,valueSize-3));
+    ctx.shadowColor="transparent";ctx.shadowBlur=0;ctx.shadowOffsetY=0;ctx.lineJoin="round";
+    const outlinedText=(text,y,colour,size)=>{
+      ctx.font=`900 ${size}px system-ui`;ctx.lineWidth=Math.max(2.5,size*.24);
+      ctx.strokeStyle="rgba(255,255,255,.96)";ctx.strokeText(text,p.x,y);
+      ctx.fillStyle=colour;ctx.fillText(text,p.x,y);
+    };
+    outlinedText(cell.id,p.y-radius*.48,"#07131e",idSize);
+    // Three evenly separated rows keep the enlarged values readable.  The
+    // lowest row can cross the circle edge on compact screens by design.
+    const maximumText=Number.isFinite(values.maximum)?`▲${values.maximum.toFixed(2)}`:"▲—";
+    const minimumText=Number.isFinite(values.minimum)?`▼${values.minimum.toFixed(2)}`:"▼—";
+    outlinedText(maximumText,p.y+.02*radius,"#8b1028",valueSize);
+    outlinedText(minimumText,p.y+.54*radius,"#003f73",valueSize);
+    if(port){
+      const diameter=Number(port.radius)*2,label=`${port.id} Ø${Number.isFinite(diameter)?diameter.toFixed(0):"—"}`;
+      ctx.fillStyle=port.id==="IN"?"#075fc5":"#d12228";ctx.font=`900 ${clamp(valueSize,11,15)}px system-ui`;
+      ctx.fillText(label,p.x,p.y-radius-12);
+    }
+  }
+  const dimensionY=Math.min(h-15,layoutTop+rotatedHeight*scale+22),start=screenPoint(0,box.y),end=screenPoint(0,0);
+  ctx.strokeStyle="#9fc0d5";ctx.lineWidth=1.3;ctx.beginPath();ctx.moveTo(start.x,dimensionY);ctx.lineTo(end.x,dimensionY);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(start.x,dimensionY-5);ctx.lineTo(start.x,dimensionY+5);ctx.moveTo(end.x,dimensionY-5);ctx.lineTo(end.x,dimensionY+5);ctx.stroke();
+  ctx.fillStyle="#d8e8f2";ctx.font=`750 ${subtitleSize}px system-ui`;ctx.fillText(`${Number(box.y).toFixed(0)} mm`,(start.x+end.x)/2,dimensionY-9);
+  ctx.restore();
+}
+async function ensureCellTemperatureExtrema(cellId){
+  if(actualOneSecond&&cellSurface?.actual_dataset)await loadActualDataset(cellSurface.actual_dataset);
+  return buildCellTemperatureExtrema(cellId);
+}
 function temperatureSeriesColour(index,count){
   if(count===1)return "#1565c0";
   // Twenty-three individual cells need hue spacing, but every trace must
@@ -3895,6 +4551,14 @@ function activeTemperatureGraph(){
     const [basis,filename]=perCellMetricMeta[perCellMetric.value];
     return {title:`각 배터리별 온도 · ${basis}`,filename,definition:`C01–C23 각각의 ${basis}`,
       series:Object.entries(source).map(([label,values],index,array)=>({label,values,colour:temperatureSeriesColour(index,array.length)}))};
+  }
+  if(metric==="cell-extrema"){
+    const cellId=cellExtremaCell.value||"C01",extrema=buildCellTemperatureExtrema(cellId);
+    return {kind:"cell-extrema",title:`${cellId} 최고·최저 온도`,filename:`${cellId.toLowerCase()}-temperature-extrema`,
+      definition:`${cellId} 배터리 셀의 매초 최고·최저 온도`,series:[
+        {label:`${cellId} 최고온도`,values:extrema.maximum||[],colour:"#c62828",emphasis:true},
+        {label:`${cellId} 최저온도`,values:extrema.minimum||[],colour:"#1565c0",emphasis:true}
+      ]};
   }
   if(metric==="key-cells"){
     const source=temperatureGraphs?.per_cell?.[perCellMetric.value]||{};
@@ -3996,6 +4660,13 @@ function updateTemperatureChartStatus(){
     return;
   }
   if(!graph.series.length){temperatureChartStatus.textContent="해당 셀의 실제 온도 데이터 없음";return;}
+  if(graph.kind==="cell-extrema"){
+    const time=clamp(Math.round(simulationTime),0,1800),maximum=graph.series[0].values[time],minimum=graph.series[1].values[time];
+    temperatureChartStatus.textContent=Number.isFinite(maximum)&&Number.isFinite(minimum)
+      ?`${graph.definition} · ${time} s · 최고 ${maximum.toFixed(6)} °C · 최저 ${minimum.toFixed(6)} °C · 온도차 ${(maximum-minimum).toFixed(6)} K`
+      :"해당 셀의 실제 최고·최저 온도 데이터 없음";
+    return;
+  }
   if(graph.series.length===1){
     const value=graph.series[0].values[last];temperatureChartStatus.textContent=`${graph.definition} · 1800 s = ${value.toFixed(6)} °C`;
   }else{
@@ -4021,17 +4692,21 @@ function downloadCsv(filename,headers,rowValues){
   for(let time=0;time<=1800;time++)lines.push(rowValues(time).map(value=>csvValue(typeof value==="number"?value.toFixed(8):value)).join(","));
   downloadBlob(new Blob(["\ufeff",lines.join("\n")],{type:"text/csv;charset=utf-8"}),filename);
 }
-function updateTemperatureChart(){
+async function updateTemperatureChart(){
   const perCell=["per-cell","key-cells"].includes(temperatureChartMetric.value);
-  perCellMetric.hidden=!perCell;perCellMetricLabel.hidden=!perCell;drawTemperatureChart();
+  const extrema=temperatureChartMetric.value==="cell-extrema";
+  perCellMetric.hidden=!perCell;perCellMetricLabel.hidden=!perCell;cellExtremaCell.hidden=!extrema;cellExtremaCellLabel.hidden=!extrema;
+  if(extrema){temperatureChartStatus.textContent="배터리 셀 최고·최저 온도 계산 중…";await ensureCellTemperatureExtrema(cellExtremaCell.value||"C01");}
+  drawTemperatureChart();
 }
 temperatureChartMetric.addEventListener("change",updateTemperatureChart);
 perCellMetric.addEventListener("change",drawTemperatureChart);
-temperatureChartOpen.addEventListener("click",()=>{
+cellExtremaCell.addEventListener("change",updateTemperatureChart);
+temperatureChartOpen.addEventListener("click",async()=>{
   if(!temperatureGraphs)return;
   flowPlaying=false;flowPlay.textContent="▶ 재생";videoPlaying=false;figureVideo.pause();figurePreview.hidden=true;meshFigurePanel.hidden=true;convergenceGraphPanel.hidden=true;
   viewerControls.hidden=true;flowControls.hidden=true;canvasNote.hidden=true;temperatureGraphPanel.hidden=false;setDataLoadStatus("");
-  requestAnimationFrame(drawTemperatureChart);
+  await updateTemperatureChart();requestAnimationFrame(drawTemperatureChart);
 });
 temperatureChartClose.addEventListener("click",()=>{
   temperatureGraphPanel.hidden=true;viewerControls.hidden=false;flowControls.hidden=!flow.enabled;canvasNote.hidden=false;
@@ -4050,10 +4725,12 @@ temperatureChartCsv.addEventListener("click",()=>{
   }
   downloadCsv(`${graph.filename}.csv`,["time_s",...graph.series.map(line=>`${line.label}_C`)],time=>[time,...graph.series.map(line=>line.values[time])]);
 });
-temperatureChartAllCsv.addEventListener("click",()=>{
+temperatureChartAllCsv.addEventListener("click",async()=>{
   const cells=Object.keys(temperatureGraphs?.per_cell?.internal_volume_average_c||{});
-  const headers=["time_s","outlet_mass_weighted_average_C","battery_mesh_maximum_C","battery_surface_area_average_C","battery_internal_volume_average_C",...cells.map(cell=>`${cell}_internal_volume_average_C`)];
-  downloadCsv("all-temperature-metrics.csv",headers,time=>[time,temperatureGraphs.outlet_mass_weighted_average_c[time],temperatureGraphs.battery_mesh_maximum_c[time],temperatureGraphs.battery_surface_area_average_c[time],temperatureGraphs.battery_internal_volume_average_c[time],...cells.map(cell=>temperatureGraphs.per_cell.internal_volume_average_c[cell][time])]);
+  for(const cell of cells)await ensureCellTemperatureExtrema(cell);
+  const extrema=Object.fromEntries(cells.map(cell=>[cell,buildCellTemperatureExtrema(cell)]));
+  const headers=["time_s","outlet_mass_weighted_average_C","battery_mesh_maximum_C","battery_surface_area_average_C","battery_internal_volume_average_C",...cells.flatMap(cell=>[`${cell}_minimum_C`,`${cell}_maximum_C`])];
+  downloadCsv("all-temperature-metrics.csv",headers,time=>[time,temperatureGraphs.outlet_mass_weighted_average_c[time],temperatureGraphs.battery_mesh_maximum_c[time],temperatureGraphs.battery_surface_area_average_c[time],temperatureGraphs.battery_internal_volume_average_c[time],...cells.flatMap(cell=>[extrema[cell].minimum[time],extrema[cell].maximum[time]])]);
 });
 if(temperatureGraphs){
   const last=1800;
@@ -4062,10 +4739,14 @@ if(temperatureGraphs){
 function paintConvergenceChart(context,width,height){
   context.clearRect(0,0,width,height);context.fillStyle="#ffffff";context.fillRect(0,0,width,height);
   context.fillStyle="#17232d";context.font="700 18px system-ui";context.textAlign="left";
-  context.fillText(`${meshRunText(activeMeshRun(),"label")} · ${tr(convergence.label||"")} · ${tr("수렴 이력")}`,24,28);
+  const displayLabel=convergence.display_label||meshRunText(activeMeshRun(),"label");
+  context.fillText(`${tr(displayLabel)} · ${tr(convergence.label||"")} · ${tr("수렴 이력")}`,24,28);
   const series=convergence.series||[],allValues=series.flatMap(line=>line.points.map(point=>point[1])).filter(value=>Number.isFinite(value)&&value>0);
   if(!allValues.length){context.fillStyle="#c62828";context.font="700 14px system-ui";context.fillText(tr("저장된 residual 데이터가 없습니다."),24,62);return;}
-  const logHigh=Math.ceil(Math.log10(Math.max(...allValues))),logLow=Math.floor(Math.log10(Math.min(...allValues)));
+  const configuredGates=series.map(line=>Number(line.configured_gate)).filter(value=>Number.isFinite(value)&&value>0);
+  const residualGate=Number.isFinite(Number(convergence.residual_gate))?Number(convergence.residual_gate):(configuredGates.length?Math.min(...configuredGates):null);
+  const scaledValues=residualGate?[...allValues,residualGate]:allValues;
+  const logHigh=Math.ceil(Math.log10(Math.max(...scaledValues))),logLow=Math.floor(Math.log10(Math.min(...scaledValues)));
   const first=convergence.first_iteration,last=convergence.last_iteration,span=Math.max(1,last-first);
   const left=82,right=28,columns=width>900?3:2,legendRows=Math.ceil(series.length/columns),top=50+legendRows*18,bottom=58;
   const plotWidth=Math.max(100,width-left-right),plotHeight=Math.max(100,height-top-bottom),logSpan=Math.max(1,logHigh-logLow);
@@ -4088,6 +4769,13 @@ function paintConvergenceChart(context,width,height){
     context.strokeStyle="#e4ebef";context.beginPath();context.moveTo(left,y);context.lineTo(left+plotWidth,y);context.stroke();
     context.fillStyle="#526774";context.textAlign="right";context.fillText(`1e${exponent}`,left-10,y+4);
   }
+  if(residualGate){
+    const gateY=top+(logHigh-Math.log10(residualGate))/logSpan*plotHeight;
+    context.save();context.setLineDash([7,5]);context.strokeStyle="#b42318";context.lineWidth=1.6;
+    context.beginPath();context.moveTo(left,gateY);context.lineTo(left+plotWidth,gateY);context.stroke();context.restore();
+    context.fillStyle="#b42318";context.font="700 10px ui-monospace,monospace";context.textAlign="right";
+    context.fillText(`${tr("합격 기준")} ${residualGate.toExponential(1)}`,left+plotWidth-4,gateY-6);
+  }
   for(const line of series){
     context.strokeStyle=line.colour;context.lineWidth=2;context.beginPath();
     line.points.forEach((point,index)=>{
@@ -4108,27 +4796,31 @@ function drawConvergenceChart(){
   convergenceChartCanvas.width=Math.round(rect.width*ratio);convergenceChartCanvas.height=Math.round(rect.height*ratio);
   const context=convergenceChartCanvas.getContext("2d");context.setTransform(ratio,0,0,ratio,0,0);
   paintConvergenceChart(context,rect.width,rect.height);
+  const displayLabel=convergence.display_label||meshRunText(activeMeshRun(),"label");
   const pimpleAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration",timeStepAxis=convergence.axis_mode==="transient_time_step_iteration",transientAxis=pimpleAxis||timeStepAxis;
   if(window.CFDTwinI18n?.getLanguage()==="en"){
     const iterationLabel=pimpleAxis?"Cumulative PIMPLE Global Iterations":timeStepAxis?"Transient Energy Iterations per Second":"Steady-state Outer Iterations";
     const linearTotal=convergence.linear_iteration_total?` · total inner linear iterations ${convergence.linear_iteration_total.toLocaleString()}`:"";
     const timeRange=transientAxis&&Number.isFinite(convergence.last_time_s)?` · physical time ${Number(convergence.first_time_s||0).toLocaleString()}–${Number(convergence.last_time_s).toLocaleString()} s`:"";
     const comparison=pimpleAxis?" · fully coupled transient iterations · original OpenFOAM residuals":timeStepAxis?" · velocity, pressure, and turbulence converged earlier and then held fixed; this stage solves energy only":" · actual U/p/k/ω/h log; numerical definition differs from Fluent scaled residuals";
-    convergenceChartStatus.textContent=`${meshRunText(activeMeshRun(),"label")} · ${iterationLabel} ${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()} iterations${timeRange}${linearTotal}${comparison}`;
+    const failure=convergence.diagnostic_status==="failed"?` · FAILED: ${convergence.failure_reason_en||convergence.failure_reason||"acceptance gate not met"}`:"";
+    convergenceChartStatus.textContent=`${displayLabel} · ${iterationLabel} ${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()} iterations${timeRange}${linearTotal}${comparison}${failure}`;
     return;
   }
   const iterationLabel=pimpleAxis?"누적 PIMPLE 전역 반복":timeStepAxis?"1초 과도 에너지 반복":"정상상태 외부 반복";
   const linearTotal=convergence.linear_iteration_total?` · 방정식 내부 선형 반복 합계 ${convergence.linear_iteration_total.toLocaleString()}회`:"";
   const timeRange=transientAxis&&Number.isFinite(convergence.last_time_s)?` · 물리시간 ${Number(convergence.first_time_s||0).toLocaleString()}–${Number(convergence.last_time_s).toLocaleString()} s`:"";
   const comparison=pimpleAxis?" · 완전 연성 과도 반복 구조 · OpenFOAM 원본 잔차":timeStepAxis?" · 속도·압력·난류는 선행 단계에서 수렴 후 고정 · 이 단계는 energy만 계산":" · U/p/k/ω/h 실제 로그 · Fluent scaled residual과 수치 정의는 다름";
-  convergenceChartStatus.textContent=`${meshRunText(activeMeshRun(),"label")} · ${iterationLabel} ${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회${timeRange}${linearTotal}${comparison}`;
+  const failure=convergence.diagnostic_status==="failed"?` · 실패: ${convergence.failure_reason||"합격 기준 미달"}`:"";
+  convergenceChartStatus.textContent=`${displayLabel} · ${iterationLabel} ${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회${timeRange}${linearTotal}${comparison}${failure}`;
 }
 for(const history of convergenceHistories){
   if(!history?.available)continue;
   const option=document.createElement("option");option.value=history.id||"";
   const iterationText=Number.isFinite(history.last_iteration)?` · 누적 ${Number(history.last_iteration).toLocaleString()}회`:"";
   const timeText=Number.isFinite(history.last_time_s)?` · ${Number(history.first_time_s||0).toLocaleString()}–${Number(history.last_time_s).toLocaleString()} s`:"";
-  option.textContent=`${history.label||history.scope||history.id}${iterationText}${timeText}`;
+  const diagnosticPrefix=history.diagnostic_status==="failed"?"[실패 진단] ":"";
+  option.textContent=`${diagnosticPrefix}${history.label||history.scope||history.id}${iterationText}${timeText}`;
   convergenceHistorySelect.appendChild(option);
 }
 const requestedConvergenceHistory=initialParams.get("history");
@@ -4146,6 +4838,11 @@ function showConvergenceChart(){
   requestAnimationFrame(drawConvergenceChart);
 }
 convergenceChartOpen.addEventListener("click",showConvergenceChart);
+failedConvergenceChartOpen.addEventListener("click",()=>{
+  if(!failedConvergenceHistories.length)return;
+  convergence=failedConvergenceHistories[0];convergenceHistorySelect.value=convergence.id||"";
+  renderConvergenceSummary();showConvergenceChart();
+});
 convergenceChartClose.addEventListener("click",()=>{
   convergenceGraphPanel.hidden=true;viewerControls.hidden=false;flowControls.hidden=!flow.enabled;canvasNote.hidden=false;
   modeFieldset.hidden=!flow.enabled;displayOptions.hidden=!flow.enabled;horizontalSections.hidden=!flow.enabled||!visualMode.startsWith("xy-");verticalSections.hidden=!flow.enabled||!visualMode.startsWith("xz-");resize();
@@ -4164,14 +4861,27 @@ convergenceChartCsv.addEventListener("click",()=>{
 function renderConvergenceSummary(){
   if(convergence.available){
     const pimpleAxis=convergence.axis_mode==="cumulative_pimple_outer_iteration",timeStepAxis=convergence.axis_mode==="transient_time_step_iteration";
-    const validationPassed=String(convergence.validation_status||"").endsWith("_PASSED")||convergence.configured_residual_checks_passed;
-    const summaryRows={"상태":validationPassed?"복합 검증 통과":"원본 로그 저장","계산 단계":convergence.label||convergence.scope};
+    const diagnosticFailed=convergence.diagnostic_status==="failed";
+    const validationPassed=!diagnosticFailed&&(String(convergence.validation_status||"").endsWith("_PASSED")||convergence.configured_residual_checks_passed);
+    const summaryRows={"상태":diagnosticFailed?"검증 실패":validationPassed?"복합 검증 통과":"원본 로그 저장","계산 단계":convergence.label||convergence.scope};
     summaryRows[pimpleAxis?"누적 PIMPLE 반복":timeStepAxis?"1초 에너지 반복":"정상 외부 반복"]=`${convergence.first_iteration.toLocaleString()}–${convergence.last_iteration.toLocaleString()}회`;
     if(convergence.linear_iteration_total)summaryRows["내부 반복 합계"]=`${convergence.linear_iteration_total.toLocaleString()}회`;
     rows(convergenceSummary,summaryRows);convergenceChartOpen.disabled=false;
   }else{convergenceChartOpen.disabled=true;convergenceSummary.innerHTML="<dt>상태</dt><dd>로그 없음</dd>";}
 }
 renderConvergenceSummary();
+if(failedConvergenceHistories.length){
+  const failed=failedConvergenceHistories[0],observed=Number(failed.observed_residual),gate=Number(failed.residual_gate);
+  failedConvergenceCard.hidden=false;
+  rows(failedConvergenceSummary,{
+    "상태":"실패 · 합격 결과와 분리",
+    "계산":"Ø34 mm · 유동 초기화",
+    "반복":`${Number(failed.first_iteration).toLocaleString()}–${Number(failed.last_iteration).toLocaleString()}회`,
+    "압력 잔차":Number.isFinite(observed)&&Number.isFinite(gate)?`${observed.toExponential(3)} > ${gate.toExponential(1)}`:"기준 미달",
+    "메시":Number.isFinite(Number(failed.total_cells))?`${Number(failed.total_cells).toLocaleString()} cells`:"—",
+    "y⁺<1 면적":Number.isFinite(Number(failed.yplus_area_fraction))?`${(100*Number(failed.yplus_area_fraction)).toFixed(3)}% · 통과`:"—"
+  });
+}else{failedConvergenceCard.hidden=true;failedConvergenceChartOpen.disabled=true;}
 if(initialParams.get("panel")==="convergence")showConvergenceChart();
 let videoMode="none",videoPlaying=false,videoSimulationTime=0,videoFileTime=0,videoRenderAccumulator=0;
 function formatSimulationTime(value){
@@ -4487,6 +5197,22 @@ def refresh_viewer_ui_assets(output_dir: str | Path) -> None:
             .replace("__STYLE_ASSET__", style_asset)
             .replace("__APP_ASSET__", app_asset)
             .replace("__MODEL_ASSET__", model_asset))
+    mesh_html = MESH_HTML
+    case_manifest = output / "four_case_manifest.json"
+    if case_manifest.is_file():
+        manifest = json.loads(case_manifest.read_text(encoding="utf-8"))
+        ready_runs = [run for run in manifest.get("runs", []) if run.get("data_ready")]
+        if ready_runs:
+            for run in ready_runs:
+                run_id = str(run.get("id", ""))
+                asset_id = str(run.get("asset_source_id") or run_id)
+                for stem in ("mesh-data", "mesh-volume-data"):
+                    asset = output / f"{stem}-{asset_id}.js"
+                    if not asset.is_file() or asset.stat().st_size == 0:
+                        raise FileNotFoundError(asset)
+            if not (output / "four_case_data.js").is_file():
+                raise FileNotFoundError(output / "four_case_data.js")
+            mesh_html = enable_multi_case_mesh_selection(mesh_html)
     assets = Path(__file__).with_name("workflow_assets")
     for name, content in {
         "index.html": HOME_HTML,
@@ -4499,7 +5225,7 @@ def refresh_viewer_ui_assets(output_dir: str | Path) -> None:
         "app.js": JAVASCRIPT,
         style_asset: CSS,
         app_asset: JAVASCRIPT,
-        "mesh.html": MESH_HTML,
+        "mesh.html": mesh_html,
         "mesh.css": MESH_CSS,
         "mesh.js": MESH_JAVASCRIPT,
     }.items():
@@ -4608,7 +5334,7 @@ def write_viewer_bundle(
                 shutil.copy2(source, destination)
                 digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
                 viewer_artifacts.append(
-                    f"{destination.relative_to(output)}?v={digest}"
+                    f"{destination.relative_to(output).as_posix()}?v={digest}"
                 )
             figure["viewer_artifacts"] = viewer_artifacts
     actual_solver_data = bool(
@@ -4986,6 +5712,24 @@ def write_viewer_bundle(
             ),
             "manifest": heat_source_manifest,
         },
+        "surface_heat_transfer_coefficient": {
+            "status": (
+                "DIRECT_INTERFACE_DATA_AVAILABLE"
+                if interactive_cfd.get("cell_surface_heat_transfer")
+                else "NOT_SAMPLED_FOR_THIS_ARCHIVED_RUN"
+            ),
+            "definition": "h=abs(wallHeatFlux)/abs(Twall-Tnear-fluid)",
+            "wall_heat_flux": "OpenFOAM coolant-side wallHeatFlux patch field",
+            "fluid_reference_temperature": (
+                "containing coolant cell 0.35 mm outward from the interface"
+            ),
+            "scope": "coolant-facing surfaces of batteries C01-C23 only",
+            "units": "W/(m^2*K)",
+            "invalid_policy": (
+                "unavailable where abs(Twall-Tnear-fluid)<=1e-6 K; "
+                "no temporal or spatial fill"
+            ),
+        },
         "inputs": {
             "inlet_velocity_m_s": config.boundary.inlet_velocity_m_s,
             "inlet_temperature_K": config.boundary.inlet_temperature_k,
@@ -4999,6 +5743,8 @@ def write_viewer_bundle(
             "dynamic_viscosity_Pa_s": config.fluid.dynamic_viscosity_pa_s,
             "fluid_cp_J_kgK": config.fluid.specific_heat_j_kgk,
             "fluid_k_W_mK": config.fluid.thermal_conductivity_w_mk,
+            "battery_density_kg_m3": config.battery.density_kg_m3,
+            "battery_cp_J_kgK": config.battery.specific_heat_j_kgk,
         },
         "figures": figures,
         "resolved_input_sha256": config.resolved_input_sha256,

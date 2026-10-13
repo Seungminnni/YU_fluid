@@ -77,6 +77,99 @@ class ExperimentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'multiple of 500'):
             experiments.load_plan(self.config)
 
+    def test_automatic_retry_policy_is_frozen_and_validated(self):
+        self.raw["automatic_retry"] = {
+            "enabled": True,
+            "maximum_retries": 3,
+            "cold_flow_iteration_limits": [15000, 20000],
+            "steady_numerics_profiles": ["pressure_relaxation_0p15"],
+        }
+        self.write_config()
+        policy = experiments.load_plan(self.config)["cases"][0]["automatic_retry"]
+        self.assertEqual(policy["maximum_retries"], 3)
+        self.assertEqual(policy["cold_flow_iteration_limits"], [15000, 20000])
+        self.raw["automatic_retry"]["steady_numerics_profiles"] = ["typo"]
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "Unknown steady_numerics_profile"):
+            experiments.load_plan(self.config)
+
+    def test_measured_mesh_failure_selects_next_approved_profile(self):
+        batch = self.prepare()
+        entry = batch["jobs"][0]
+        job = Path(entry["job_dir"])
+        specification = batch["plan"]["cases"][0]
+        (job / "case/reports/production_mesh").mkdir(parents=True)
+        _write_json(job / "case/reports/production_mesh/layer_coverage.json", {"status": "failed"})
+        decision = experiments.automatic_retry_decision(
+            entry, specification, job,
+            {"status": "failed", "stage": "mesh", "message": "mesh gate failed"},
+        )
+        self.assertEqual(decision["action"], "retry")
+        self.assertEqual(decision["profile_index"], 1)
+        self.assertEqual(decision["diagnosis"]["category"], "mesh_quality")
+
+    def test_convergence_failure_increases_cap_then_changes_numerics(self):
+        batch = self.prepare()
+        entry = batch["jobs"][0]
+        job = Path(entry["job_dir"])
+        specification = batch["plan"]["cases"][0]
+        report = job / "case/runs/steady_cold_flow/reports/solver/cold_flow_validation.json"
+        _write_json(report, {
+            "status": "COLD_FLOW_VALIDATION_FAILED", "final_iteration": 9500,
+            "checks": {"last_200_flow_residuals_below_1e-3": False},
+        })
+        state = {"status": "failed", "stage": "steady", "message": "absolute iteration cap reached"}
+        first = experiments.automatic_retry_decision(entry, specification, job, state)
+        self.assertEqual(first["job_overrides"], {"cold_flow_maximum_iterations": 20000})
+        manifest = experiments.read(job / "job.json")
+        manifest["cold_flow_maximum_iterations"] = 20000
+        _write_json(job / "job.json", manifest)
+        second = experiments.automatic_retry_decision(entry, specification, job, state)
+        self.assertEqual(second["job_overrides"], {"steady_numerics_profile": "pressure_relaxation_0p15"})
+
+    def test_continuation_abort_is_diagnosed_as_numerical_instability(self):
+        batch = self.prepare()
+        entry = batch["jobs"][0]
+        job = Path(entry["job_dir"])
+        report = job / "case/runs/steady_cold_flow/reports/solver/cold_flow_validation.json"
+        _write_json(report, {
+            "status": "COLD_FLOW_VALIDATION_FAILED", "final_iteration": 1500,
+            # The 1500-iteration y+ value is diagnostic only. A later solver
+            # abort must take precedence over this preliminary wall result.
+            "checks": {"battery_yplus_gate_passed": False},
+        })
+        log_dir = job / "case/runs/steady_cold_flow/logs/solver"
+        log_dir.mkdir(parents=True)
+        (log_dir / "steady_cold_flow.log").write_text("End\n", encoding="utf-8")
+        (log_dir / "steady_cold_flow_continue_1500_to_6000.log").write_text(
+            "Negative initial temperature T0: -38.3\nFOAM parallel run aborting\n",
+            encoding="utf-8",
+        )
+        decision = experiments.automatic_retry_decision(
+            entry, batch["plan"]["cases"][0], job,
+            {"status": "failed", "stage": "steady", "message": "Cold flow did not reach the original checkpoint"},
+        )
+        self.assertEqual(decision["action"], "retry")
+        self.assertEqual(decision["diagnosis"]["category"], "numerical_instability")
+        self.assertEqual(
+            decision["job_overrides"],
+            {"steady_numerics_profile": "pressure_relaxation_0p15"},
+        )
+
+    def test_unmeasured_mesh_failure_is_not_retried_blindly(self):
+        batch = self.prepare()
+        entry = batch["jobs"][0]
+        job = Path(entry["job_dir"])
+        decision = experiments.automatic_retry_decision(
+            entry, batch["plan"]["cases"][0], job,
+            {"status": "failed", "stage": "mesh", "message": "Docker unavailable"},
+        )
+        self.assertEqual(decision["action"], "stop")
+        self.assertEqual(
+            decision["diagnosis"]["category"],
+            "infrastructure_or_unmeasured_mesh_failure",
+        )
+
     def test_failed_mesh_is_archived_and_regenerated_in_new_job(self):
         batch = self.prepare()
         original = Path(batch["jobs"][0]["job_dir"])

@@ -129,8 +129,10 @@
             <label>출구 절대압력 <small>Pa</small><input name="outlet_pressure_pa" type="number" value="101325" min="50000" max="300000" step="1" required></label>
             <label>메시 등급 <small>검증 셀 수</small><select name="mesh_target_cells" required>
               <option value="800000" selected>80만급 · 849,284셀</option>
+              <option value="400000">40만급 · 메시 독립성 시험</option>
               <option value="600000">60만급 · 목표 600,000셀</option>
               <option value="700000">70만급 · 732,766셀</option>
+              <option value="1000000">100만급 · 메시 독립성 시험</option>
             </select></label>
           </div>
           <div class="source-box"><strong>발열</strong><span>Peneklioglu / Bernardi 시간가변 열원 · 2C · 0–1800 s</span></div>

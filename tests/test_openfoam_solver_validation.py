@@ -43,7 +43,7 @@ class ColdFlowValidationTests(unittest.TestCase):
                         "smoothSolver: Solving for Uy, Initial residual = 2e-4, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for Uz, Initial residual = 1e-4, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for h, Initial residual = 1e-4, Final residual = 1e-6, No Iterations 2",
-                        "GAMG: Solving for p_rgh, Initial residual = 1e-3, Final residual = 1e-6, No Iterations 2",
+                        "GAMG: Solving for p_rgh, Initial residual = 1e-2, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for k, Initial residual = 1e-4, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for omega, Initial residual = 1e-6, Final residual = 1e-8, No Iterations 2",
                         "Solving for solid region batterySolid",
@@ -75,7 +75,7 @@ class ColdFlowValidationTests(unittest.TestCase):
             report = validate_cold_flow(log, yplus_report_path=yplus)
             self.assertEqual(report["status"], "COLD_FLOW_VALIDATION_FAILED")
             self.assertFalse(report["checks"]["minimum_5000_outer_iterations_completed"])
-            self.assertFalse(report["checks"]["last_200_flow_residuals_below_1e-4"])
+            self.assertFalse(report["checks"]["last_200_flow_residuals_below_1e-3"])
             self.assertEqual(report["monitor_summary"]["sample_count"], 21)
 
             # The same stable 200-iteration window is accepted only after the
@@ -84,7 +84,7 @@ class ColdFlowValidationTests(unittest.TestCase):
                 (f"Time = {5000 + int(line.split(' = ')[1])}" if line.startswith("Time = ") else line)
                 .replace("Initial residual = 2e-4", "Initial residual = 2e-5")
                 .replace("Initial residual = 1e-4", "Initial residual = 1e-5")
-                .replace("Initial residual = 1e-3", "Initial residual = 1e-5")
+                .replace("Initial residual = 1e-2", "Initial residual = 1e-5")
                 .replace("Initial residual = 3e-4", "Initial residual = 3e-5")
                 for line in rows
             ]
@@ -99,12 +99,12 @@ class ColdFlowValidationTests(unittest.TestCase):
                 "Time = 5100\nSolving for fluid region coolant\n"
                 "smoothSolver: Solving for Ux, Initial residual = 2e-5",
                 "Time = 5100\nSolving for fluid region coolant\n"
-                "smoothSolver: Solving for Ux, Initial residual = 2e-4",
+                "smoothSolver: Solving for Ux, Initial residual = 2e-3",
                 1,
             )
             log.write_text(spiked + "\n", encoding="utf-8")
             report = validate_cold_flow(log, yplus_report_path=yplus)
-            self.assertFalse(report["checks"]["last_200_flow_residuals_below_1e-4"])
+            self.assertFalse(report["checks"]["last_200_flow_residuals_below_1e-3"])
 
             yplus.write_text(
                 json.dumps({"status": "YPLUS_VALIDATION_FAILED"}),
@@ -127,7 +127,7 @@ class ColdFlowValidationTests(unittest.TestCase):
                         "smoothSolver: Solving for Uy, Initial residual = 2e-4, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for Uz, Initial residual = 1e-4, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for h, Initial residual = 1e-4, Final residual = 1e-6, No Iterations 2",
-                        "GAMG: Solving for p_rgh, Initial residual = 1e-3, Final residual = 1e-6, No Iterations 2",
+                        "GAMG: Solving for p_rgh, Initial residual = 1e-2, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for k, Initial residual = 1e-4, Final residual = 1e-6, No Iterations 2",
                         "smoothSolver: Solving for omega, Initial residual = 1e-6, Final residual = 1e-8, No Iterations 2",
                         "Solving for solid region batterySolid",
@@ -182,7 +182,7 @@ class ColdFlowValidationTests(unittest.TestCase):
             self.assertEqual(report["status"], "STEADY_CHT_VALIDATION_FAILED")
             self.assertFalse(report["checks"]["minimum_5000_outer_iterations_completed"])
             self.assertFalse(
-                report["checks"]["last_200_flow_and_energy_residuals_below_1e-4"]
+                report["checks"]["last_200_flow_and_energy_residuals_below_1e-3"]
             )
             self.assertAlmostEqual(
                 report["monitor_summary"]["mean_energy_imbalance_fraction"],

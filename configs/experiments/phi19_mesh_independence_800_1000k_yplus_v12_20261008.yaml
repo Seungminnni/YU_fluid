@@ -1,0 +1,54 @@
+schema_version: 1
+name: phi19_mesh_independence_800_1000k_yplus_v12_20261008
+
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+
+overlays:
+  - ../recalculation_600k_phi19_vertical_flip_20260922.yaml
+
+steady_numerics_profile: pressure_relaxation_0p15
+cold_flow_maximum_iterations: 20000
+automatic_retry:
+  maximum_retries: 12
+
+cases:
+  - name: phi19_mesh_800k_yplus_v12
+    inputs:
+      mesh_target_cells: 800000
+    mesh_profiles:
+      - production_phi19_mesh_study_800k_yplus_v12
+      - production_phi19_mesh_study_800k_yplus_v13_quality
+      - production_phi19_mesh_study_800k_yplus_v14_c18
+      - production_phi19_mesh_study_800k_yplus_v15_transition
+      - production_phi19_mesh_study_800k_yplus_v16_transition
+      - production_phi19_mesh_study_800k_yplus_v17_phase_3p01
+      - production_phi19_mesh_study_800k_yplus_v18_phase_2p99
+      - production_phi19_mesh_study_800k_yplus_v19_xy_blocks
+      - production_phi19_mesh_study_800k_yplus_v20_xyz_blocks
+      - production_phi19_mesh_study_800k_yplus_v21_c12_c18
+      - production_phi19_mesh_study_800k_yplus_v22_motion
+      - production_phi19_mesh_study_800k_yplus_v23_c18_motion
+
+  - name: phi19_mesh_1000k_yplus_v12
+    inputs:
+      mesh_target_cells: 1000000
+    mesh_profiles:
+      - production_phi19_mesh_study_1000k_yplus_v12
+      - production_phi19_mesh_study_1000k_yplus_v13_quality
+      - production_phi19_mesh_study_1000k_yplus_v14_6um_11layers
+      - production_phi19_mesh_study_1000k_yplus_v15_c13
+      - production_phi19_mesh_study_1000k_yplus_v16_layer_continuity
+      - production_phi19_mesh_study_1000k_yplus_v17_c13_c18
+      - production_phi19_mesh_study_1000k_yplus_v18_motion
+      - production_phi19_mesh_study_1000k_yplus_v19_4um
+      - production_phi19_mesh_study_1000k_yplus_v20_4um_13layers
+      - production_phi19_mesh_study_1000k_yplus_v21_4um_13layers_min2
+      - production_phi19_mesh_study_1000k_yplus_v22_feature120
+      - production_phi19_mesh_study_1000k_yplus_v23_layer_insert75
+      - production_phi19_mesh_study_1000k_yplus_v24_surface_l0
+      - production_phi19_mesh_study_1000k_yplus_v25_surface_l0_4um_13layers
+      - production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67

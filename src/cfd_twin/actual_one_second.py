@@ -33,7 +33,10 @@ class ProbeSeries:
 
 
 _PROBE_RE = re.compile(
-    r"^# Probe\s+(\d+)\s+\(([^)]+)\)(?:\s+# Not Found)?\s*$"
+    # patchProbes appends details such as ``at patch ... with a distance ...``
+    # after the sampled coordinates, while ordinary probes end immediately.
+    # Keep accepting both forms; the trailing text is diagnostic only.
+    r"^# Probe\s+(\d+)\s+\(([^)]+)\)(?:\s+.*)?$"
 )
 
 
@@ -145,10 +148,12 @@ def _probe_specs(run_dir: Path) -> dict[str, dict[str, object]]:
         },
     }
     for name, fraction, label in (
+        ("xy04", 3.5 / 82.0, "Z = 3.5 mm · lower coolant gap"),
         ("xy15", 0.15, "Z = 12.3 mm"),
         ("xy33", 0.325, "Z = 26.7 mm"),
         ("xy68", 0.675, "Z = 55.4 mm"),
         ("xy85", 0.85, "Z = 69.7 mm"),
+        ("xy96", 78.5 / 82.0, "Z = 78.5 mm · upper coolant gap"),
     ):
         specs[name] = {
             "path": root / f"actual_{name}_temperature_1s/coolant/0/T",
@@ -191,6 +196,75 @@ def _probe_specs(run_dir: Path) -> dict[str, dict[str, object]]:
     return specs
 
 
+def _heat_transfer_probe_series(run_dir: Path) -> dict[str, ProbeSeries] | None:
+    """Load the three direct interface quantities used for local convection h.
+
+    Old validated runs predate these probes and legitimately return ``None``;
+    a partially written new set is rejected instead of silently falling back
+    to the former whole-cell effective coefficient.
+    """
+
+    root = run_dir / "postProcessing"
+    paths = {
+        "wall_temperature": root
+        / "actual_battery_interface_wall_1s/coolant/0/T",
+        "wall_heat_flux": root
+        / "actual_battery_interface_wall_1s/coolant/0/wallHeatFlux",
+        "near_fluid_temperature": root
+        / "actual_battery_near_surface_fluid_temperature_1s/coolant/0/T",
+    }
+    present = {name: path.is_file() for name, path in paths.items()}
+    if not any(present.values()):
+        return None
+    if not all(present.values()):
+        missing = sorted(name for name, exists in present.items() if not exists)
+        raise ValueError(f"incomplete battery-interface heat-transfer probes: {missing}")
+    series = {name: read_probe_series(path) for name, path in paths.items()}
+    wall = series["wall_temperature"]
+    for name, probe in series.items():
+        if len(probe.points) != len(wall.points):
+            raise ValueError(f"{name}: interface probe point count changed")
+        if probe.valid_indices != wall.valid_indices:
+            raise ValueError(f"{name}: interface valid-point mask changed")
+    return series
+
+
+def _iter_heat_transfer_rows(series: dict[str, ProbeSeries]):
+    """Yield local h=|q''|/|Twall-Tnear-fluid| without spatial filling."""
+
+    iterators = {name: iter(iter_probe_series_rows(probe)) for name, probe in series.items()}
+    valid = np.asarray(series["wall_temperature"].valid_indices, dtype=int)
+    while True:
+        rows: dict[str, tuple[int, np.ndarray]] = {}
+        ended = []
+        for name, iterator in iterators.items():
+            try:
+                rows[name] = next(iterator)
+                ended.append(False)
+            except StopIteration:
+                ended.append(True)
+        if all(ended):
+            return
+        if any(ended):
+            raise ValueError("heat-transfer probe series ended at different times")
+        times = {row[0] for row in rows.values()}
+        if len(times) != 1:
+            raise ValueError(f"heat-transfer probe times differ: {sorted(times)}")
+        wall_temperature = rows["wall_temperature"][1][valid]
+        wall_heat_flux = rows["wall_heat_flux"][1][valid]
+        near_fluid_temperature = rows["near_fluid_temperature"][1][valid]
+        if not all(
+            np.all(np.isfinite(values))
+            for values in (wall_temperature, wall_heat_flux, near_fluid_temperature)
+        ):
+            raise ValueError(f"non-finite interface probe source at {next(iter(times))} s")
+        delta_temperature = np.abs(wall_temperature - near_fluid_temperature)
+        coefficient = np.full(delta_temperature.shape, np.nan, dtype=float)
+        usable = delta_temperature > 1.0e-6
+        coefficient[usable] = np.abs(wall_heat_flux[usable]) / delta_temperature[usable]
+        yield next(iter(times)), coefficient
+
+
 def _mesh_identity(run_dir: Path, case_dir: Path | None = None) -> tuple[str, int]:
     """Read the executed mesh identity instead of stamping a legacy L3 count."""
 
@@ -224,7 +298,7 @@ def build_actual_one_second_bundle(
     end_time_s: int = 1800,
     mesh_case_dir: str | Path | None = None,
 ) -> dict[str, object]:
-    """16개 직접 probe 데이터셋을 총 1,801개의 uint16 프레임으로 만든다."""
+    """Pack direct temperature probes and optional local interface h frames."""
 
     run = Path(run_dir).resolve()
     output = Path(output_dir).resolve()
@@ -322,6 +396,82 @@ def build_actual_one_second_bundle(
             }
         )
         datasets[name] = metadata
+
+    heat_transfer_series = _heat_transfer_probe_series(run)
+    if heat_transfer_series is not None:
+        wall = heat_transfer_series["wall_temperature"]
+        destination = output / "cell_surface_heat_transfer_coefficient.f32"
+        times: list[int] = []
+        finite_minimum = math.inf
+        finite_maximum = -math.inf
+        unavailable_count = 0
+        with destination.open("wb") as stream:
+            for time_s, coefficient in _iter_heat_transfer_rows(heat_transfer_series):
+                times.append(time_s)
+                finite = coefficient[np.isfinite(coefficient)]
+                unavailable_count += int(coefficient.size - finite.size)
+                if finite.size:
+                    finite_minimum = min(finite_minimum, float(finite.min()))
+                    finite_maximum = max(finite_maximum, float(finite.max()))
+                stream.write(coefficient.astype("<f4").tobytes())
+        if times != expected_times:
+            raise ValueError(
+                "cell_surface_heat_transfer_coefficient: expected complete "
+                f"1..{end_time_s} s rows, found {len(times)}"
+            )
+        if not math.isfinite(finite_minimum) or not math.isfinite(finite_maximum):
+            raise ValueError("local heat-transfer coefficient has no finite samples")
+        packed_coefficient = np.memmap(destination, dtype="<f4", mode="r")
+        finite_packed = np.asarray(
+            packed_coefficient[np.isfinite(packed_coefficient)], dtype=float
+        )
+        distribution_percentiles = {
+            str(percentile): float(np.percentile(finite_packed, percentile))
+            for percentile in (1, 5, 25, 50, 75, 90, 95, 99, 99.5, 99.9)
+        }
+        recommended_upper = max(
+            1000.0,
+            1000.0 * math.ceil(distribution_percentiles["99.9"] / 1000.0),
+        )
+        datasets["cell_surface_heat_transfer_coefficient"] = {
+            "file": destination.name,
+            "kind": "battery-coolant-interface-local-convection",
+            "dtype": "float32-little-endian",
+            "point_count": len(wall.points),
+            "valid_count": len(wall.valid_indices),
+            "valid_indices": wall.valid_indices,
+            "frame_count": end_time_s,
+            "first_time_s": 1,
+            "last_time_s": end_time_s,
+            "time_step_s": 1,
+            "angular_segments": 32,
+            "axial_segments": 16,
+            "cell_count": 23,
+            "samples_per_cell": 32 * 16 + 2 * 32,
+            "units": "W/(m^2*K)",
+            "definition": "h=abs(wallHeatFlux)/abs(Twall-Tnear-fluid)",
+            "wall_heat_flux_source": "OpenFOAM coolant-side wallHeatFlux patch field",
+            "wall_temperature_source": "OpenFOAM coolant-side interface patch T",
+            "fluid_reference_temperature_source": (
+                "OpenFOAM containing coolant cell 0.35 mm outward from the interface"
+            ),
+            "sampling": "OpenFOAM patchProbes plus containing-cell probes; no interpolation",
+            "invalid_policy": (
+                "NaN only where abs(Twall-Tnear-fluid)<=1e-6 K; no temporal or spatial fill"
+            ),
+            "unavailable_value_count": unavailable_count,
+            "value_range_w_m2k": [finite_minimum, finite_maximum],
+            "distribution_percentiles_w_m2k": distribution_percentiles,
+            "recommended_fixed_display_upper_w_m2k": recommended_upper,
+            "display_range_policy": (
+                "shared fixed 0..global max of per-run 99.9th-percentile rounded up "
+                "to 1000 W/(m^2*K); higher direct values remain valid and saturate"
+            ),
+            "source_segments": {
+                name: [str(item.path) for item in probe.files]
+                for name, probe in heat_transfer_series.items()
+            },
+        }
 
     manifest = {
         "schema_version": 1,
@@ -421,6 +571,59 @@ def validate_actual_one_second_bundle(
             "checks": checks,
             "maximum_absolute_error_k": maximum_error,
             "passed": passed,
+        }
+    heat_transfer_series = _heat_transfer_probe_series(run)
+    heat_transfer_spec = manifest["datasets"].get(
+        "cell_surface_heat_transfer_coefficient"
+    )
+    if heat_transfer_series is not None:
+        if not isinstance(heat_transfer_spec, dict):
+            raise ValueError("local heat-transfer source exists but packed dataset is missing")
+        wall = heat_transfer_series["wall_temperature"]
+        encoded = np.memmap(
+            output / str(heat_transfer_spec["file"]), dtype="<f4", mode="r"
+        )
+        expected_values = int(heat_transfer_spec["frame_count"]) * len(
+            wall.valid_indices
+        )
+        size_matches = encoded.size == expected_values
+        times: list[int] = []
+        maximum_absolute_error = 0.0
+        values_match = size_matches
+        if size_matches:
+            frames = encoded.reshape(int(heat_transfer_spec["frame_count"]), -1)
+            for frame, (time_s, expected) in enumerate(
+                _iter_heat_transfer_rows(heat_transfer_series)
+            ):
+                times.append(time_s)
+                decoded = np.asarray(frames[frame], dtype=float)
+                if not np.array_equal(np.isnan(decoded), np.isnan(expected)):
+                    values_match = False
+                    continue
+                finite = np.isfinite(expected)
+                if finite.any():
+                    maximum_absolute_error = max(
+                        maximum_absolute_error,
+                        float(np.max(np.abs(decoded[finite] - expected[finite]))),
+                    )
+                if not np.allclose(
+                    decoded, expected, rtol=1.0e-6, atol=1.0e-4, equal_nan=True
+                ):
+                    values_match = False
+        htc_checks = {
+            "binary_value_count_matches": size_matches,
+            "integer_second_rows_complete": times == expected_times,
+            "valid_indices_match_source": wall.valid_indices
+            == heat_transfer_spec.get("valid_indices"),
+            "float32_values_match_direct_sources": values_match,
+            "no_temporal_or_spatial_fill": True,
+        }
+        htc_passed = all(htc_checks.values())
+        all_passed = all_passed and htc_passed
+        results["cell_surface_heat_transfer_coefficient"] = {
+            "checks": htc_checks,
+            "maximum_absolute_error_w_m2k": maximum_absolute_error,
+            "passed": htc_passed,
         }
     report = {
         "schema_version": 1,

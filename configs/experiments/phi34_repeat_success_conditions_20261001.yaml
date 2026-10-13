@@ -1,0 +1,14 @@
+# Fresh Ø34 retry using the unchanged conditions that passed Ø28 and Ø31.
+schema_version: 1
+name: phi34_repeat_success_conditions_20261001
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+  mesh_target_cells: 600000
+mesh_profiles:
+  - production_frame_fit_8um_10layers_ab_B
+cases:
+  - name: phi34
+    overlays: [../frame_fit_water_phi34_20260929.yaml]

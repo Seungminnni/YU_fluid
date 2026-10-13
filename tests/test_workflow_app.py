@@ -62,6 +62,11 @@ class WorkflowAppTests(unittest.TestCase):
         prepared = prepare_inputs(inputs | {"cad_mode": "baseline"}, run_active=False)
         self.assertEqual(prepared["inputs"]["mesh_target_cells"], 600000)
 
+    def test_reviewed_comparison_coolant_identifier_is_preserved(self) -> None:
+        inputs = {**self.SOLVER_INPUTS, "coolant": "dynalene_pao2_20c"}
+        prepared = prepare_inputs(inputs | {"cad_mode": "baseline"}, run_active=False)
+        self.assertEqual(prepared["inputs"]["coolant"], "dynalene_pao2_20c")
+
     def test_parametric_start_freezes_generated_steps_and_launches_real_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -15,7 +15,7 @@ from pathlib import Path
 RETRYABLE_CHECKS = {
     "cold": {
         "minimum_5000_outer_iterations_completed",
-        "last_200_flow_residuals_below_1e-4",
+        "last_200_flow_residuals_below_1e-3",
         "pilot_derived_residual_floors_reached",
         "monitor_window_has_at_least_21_samples",
         "mass_imbalance_below_0p1_percent",
@@ -23,7 +23,7 @@ RETRYABLE_CHECKS = {
     },
     "cht": {
         "minimum_5000_outer_iterations_completed",
-        "last_200_flow_and_energy_residuals_below_1e-4",
+        "last_200_flow_and_energy_residuals_below_1e-3",
         "pilot_derived_residual_floors_reached",
         "monitor_window_has_at_least_21_samples",
         "mass_imbalance_below_0p1_percent",

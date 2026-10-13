@@ -164,6 +164,16 @@ class ViewerReleaseTests(unittest.TestCase):
                 self.assertEqual(
                     archive.read("viewer/results.html"), (server / "results.html").read_bytes()
                 )
+                self.assertIn("OPEN_3D_RESULTS.cmd", archive.namelist())
+                self.assertIn("바로열기_3D결과.cmd", archive.namelist())
+                self.assertIn("serve-viewer.ps1", archive.namelist())
+                self.assertIn("실행방법.txt", archive.namelist())
+                launcher = archive.read("OPEN_3D_RESULTS.cmd").decode("utf-8")
+                self.assertIn("serve-viewer.ps1", launcher)
+                self.assertNotIn("python", launcher.lower())
+                server_script = archive.read("serve-viewer.ps1").decode("utf-8")
+                self.assertIn("TcpListener", server_script)
+                self.assertIn("_cfd_twin_health", server_script)
 
     def test_rejects_incomplete_source_without_changing_existing_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

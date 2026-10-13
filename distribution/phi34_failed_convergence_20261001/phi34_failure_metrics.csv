@@ -1,0 +1,9 @@
+run_id,label,iterations,pressure_initial_residual_last200_max,Ux_initial_residual_last200_max,Uy_initial_residual_last200_max,yplus_lt1_area_percent,status,source_note
+9547a527cad840cab63e5d28de654823,8um_10layers_B,6000,4.3286e-4,,,94.5825,failed_yplus_and_pressure,documented failure summary
+c3bf655d46fe4c8abf7037618f6fd53c,6um_11layers_baseline,9500,4.6699e-4,,,95.3181,failed_pressure_only,documented failure summary
+fb607bcbbd384bccb8501768ab494663,limited_laplacian_0p5,9500,1.5042e-3,1.6225e-4,1.3192e-4,95.2332,failed_pressure_and_velocity_residuals,documented failure summary
+55c6f73943a341389064203269d1ec40,6um_12layers,6000,4.4098e-4,,,92.7160,failed_yplus_and_pressure,documented failure summary
+2bbb7ad9f42d4654b9580f280cfa9398,p_rgh_relTol_zero,9500,4.6581e-4,,,95.3181,failed_pressure_only,documented failure summary
+7552f861cd814ecf9d5963aaebb0fad8,relTol_zero_plus_pressure_backflow,9500,4.7806e-4,,,95.3181,failed_pressure_only,documented failure summary
+f95e4ae7a70943729e056b3dfd8636cf,pressure_backflow_plus_relaxation_0p15,176,,,,,diverged_negative_temperature_minus269p882K,no documented pressure residual value
+5e48d0957b13481595b5ce7938afd6f6,pressure_backflow_plus_relaxation_0p5,9500,3.0479e-4,,,95.3118,failed_pressure_only_best_documented_attempt,documented failure summary

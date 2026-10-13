@@ -10,7 +10,8 @@ from cfd_twin.cad_case_drawings import write_case_drawings
 from cfd_twin.multi_case_viewer import (
     add_temperature_display_variant, assemble_four_case_viewer, combine_models, read_viewer_model,
     publish_diameter_mesh_viewer, prune_archived_diameter_results,
-    refresh_diameter_comparison,
+    refresh_diameter_comparison, synchronize_flow_legends,
+    synchronize_surface_heat_transfer_legend,
 )
 from cfd_twin.mesh_viewer import HTML as MESH_HTML
 
@@ -49,6 +50,109 @@ def _source_model(diameter: int, cells: int) -> dict:
 
 
 class MultiCaseViewerTests(unittest.TestCase):
+    def test_velocity_and_pressure_legends_are_fixed_across_runs(self) -> None:
+        model = {
+            "mesh_runs": [
+                {"id": "preserved", "asset_source_id": "preserved"},
+                {"id": "direct", "asset_source_id": "direct"},
+            ],
+            "inputs_by_mesh": {
+                "preserved": {"fluid_density_kg_m3": 1000.0},
+                "direct": {"fluid_density_kg_m3": 1000.0},
+            },
+            "interactive_cfd_by_mesh": {
+                "preserved": {
+                    "sections": {"xy": {
+                        "velocity_m_s": [0.1, 0.2],
+                        "velocity_vectors_m_s": [[0.0, 0.0, 0.1], [0.0, 0.0, 0.2]],
+                        "column_step_mm": [1.0, 0.0, 0.0],
+                        "row_step_mm": [0.0, 1.0, 0.0],
+                    }}
+                },
+                "direct": {
+                    "sections": {
+                        "xy": {
+                            "velocity_m_s": [0.1, 0.3],
+                            "velocity_vectors_m_s": [[0.0, 0.0, 0.1], [0.0, 0.0, 0.3]],
+                            "column_step_mm": [1.0, 0.0, 0.0],
+                            "row_step_mm": [0.0, 1.0, 0.0],
+                            "pressure_gauge_pa": [-12.0, 84.0],
+                        }
+                    }
+                },
+            }
+        }
+        fixed = synchronize_flow_legends(model)
+        self.assertEqual(fixed["velocity"], [0.0, 0.30000000000000004])
+        self.assertAlmostEqual(fixed["mass_flow"][1], 0.0003)
+        self.assertEqual(fixed["pressure"], [-500.0, 500.0])
+        self.assertAlmostEqual(
+            model["interactive_cfd_by_mesh"]["direct"]["fixed_mass_flow_legend_range_kg_s"][1],
+            0.0003,
+        )
+        self.assertNotIn("fixed_mass_flux_legend_range_kg_m2_s", model["interactive_cfd_by_mesh"]["direct"])
+        self.assertIn("99.9th-percentile", model["flow_legend_contract"]["velocity_legend_policy"])
+        self.assertIn("99.9th-percentile", model["flow_legend_contract"]["mass_flow_legend_policy"])
+        self.assertFalse(model["interactive_cfd_by_mesh"]["preserved"]["pressure_available"])
+        self.assertTrue(model["interactive_cfd_by_mesh"]["direct"]["pressure_available"])
+        self.assertEqual(
+            model["interactive_cfd_by_mesh"]["direct"]["fixed_pressure_legend_range_pa"],
+            [-500.0, 500.0],
+        )
+
+    def test_mass_flow_uses_normal_velocity_and_rendered_patch_area(self) -> None:
+        model = {
+            "inputs_by_mesh": {"case": {"fluid_density_kg_m3": 1000.0}},
+            "interactive_cfd_by_mesh": {
+                "case": {
+                    "sections": {
+                        "xy": {
+                            "velocity_m_s": [10.0, 0.2],
+                            "velocity_vectors_m_s": [[10.0, 0.0, 0.0], [0.0, 0.0, 0.2]],
+                            "column_step_mm": [2.0, 0.0, 0.0],
+                            "row_step_mm": [0.0, 3.0, 0.0],
+                            "pressure_gauge_pa": [0.0, 0.0],
+                        }
+                    }
+                }
+            },
+        }
+        fixed = synchronize_flow_legends(model)
+        # Tangential 10 m/s contributes zero. The normal sample is
+        # 1000 kg/m3 * 0.2 m/s * 6e-6 m2 = 0.0012 kg/s, rounded upward.
+        self.assertAlmostEqual(fixed["mass_flow"][1], 0.002)
+
+    def test_surface_heat_transfer_legend_is_fixed_across_runs(self) -> None:
+        model = {
+            "interactive_cfd_by_mesh": {
+                "old": {"actual_one_second": {"datasets": {}}},
+                "phi32": {
+                    "cell_surface_heat_transfer": {
+                        "actual_dataset": "cell_surface_heat_transfer_coefficient",
+                        "value_range_w_m2k": [12.0, 742.0],
+                    }
+                },
+                "phi33": {
+                    "cell_surface_heat_transfer": {
+                        "actual_dataset": "cell_surface_heat_transfer_coefficient",
+                        "value_range_w_m2k": [9.0, 1120.0],
+                    }
+                },
+            }
+        }
+        fixed = synchronize_surface_heat_transfer_legend(model)
+        self.assertEqual(fixed, [0.0, 2000.0])
+        self.assertNotIn(
+            "cell_surface_heat_transfer",
+            model["interactive_cfd_by_mesh"]["old"],
+        )
+        for run_id in ("phi32", "phi33"):
+            self.assertEqual(
+                model["interactive_cfd_by_mesh"][run_id]
+                ["cell_surface_heat_transfer"]["fixed_legend_range_w_m2k"],
+                fixed,
+            )
+
     def test_publishes_independent_mesh_assets_for_each_diameter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -86,6 +190,30 @@ class MultiCaseViewerTests(unittest.TestCase):
                     (viewer / f"mesh-volume-data-{run_id}.js").read_text(encoding="utf-8"),
                     f"volume-{run_id}",
                 )
+
+    def test_refresh_keeps_multi_case_mesh_selector(self) -> None:
+        from cfd_twin.viewer import refresh_viewer_ui_assets
+
+        with tempfile.TemporaryDirectory() as directory:
+            viewer = Path(directory)
+            (viewer / "results.html").write_text(
+                '<script src="model.js"></script>', encoding="utf-8"
+            )
+            (viewer / "model.js").write_text("window.CFD_TWIN_MODEL = {};\n", encoding="utf-8")
+            (viewer / "four_case_data.js").write_text("window.CFD_FOUR_CASE_MANIFEST={};\n", encoding="utf-8")
+            (viewer / "four_case_manifest.json").write_text(
+                json.dumps({"runs": [{"id": "precision", "data_ready": True}]}),
+                encoding="utf-8",
+            )
+            for stem in ("mesh-data", "mesh-volume-data"):
+                (viewer / f"{stem}-precision.js").write_text("mesh", encoding="utf-8")
+
+            refresh_viewer_ui_assets(viewer)
+
+            html = (viewer / "mesh.html").read_text(encoding="utf-8")
+            self.assertIn('id="mesh-case-select"', html)
+            self.assertIn('src="four_case_data.js"', html)
+            self.assertNotIn('src="mesh-data.js"', html)
 
     def test_comparison_legend_variant_reuses_validated_water_data(self) -> None:
         model = _source_model(25, 624_788)

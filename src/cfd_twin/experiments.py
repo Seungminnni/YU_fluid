@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -31,6 +32,50 @@ from .workflow_run import (
 )
 
 DEFAULT_CONFIG = SOURCE_ROOT / "configs/experiments/frame_fit_water.yaml"
+
+DEFAULT_AUTOMATIC_RETRY = {
+    "enabled": True,
+    "maximum_retries": 6,
+    "cold_flow_iteration_limits": [20_000],
+    "steady_numerics_profiles": [
+        "pressure_relaxation_0p15",
+        "pressure_limited_0p5",
+        "pressure_reltol_zero",
+        "pressure_relaxation_0p5",
+    ],
+}
+
+
+def _automatic_retry_policy(raw: dict, case: dict) -> dict:
+    """Freeze bounded recovery choices without changing any acceptance gate."""
+
+    policy = copy.deepcopy(DEFAULT_AUTOMATIC_RETRY)
+    for source in (raw.get("automatic_retry"), case.get("automatic_retry")):
+        if source is None:
+            continue
+        if not isinstance(source, dict):
+            raise ValueError("automatic_retry must be a mapping")
+        unknown = set(source) - set(DEFAULT_AUTOMATIC_RETRY)
+        if unknown:
+            raise ValueError(f"Unknown automatic_retry keys: {', '.join(sorted(unknown))}")
+        policy.update(source)
+    if not isinstance(policy["enabled"], bool):
+        raise ValueError("automatic_retry.enabled must be boolean")
+    maximum = policy["maximum_retries"]
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or not 0 <= maximum <= 12:
+        raise ValueError("automatic_retry.maximum_retries must be an integer from 0 to 12")
+    limits = policy["cold_flow_iteration_limits"]
+    if not isinstance(limits, list) or len(set(limits)) != len(limits):
+        raise ValueError("automatic_retry.cold_flow_iteration_limits must be a unique list")
+    policy["cold_flow_iteration_limits"] = sorted(
+        validate_maximum_iterations(value) for value in limits
+    )
+    profiles = policy["steady_numerics_profiles"]
+    if not isinstance(profiles, list) or len(set(profiles)) != len(profiles):
+        raise ValueError("automatic_retry.steady_numerics_profiles must be a unique list")
+    for profile in profiles:
+        validate_profile(profile)
+    return policy
 
 
 def read(path: Path) -> dict:
@@ -87,7 +132,8 @@ def load_plan(path: Path) -> dict:
         config = load_config(BASE_CONFIG, overlay_paths=(THERMAL_OVERLAY,), overrides=overrides)
         geometry_report(config)
         plan["cases"].append({"name": name, "inputs": inputs, "mesh_profiles": profiles,
-                              "geometry_overrides": overrides})
+                              "geometry_overrides": overrides,
+                              "automatic_retry": _automatic_retry_policy(raw, case)})
         numerical_profile = case.get("steady_numerics_profile", raw.get("steady_numerics_profile"))
         validate_profile(numerical_profile)
         if numerical_profile is not None:
@@ -178,7 +224,178 @@ def _retryable(job: Path, state: dict) -> bool:
     return state.get("stage") == "steady" and report.is_file() and read(report).get("checks", {}).get("battery_yplus_gate_passed") is False
 
 
-def fresh_retry(output: Path, batch: dict, entry: dict, specification: dict, *, profile_index: int) -> None:
+def _optional_report(path: Path) -> dict:
+    try:
+        value = read(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def diagnose_failure(job: Path, state: dict) -> dict:
+    """Classify a measured failure before selecting any recovery action."""
+
+    diagnosis = {
+        "schema_version": 1,
+        "job_id": job.name,
+        "failed_stage": state.get("stage"),
+        "status_message": state.get("message"),
+        "category": "unclassified",
+        "retryable": False,
+        "failed_checks": [],
+    }
+    if state.get("status") != "failed":
+        diagnosis["reason"] = "job is not in failed state"
+        return diagnosis
+    if state.get("stage") == "mesh":
+        reports = job / "case/reports/production_mesh"
+        measured = [
+            name for name in (
+                "mesh_target_composition.json", "layer_coverage.json",
+                "production_mesh_gate.json", "checkmesh.json",
+            ) if (reports / name).is_file()
+        ]
+        if measured:
+            diagnosis.update(
+                category="mesh_quality", retryable=True,
+                reason="measured production-mesh gate failure",
+                evidence=measured,
+            )
+        else:
+            diagnosis.update(
+                category="infrastructure_or_unmeasured_mesh_failure",
+                reason="no measured mesh report; blind retry is disabled",
+            )
+        return diagnosis
+    if state.get("stage") != "steady":
+        diagnosis["reason"] = "only measured mesh and steady failures are recoverable"
+        return diagnosis
+
+    cold = _optional_report(
+        job / "case/runs/steady_cold_flow/reports/solver/cold_flow_validation.json"
+    )
+    cht = _optional_report(
+        job / "case/runs/steady_cht/reports/solver/steady_cht_validation.json"
+    )
+    report, report_stage = (cht, "cht") if cht and cht.get("status") != "STEADY_CHT_VALIDATION_PASSED" else (cold, "cold")
+    checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+    failed = sorted(name for name, passed in checks.items() if passed is not True)
+    diagnosis.update(report_stage=report_stage, failed_checks=failed,
+                     final_iteration=report.get("final_iteration"))
+    instability_checks = {
+        "final_fields_finite", "final_turbulence_fields_nonnegative",
+    }
+    if instability_checks & set(failed):
+        diagnosis.update(category="numerical_instability", retryable=True,
+                         reason="computed field became non-finite or non-physical")
+        return diagnosis
+    log_dir = job / f"case/runs/steady_{'cht' if report_stage == 'cht' else 'cold_flow'}/logs/solver"
+    log_prefix = f"steady_{'cht' if report_stage == 'cht' else 'cold_flow'}"
+    # A failed continuation leaves the validation report at the preceding
+    # checkpoint. Inspect every solver log for the stage so the numerical
+    # abort is not hidden behind that otherwise valid checkpoint report.
+    tails = []
+    for log in sorted(log_dir.glob(f"{log_prefix}*.log")):
+        try:
+            tails.append(log.read_text(encoding="utf-8", errors="replace")[-65_536:])
+        except OSError:
+            continue
+    tail = "\n".join(tails)
+    if "Negative initial temperature" in tail or "FOAM parallel run aborting" in tail:
+        diagnosis.update(category="numerical_instability", retryable=True,
+                         reason="solver log records a numerical abort")
+        return diagnosis
+
+    if checks.get("battery_yplus_gate_passed") is False:
+        diagnosis.update(category="wall_yplus", retryable=True,
+                         reason="measured battery-wall y+ gate failure")
+        return diagnosis
+
+    convergence_tokens = (
+        "iterations_completed", "residuals_below", "residual_floors_reached",
+        "monitor_window", "mass_imbalance", "pressure_drop_span",
+        "tmax_change", "tavg_change", "energy_imbalance",
+    )
+    convergence = bool(failed) and all(
+        any(token in name for token in convergence_tokens) for name in failed
+    )
+    if convergence:
+        diagnosis.update(category="convergence", retryable=True,
+                         reason="only measured convergence gates failed")
+    elif not report:
+        diagnosis.update(category="missing_validation_report",
+                         reason="steady validation report is missing")
+    else:
+        diagnosis["reason"] = "failure contains an unsupported safety or physics gate"
+    return diagnosis
+
+
+def automatic_retry_decision(entry: dict, specification: dict, job: Path, state: dict) -> dict:
+    """Return one bounded, evidence-based fresh-run remedy."""
+
+    policy = specification.get("automatic_retry", DEFAULT_AUTOMATIC_RETRY)
+    diagnosis = diagnose_failure(job, state)
+    decision = {"action": "stop", "diagnosis": diagnosis}
+    attempts = entry.get("prior_attempts", [])
+    if not policy.get("enabled", True):
+        decision["reason"] = "automatic retry is disabled"
+        return decision
+    if len(attempts) >= int(policy.get("maximum_retries", 0)):
+        decision["reason"] = "automatic retry limit reached"
+        return decision
+    if not diagnosis.get("retryable"):
+        decision["reason"] = diagnosis.get("reason", "unclassified failure")
+        return decision
+
+    current = read(job / "job.json")
+    category = diagnosis["category"]
+    if category in {"mesh_quality", "wall_yplus"}:
+        next_profile = int(entry.get("profile_index", 0)) + 1
+        if next_profile >= len(specification["mesh_profiles"]):
+            decision["reason"] = "no further approved mesh profile is available"
+            return decision
+        decision.update(
+            action="retry", profile_index=next_profile, job_overrides={},
+            remedy="regenerate mesh and restart S0 with the next approved mesh profile",
+        )
+        return decision
+
+    if category == "convergence" and diagnosis.get("report_stage") == "cold":
+        current_limit = validate_maximum_iterations(
+            current.get("cold_flow_maximum_iterations")
+        )
+        for limit in policy.get("cold_flow_iteration_limits", []):
+            if limit > current_limit:
+                decision.update(
+                    action="retry", profile_index=int(entry.get("profile_index", 0)),
+                    job_overrides={"cold_flow_maximum_iterations": limit},
+                    remedy=f"restart from S0 with unchanged gates and a {limit}-iteration diagnostic cap",
+                )
+                return decision
+
+    used_profiles = {
+        attempt.get("steady_numerics_profile") for attempt in attempts
+        if attempt.get("steady_numerics_profile") is not None
+    }
+    if current.get("steady_numerics_profile") is not None:
+        used_profiles.add(current["steady_numerics_profile"])
+    for profile in policy.get("steady_numerics_profiles", []):
+        if profile not in used_profiles:
+            decision.update(
+                action="retry", profile_index=int(entry.get("profile_index", 0)),
+                job_overrides={"steady_numerics_profile": profile},
+                remedy=f"restart from S0 with approved numerical profile {profile}",
+            )
+            return decision
+    decision["reason"] = "no unused approved numerical recovery profile is available"
+    return decision
+
+
+def fresh_retry(
+    output: Path, batch: dict, entry: dict, specification: dict, *,
+    profile_index: int, job_overrides: dict | None = None,
+    diagnosis: dict | None = None,
+) -> None:
     """Archive diagnostics, then delete only the failed generated job."""
     runs = Path(batch["jobs_root"]) / "runs"
     previous = Path(entry["job_dir"])
@@ -199,13 +416,26 @@ def fresh_retry(output: Path, batch: dict, entry: dict, specification: dict, *, 
     archive.mkdir(parents=True, exist_ok=True)
     for name in ("job.json", "status.json"):
         shutil.copy2(previous / name, archive / name)
-    for relative in ("case/reports/production_mesh", "case/diagnostics/wall", "case/diagnostics/outlet", "case/runs/steady_cold_flow/reports/solver"):
+    for relative in (
+        "case/reports/production_mesh", "case/diagnostics/wall",
+        "case/diagnostics/outlet",
+        "case/runs/steady_cold_flow/logs/solver",
+        "case/runs/steady_cold_flow/reports/solver",
+        "case/runs/steady_cht/logs/solver",
+        "case/runs/steady_cht/reports/solver",
+    ):
         source = previous / relative
         if source.is_dir():
             shutil.copytree(source, archive / relative, dirs_exist_ok=True)
     snappy = previous / "case/logs/production_mesh/snappyHexMesh.log"
     if snappy.is_file():
         shutil.copy2(snappy, archive / "snappyHexMesh.log")
+    # Preserve the authoritative all-region quality output before removing a
+    # failed generated mesh.  This is required to distinguish a local face
+    # defect from a global quality or layer-coverage failure on a fresh retry.
+    check_mesh = previous / "case/logs/production_mesh/checkMesh_all_regions.log"
+    if check_mesh.is_file():
+        shutil.copy2(check_mesh, archive / "checkMesh_all_regions.log")
     worker_log = previous / "worker.log"
     for name in ('outlet_boundary.json', 'steady_numerics.json'):
         audit = previous / 'case/reports' / name
@@ -216,10 +446,30 @@ def fresh_retry(output: Path, batch: dict, entry: dict, specification: dict, *, 
             stream.seek(0, 2)
             stream.seek(max(0, stream.tell() - 65536))
             (archive / "worker_tail.log").write_bytes(stream.read())
-    replacement = _queue(Path(batch["jobs_root"]), prior, prior["files"], specification,
+    replacement_specification = copy.deepcopy(specification)
+    for key in (
+        "steady_numerics_profile", "outlet_velocity_profile",
+        "cold_flow_maximum_iterations",
+    ):
+        if prior.get(key) is not None:
+            replacement_specification[key] = prior[key]
+    replacement_specification.update(job_overrides or {})
+    replacement = _queue(Path(batch["jobs_root"]), prior, prior["files"], replacement_specification,
                          profile_index=profile_index, retry_of=previous.name)
     history = entry.setdefault("prior_attempts", [])
-    history.append({"id": previous.name, "status": state, "diagnostics_archive": str(archive), "output_deleted": False})
+    history.append({
+        "id": previous.name,
+        "status": state,
+        "mesh_profile": prior.get("mesh_profile"),
+        "steady_numerics_profile": prior.get("steady_numerics_profile"),
+        "cold_flow_maximum_iterations": prior.get("cold_flow_maximum_iterations"),
+        "diagnosis": diagnosis,
+        "remedy": (diagnosis or {}).get("remedy"),
+        "diagnostics_archive": str(archive),
+        "output_deleted": False,
+    })
+    if diagnosis is not None:
+        _write_json(archive / "failure_diagnosis.json", diagnosis)
     entry.update(replacement)
     _write_json(output / "batch.json", batch)
     shutil.rmtree(previous)
@@ -247,9 +497,15 @@ def run_batch(output: Path, batch: dict, *, retry_failed: bool = False) -> bool:
             if state.get("status") == "complete" and not state.get("release_error"):
                 break
             if state.get("status") == "failed":
-                next_profile = entry["profile_index"] + 1
-                if _retryable(job, state) and next_profile < len(specification["mesh_profiles"]):
-                    fresh_retry(output, batch, entry, specification, profile_index=next_profile)
+                decision = automatic_retry_decision(entry, specification, job, state)
+                _write_json(output / "retry_decisions" / f"{job.name}.json", decision)
+                if decision["action"] == "retry":
+                    fresh_retry(
+                        output, batch, entry, specification,
+                        profile_index=decision["profile_index"],
+                        job_overrides=decision.get("job_overrides"),
+                        diagnosis={**decision["diagnosis"], "remedy": decision["remedy"]},
+                    )
                     continue
                 if retry_failed:
                     fresh_retry(output, batch, entry, specification, profile_index=entry["profile_index"])

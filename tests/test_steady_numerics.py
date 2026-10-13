@@ -86,12 +86,50 @@ class SteadyNumericsTests(unittest.TestCase):
                     self.assertEqual(report['relaxation'], relaxation)
                     self.assertFalse(report['acceptance_limits_changed'])
 
+    def test_strong_coupled_profile_changes_only_steady_numerics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            case = Path(temp)
+            solution = _fluid_solution(conservative=True)
+            schemes = _fluid_schemes()
+            solution_paths = [case / 'system/coolant/fvSolution'] + [
+                case / 'profiles' / stage / 'system/coolant/fvSolution'
+                for stage in ('steady_cold_flow', 'steady', 'frozen_flow_actual_1s')
+            ]
+            scheme_paths = [case / 'system/coolant/fvSchemes'] + [
+                case / 'profiles' / stage / 'system/coolant/fvSchemes'
+                for stage in ('steady_cold_flow', 'steady', 'frozen_flow_actual_1s')
+            ]
+            for path in solution_paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(solution, encoding='utf-8')
+            for path in scheme_paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(schemes, encoding='utf-8')
+
+            apply_profile(case, 'coupled_relaxation_0p1')
+
+            for path in solution_paths[:3]:
+                value = path.read_text(encoding='utf-8')
+                self.assertIn('p_rgh 0.1;', value)
+                self.assertIn('U 0.05;', value)
+                self.assertIn('h 0.05;', value)
+                self.assertIn('relTol 0;', value)
+            for path in scheme_paths[:3]:
+                self.assertIn('laplacian(rhorAUf,p_rgh) Gauss linear limited 0.5;',
+                              path.read_text(encoding='utf-8'))
+            self.assertEqual(solution_paths[-1].read_text(encoding='utf-8'), solution)
+            self.assertEqual(scheme_paths[-1].read_text(encoding='utf-8'), schemes)
+            report = json.loads((case / 'reports/steady_numerics.json').read_text())
+            self.assertFalse(report['acceptance_limits_changed'])
+            self.assertFalse(report['physical_inputs_changed'])
+
     def test_existing_run_or_unknown_profile_cannot_be_modified(self):
         with tempfile.TemporaryDirectory() as temp:
             case = Path(temp)
             (case / 'runs/steady_cold_flow').mkdir(parents=True)
             for profile in ('pressure_limited_0p5', 'pressure_reltol_zero',
-                            'pressure_relaxation_0p15', 'pressure_relaxation_0p5', 'typo'):
+                            'pressure_relaxation_0p15', 'pressure_relaxation_0p5',
+                            'coupled_relaxation_0p1', 'typo'):
                 with self.assertRaises(ValueError):
                     apply_profile(case, profile)
 

@@ -28,7 +28,11 @@ DEFAULT_RESIDUAL_FLOORS = {
     "batterySolid.h": 5.0e-4,
 }
 STRICT_RESIDUAL_TARGET = 1.0e-6
-ACCEPTANCE_RESIDUAL_TARGET = 1.0e-4
+# User-selected engineering acceptance band for the Ø32/Ø33/Ø34 study.
+# The independent mass balance, pressure-drop stability, finite-field, y+
+# and energy-balance gates remain mandatory.  The 1e-6 audit is still
+# recorded separately and is never relabelled as the acceptance gate.
+ACCEPTANCE_RESIDUAL_TARGET = 1.0e-3
 MINIMUM_STEADY_ITERATIONS = 5000
 FLOW_ACCEPTANCE_FIELDS = (
     "coolant.Ux",
@@ -330,7 +334,7 @@ def validate_cold_flow(
         "final_iteration_present": final_record is not None,
         "minimum_5000_outer_iterations_completed": final_time is not None
         and final_time >= MINIMUM_STEADY_ITERATIONS,
-        "last_200_flow_residuals_below_1e-4": all(
+        "last_200_flow_residuals_below_1e-3": all(
             acceptance_residual_checks.values()
         ),
         "pilot_derived_residual_floors_reached": all(residual_checks.values()),

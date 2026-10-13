@@ -30,6 +30,21 @@ class ActualOneSecondTests(unittest.TestCase):
         )
         return path
 
+    def _interface_probe_file(
+        self, path: Path, field: str, rows: tuple[str, str]
+    ) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# Probe 0 (0.0095 0 0.02)\n"
+            "# Probe 1 (0 0.0095 0.02) # Not Found\n"
+            "# Probe 2 (-0.0095 0 0.02)\n"
+            f"# Time {field}\n"
+            f"1 {rows[0]}\n"
+            f"2 {rows[1]}\n",
+            encoding="ascii",
+        )
+        return path
+
     def test_parser_preserves_invalid_probe_without_filling_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._probe_file(Path(directory), "T")
@@ -38,6 +53,22 @@ class ActualOneSecondTests(unittest.TestCase):
             rows = list(iter_probe_rows(probe))
             self.assertEqual([time for time, _ in rows], [1, 2])
             self.assertLess(rows[0][1][1], -1e299)
+
+    def test_parser_accepts_patch_probes_location_annotation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "T"
+            path.write_text(
+                "# Probe 0 (0.023 0.016 0.009) at patch battery_C01_interface "
+                "with a distance of 1.8e-05 m to the original point "
+                "(0.0231 0.0161 0.009)\n"
+                "# Time T\n"
+                "1 293.15\n",
+                encoding="ascii",
+            )
+            probe = read_probe_header(path)
+            self.assertEqual(probe.points, [(0.023, 0.016, 0.009)])
+            self.assertEqual(probe.valid_indices, [0])
+            self.assertEqual(len(list(iter_probe_rows(probe))), 1)
 
     def test_restart_segments_are_merged_without_time_interpolation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -145,6 +176,72 @@ class ActualOneSecondTests(unittest.TestCase):
                 report = validate_actual_one_second_bundle(root, root / "output")
             self.assertEqual(
                 report["status"], "ACTUAL_ONE_SECOND_BUNDLE_VALIDATION_PASSED"
+            )
+
+    def test_local_surface_heat_transfer_is_packed_from_direct_interface_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            temperature_source = self._probe_file(root, "T")
+            post = root / "postProcessing"
+            self._interface_probe_file(
+                post / "actual_battery_interface_wall_1s/coolant/0/T",
+                "T",
+                ("300 -1e+300 302", "301 -1e+300 303"),
+            )
+            self._interface_probe_file(
+                post / "actual_battery_interface_wall_1s/coolant/0/wallHeatFlux",
+                "wallHeatFlux",
+                ("100 -1e+300 200", "120 -1e+300 210"),
+            )
+            self._interface_probe_file(
+                post / "actual_battery_near_surface_fluid_temperature_1s/coolant/0/T",
+                "T",
+                ("299 -1e+300 300", "299 -1e+300 300"),
+            )
+            specs = {
+                name: {
+                    "path": temperature_source,
+                    "kind": "battery-near-surface" if name == "cell_surface" else "xy",
+                    "columns": 3,
+                    "rows": 1,
+                    **(
+                        {
+                            "angular_segments": 1,
+                            "axial_segments": 1,
+                            "cell_count": 1,
+                            "samples_per_cell": 3,
+                        }
+                        if name == "cell_surface"
+                        else {}
+                    ),
+                }
+                for name in (
+                    "xy15", "xy33", "xy", "xy68", "xy85",
+                    "xz15", "xz33", "xz50", "xz68", "xz85",
+                    "yz15", "yz33", "yz50", "yz68", "yz85", "cell_surface",
+                )
+            }
+            with (
+                patch("cfd_twin.actual_one_second._probe_specs", return_value=specs),
+                patch("cfd_twin.actual_one_second._mesh_identity", return_value=("precision", 650_000)),
+            ):
+                manifest = build_actual_one_second_bundle(root, root / "output", end_time_s=2)
+                report = validate_actual_one_second_bundle(root, root / "output")
+
+            htc = manifest["datasets"]["cell_surface_heat_transfer_coefficient"]
+            self.assertEqual(htc["dtype"], "float32-little-endian")
+            self.assertEqual(htc["first_time_s"], 1)
+            self.assertEqual(htc["frame_count"], 2)
+            self.assertEqual(htc["value_range_w_m2k"], [60.0, 100.0])
+            values = (root / "output" / htc["file"]).read_bytes()
+            import numpy as np
+
+            self.assertEqual(
+                np.frombuffer(values, dtype="<f4").tolist(),
+                [100.0, 100.0, 60.0, 70.0],
+            )
+            self.assertTrue(
+                report["datasets"]["cell_surface_heat_transfer_coefficient"]["passed"]
             )
 
 

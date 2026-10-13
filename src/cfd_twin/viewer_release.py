@@ -21,6 +21,188 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from .multi_case_viewer import append_validated_run, dataset_paths, read_viewer_model, write_four_case_model
 
 
+WINDOWS_VIEWER_LAUNCHER = r'''@echo off
+setlocal
+set "ROOT_DIR=%~dp0"
+set "VIEWER_DIR=%ROOT_DIR%viewer"
+set "SERVER_SCRIPT=%ROOT_DIR%serve-viewer.ps1"
+set "PORT_FILE=%TEMP%\YU_fluid_viewer_%RANDOM%_%RANDOM%.port"
+
+if not exist "%VIEWER_DIR%\results.html" (
+  echo [ERROR] viewer\results.html was not found. Extract the entire ZIP first.
+  pause
+  exit /b 1
+)
+
+if not exist "%SERVER_SCRIPT%" (
+  echo [ERROR] serve-viewer.ps1 was not found. Extract the entire ZIP first.
+  pause
+  exit /b 1
+)
+
+del /q "%PORT_FILE%" >nul 2>&1
+start "YU Fluid Viewer Server" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SERVER_SCRIPT%" -Root "%VIEWER_DIR%" -Port 0 -PortFile "%PORT_FILE%"
+
+set /a WAIT_COUNT=0
+:wait_for_port
+if exist "%PORT_FILE%" goto port_ready
+ping 127.0.0.1 -n 2 >nul
+set /a WAIT_COUNT+=1
+if %WAIT_COUNT% LSS 30 goto wait_for_port
+echo [ERROR] The local viewer server could not start.
+echo Close security software warnings, extract the entire ZIP, and try again.
+pause
+exit /b 1
+
+:port_ready
+set /p VIEWER_PORT=<"%PORT_FILE%"
+del /q "%PORT_FILE%" >nul 2>&1
+if "%VIEWER_PORT%"=="" (
+  echo [ERROR] The local viewer server returned no port number.
+  pause
+  exit /b 1
+)
+set "VIEWER_URL=http://127.0.0.1:%VIEWER_PORT%/results.html"
+set "HEALTH_URL=http://127.0.0.1:%VIEWER_PORT%/_cfd_twin_health"
+
+set /a HEALTH_COUNT=0
+:wait_for_health
+powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing '%HEALTH_URL%' -TimeoutSec 2; if ($r.Content -eq 'YU_FLUID_VIEWER_OK') { exit 0 } else { exit 1 } } catch { exit 1 }"
+if not errorlevel 1 goto open_viewer
+ping 127.0.0.1 -n 2 >nul
+set /a HEALTH_COUNT+=1
+if %HEALTH_COUNT% LSS 15 goto wait_for_health
+echo [ERROR] The local viewer server did not respond.
+pause
+exit /b 1
+
+:open_viewer
+start "" "%VIEWER_URL%"
+endlocal
+'''
+
+WINDOWS_POWERSHELL_SERVER = r'''param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [int]$Port = 0,
+    [Parameter(Mandatory = $true)][string]$PortFile
+)
+
+$ErrorActionPreference = "Stop"
+$rootFull = [IO.Path]::GetFullPath($Root).TrimEnd("\")
+$rootPrefix = $rootFull + "\"
+$listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
+$listener.Start()
+$actualPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+[IO.File]::WriteAllText($PortFile, [string]$actualPort, [Text.Encoding]::ASCII)
+$lastRequest = [DateTime]::UtcNow
+
+function Get-ContentType([string]$Path) {
+    switch ([IO.Path]::GetExtension($Path).ToLowerInvariant()) {
+        ".html" { return "text/html; charset=utf-8" }
+        ".htm"  { return "text/html; charset=utf-8" }
+        ".js"   { return "application/javascript; charset=utf-8" }
+        ".css"  { return "text/css; charset=utf-8" }
+        ".json" { return "application/json; charset=utf-8" }
+        ".svg"  { return "image/svg+xml" }
+        ".png"  { return "image/png" }
+        ".jpg"  { return "image/jpeg" }
+        ".jpeg" { return "image/jpeg" }
+        ".gif"  { return "image/gif" }
+        ".webp" { return "image/webp" }
+        ".ico"  { return "image/x-icon" }
+        ".txt"  { return "text/plain; charset=utf-8" }
+        ".csv"  { return "text/csv; charset=utf-8" }
+        default  { return "application/octet-stream" }
+    }
+}
+
+function Send-TextResponse($Stream, [int]$Status, [string]$Reason, [string]$Text, [bool]$HeadOnly = $false) {
+    $body = [Text.Encoding]::UTF8.GetBytes($Text)
+    $header = "HTTP/1.1 $Status $Reason`r`nContent-Type: text/plain; charset=utf-8`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n"
+    $headerBytes = [Text.Encoding]::ASCII.GetBytes($header)
+    $Stream.Write($headerBytes, 0, $headerBytes.Length)
+    if (-not $HeadOnly) { $Stream.Write($body, 0, $body.Length) }
+}
+
+try {
+    while (([DateTime]::UtcNow - $lastRequest).TotalHours -lt 4) {
+        if (-not $listener.Pending()) {
+            Start-Sleep -Milliseconds 100
+            continue
+        }
+        $client = $listener.AcceptTcpClient()
+        $lastRequest = [DateTime]::UtcNow
+        try {
+            $client.ReceiveTimeout = 10000
+            $client.SendTimeout = 10000
+            $stream = $client.GetStream()
+            $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+            $requestLine = $reader.ReadLine()
+            while (($headerLine = $reader.ReadLine()) -ne $null -and $headerLine -ne "") { }
+            if ([string]::IsNullOrWhiteSpace($requestLine)) {
+                Send-TextResponse $stream 400 "Bad Request" "Bad Request"
+                continue
+            }
+            $parts = $requestLine.Split(" ")
+            if ($parts.Length -lt 2 -or ($parts[0] -ne "GET" -and $parts[0] -ne "HEAD")) {
+                Send-TextResponse $stream 405 "Method Not Allowed" "Method Not Allowed"
+                continue
+            }
+            $headOnly = $parts[0] -eq "HEAD"
+            $urlPath = [Uri]::UnescapeDataString(($parts[1] -split "\?", 2)[0])
+            if ($urlPath -eq "/_cfd_twin_health") {
+                Send-TextResponse $stream 200 "OK" "YU_FLUID_VIEWER_OK" $headOnly
+                continue
+            }
+            $relative = $urlPath.TrimStart("/").Replace("/", "\")
+            $fullPath = [IO.Path]::GetFullPath((Join-Path $rootFull $relative))
+            if ($fullPath -ne $rootFull -and -not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                Send-TextResponse $stream 403 "Forbidden" "Forbidden" $headOnly
+                continue
+            }
+            if ([IO.Directory]::Exists($fullPath)) { $fullPath = Join-Path $fullPath "index.html" }
+            if (-not [IO.File]::Exists($fullPath)) {
+                Send-TextResponse $stream 404 "Not Found" "Not Found" $headOnly
+                continue
+            }
+            $file = [IO.File]::OpenRead($fullPath)
+            try {
+                $contentType = Get-ContentType $fullPath
+                $responseHeader = "HTTP/1.1 200 OK`r`nContent-Type: $contentType`r`nContent-Length: $($file.Length)`r`nCache-Control: no-cache`r`nConnection: close`r`n`r`n"
+                $responseBytes = [Text.Encoding]::ASCII.GetBytes($responseHeader)
+                $stream.Write($responseBytes, 0, $responseBytes.Length)
+                if (-not $headOnly) { $file.CopyTo($stream) }
+            }
+            finally {
+                $file.Dispose()
+            }
+        }
+        catch {
+            try { Send-TextResponse $stream 500 "Internal Server Error" "Internal Server Error" } catch { }
+        }
+        finally {
+            $client.Close()
+        }
+    }
+}
+finally {
+    $listener.Stop()
+    Remove-Item -LiteralPath $PortFile -Force -ErrorAction SilentlyContinue
+}
+'''
+
+WINDOWS_VIEWER_README = '''CFD 결과 뷰어 실행 방법
+
+1. ZIP 파일 전체를 먼저 압축 해제합니다.
+2. OPEN_3D_RESULTS.cmd 또는 바로열기_3D결과.cmd를 더블클릭합니다.
+3. 브라우저에서 결과 화면이 자동으로 열립니다.
+
+Python 설치는 필요하지 않습니다. Windows 기본 PowerShell 로컬 서버를 사용합니다.
+results.html을 ZIP 내부나 file:// 주소로 직접 열지 마십시오.
+대용량 계산 데이터와 브라우저 보안 정책 때문에 로컬 HTTP 서버가 필요합니다.
+'''
+
+
 def _initialize_publication(viewer: Path, source: Path, **run_options) -> None:
     """Build and validate the first cumulative viewer before exposing any files."""
     markers = ("results.html", "model.js", "four_case_manifest.json", "data")
@@ -214,6 +396,10 @@ def package_demo_viewer(viewer_dir: str | Path, zip_path: str | Path) -> dict[st
                 '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=viewer/index.html">'
                 '<a href="viewer/index.html">Open CFD viewer</a>\n',
             )
+            archive.writestr("OPEN_3D_RESULTS.cmd", WINDOWS_VIEWER_LAUNCHER)
+            archive.writestr("바로열기_3D결과.cmd", WINDOWS_VIEWER_LAUNCHER)
+            archive.writestr("serve-viewer.ps1", WINDOWS_POWERSHELL_SERVER)
+            archive.writestr("실행방법.txt", WINDOWS_VIEWER_README)
             for path in sorted(viewer.rglob("*")):
                 if not path.is_file() or path.name.startswith(".") or path.name.endswith(".tmp"):
                     continue

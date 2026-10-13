@@ -87,12 +87,12 @@ class FrameFitResumeTests(unittest.TestCase):
             'minimum_5000_outer_iterations_completed', 'monitor_window_has_at_least_21_samples',
             'pilot_derived_residual_floors_reached', 'pressure_drop_span_below_0p5_percent', 'solver_clean_end',
         ], True)
-        checks['last_200_flow_residuals_below_1e-4'] = False
+        checks['last_200_flow_residuals_below_1e-3'] = False
         fields = dict.fromkeys(['coolant.Ux', 'coolant.Uy', 'coolant.Uz', 'coolant.k', 'coolant.omega'], True)
         fields['coolant.p_rgh'] = False
         report = {'status': 'COLD_FLOW_VALIDATION_FAILED', 'final_iteration': 9500,
                   'checks': checks, 'acceptance_residual_audit': {
-                      'checks': fields, 'target': 1e-4, 'window_outer_iterations': 200}}
+                      'checks': fields, 'target': 1e-3, 'window_outer_iterations': 200}}
         with tempfile.TemporaryDirectory() as temp:
             job = Path(temp)
             entry = {'job_dir': str(job)}

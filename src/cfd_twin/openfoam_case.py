@@ -923,6 +923,55 @@ def _probe_function(
     }}'''
 
 
+def _battery_surface_probe_points(
+    config: ResolvedConfig, *, radial_offset_m: float, axial_offset_m: float
+) -> list[tuple[float, float, float]]:
+    """Return the common 23-cell side/cap lattice in deterministic order.
+
+    Negative offsets locate the existing solid-side temperature samples;
+    positive offsets locate the adjacent coolant cells.  Patch probes use the
+    zero-offset lattice and snap each point to the actual CHT interface face.
+    """
+
+    radius = 0.5 * config.cells.diameter_m
+    half_length = 0.5 * config.cells.length_m
+    radial = radius + radial_offset_m
+    if radial <= 0:
+        raise ValueError("battery surface probe radius must be positive")
+    cap_radius = 0.58 * radius
+    points: list[tuple[float, float, float]] = []
+    for placement in cell_placements(config):
+        for axial in range(16):
+            z = (
+                placement.center_z_m
+                - half_length
+                + config.cells.length_m * (axial + 0.5) / 16
+            )
+            for angular in range(32):
+                angle = 2 * math.pi * (angular + 0.5) / 32
+                points.append(
+                    (
+                        placement.center_x_m + radial * math.cos(angle),
+                        placement.center_y_m + radial * math.sin(angle),
+                        z,
+                    )
+                )
+        for z in (
+            placement.center_z_m - half_length - axial_offset_m,
+            placement.center_z_m + half_length + axial_offset_m,
+        ):
+            for angular in range(32):
+                angle = 2 * math.pi * (angular + 0.5) / 32
+                points.append(
+                    (
+                        placement.center_x_m + cap_radius * math.cos(angle),
+                        placement.center_y_m + cap_radius * math.sin(angle),
+                        z,
+                    )
+                )
+    return points
+
+
 def _actual_one_second_sampling(config: ResolvedConfig) -> str:
     """0~1,800 s UI에 필요한 단면·셀표면 직접 probe 위치를 생성한다."""
 
@@ -942,12 +991,16 @@ def _actual_one_second_sampling(config: ResolvedConfig) -> str:
     y_values = centred_axis(config.enclosure.length_y_m, 0.001)
     z_values = centred_axis(config.enclosure.height_z_m, 0.0015)
     entries = []
+    lower_gap_fraction = (config.enclosure.height_z_m - config.cells.length_m) / (4 * config.enclosure.height_z_m)
+    upper_gap_fraction = 1.0 - lower_gap_fraction
     for label, fraction in (
+        ("xy04", lower_gap_fraction),
         ("xy15", 0.15),
         ("xy33", 0.325),
         ("xy", 0.5),
         ("xy68", 0.675),
         ("xy85", 0.85),
+        ("xy96", upper_gap_fraction),
     ):
         points = [
             (x, y, fraction * config.enclosure.height_z_m)
@@ -1014,40 +1067,60 @@ def _actual_one_second_sampling(config: ResolvedConfig) -> str:
             )
         )
 
-    radius = 0.5 * config.cells.diameter_m
-    half_length = 0.5 * config.cells.length_m
-    radial_probe = max(0.0, radius - 0.00035)
-    cap_radius = 0.58 * radius
-    surface_points: list[tuple[float, float, float]] = []
-    for placement in cell_placements(config):
-        for axial in range(16):
-            z = (
-                placement.center_z_m
-                - half_length
-                + config.cells.length_m * (axial + 0.5) / 16
-            )
-            for angular in range(32):
-                angle = 2 * math.pi * (angular + 0.5) / 32
-                surface_points.append(
-                    (
-                        placement.center_x_m + radial_probe * math.cos(angle),
-                        placement.center_y_m + radial_probe * math.sin(angle),
-                        z,
-                    )
-                )
-        for z in (
-            placement.center_z_m - half_length + 0.00035,
-            placement.center_z_m + half_length - 0.00035,
-        ):
-            for angular in range(32):
-                angle = 2 * math.pi * (angular + 0.5) / 32
-                surface_points.append(
-                    (
-                        placement.center_x_m + cap_radius * math.cos(angle),
-                        placement.center_y_m + cap_radius * math.sin(angle),
-                        z,
-                    )
-                )
+    surface_points = _battery_surface_probe_points(
+        config, radial_offset_m=-0.00035, axial_offset_m=-0.00035
+    )
+    interface_points = _battery_surface_probe_points(
+        config, radial_offset_m=0.0, axial_offset_m=0.0
+    )
+    near_fluid_points = _battery_surface_probe_points(
+        config, radial_offset_m=0.00035, axial_offset_m=0.00035
+    )
+    # Produce the actual local convective numerator on the coolant side of all
+    # 23 CHT interfaces, then sample wall T and q'' on the same snapped faces.
+    # The near-fluid T probe supplies the local reference temperature for
+    # h=|q''|/|Twall-Tfluid|.  No section or whole-solid surrogate is used.
+    entries.append(
+        '''    battery_interface_wall_heat_flux
+    {
+        type wallHeatFlux;
+        libs (fieldFunctionObjects);
+        region coolant;
+        patches ("battery_.*_interface_coolant_to_batterySolid");
+        executeControl adjustableRunTime;
+        executeInterval 1;
+        writeControl adjustableRunTime;
+        writeInterval 1800;
+    }'''
+    )
+    entries.append(
+        f'''    actual_battery_interface_wall_1s
+    {{
+        type patchProbes;
+        libs (sampling);
+        region coolant;
+        fields (T wallHeatFlux);
+        patches ("battery_.*_interface_coolant_to_batterySolid");
+        fixedLocations true;
+        includeOutOfBounds false;
+        interpolationScheme cell;
+        writeControl adjustableRunTime;
+        writeInterval 1;
+        probeLocations
+        (
+{_format_probe_locations(interface_points)}
+        );
+    }}'''
+    )
+    entries.append(
+        _probe_function(
+            "actual_battery_near_surface_fluid_temperature_1s",
+            region="coolant",
+            field="T",
+            points=near_fluid_points,
+            interval_s=1.0,
+        )
+    )
     entries.append(
         _probe_function(
             "actual_battery_near_surface_temperature_1s",

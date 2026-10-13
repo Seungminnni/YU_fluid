@@ -1,0 +1,30 @@
+schema_version: 1
+name: phi19_mesh_independence_800_1000k_smooth_v6_20261007
+
+# The validated 611,313-cell Ø19 calculation remains the comparison baseline.
+# This fresh batch intentionally omits the failed 400k branch and creates new
+# job IDs for only the requested 800k and 1000k cases.  Geometry, physics,
+# 10 µm × 10-layer wall treatment and all acceptance gates remain unchanged.
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+
+overlays:
+  - ../recalculation_600k_phi19_vertical_flip_20260922.yaml
+
+cases:
+  - name: phi19_mesh_800k_smooth_v6
+    cold_flow_maximum_iterations: 20000
+    inputs:
+      mesh_target_cells: 800000
+    mesh_profiles:
+      - production_phi19_mesh_study_800k_smooth_v2
+
+  - name: phi19_mesh_1000k_smooth_v6
+    cold_flow_maximum_iterations: 20000
+    inputs:
+      mesh_target_cells: 1000000
+    mesh_profiles:
+      - production_phi19_mesh_study_1000k_smooth_v2

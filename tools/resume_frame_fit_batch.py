@@ -58,7 +58,7 @@ def pressure_failure_at_cap(entry: dict) -> bool:
     checks = report.get('checks', {})
     required = {
         'battery_yplus_gate_passed', 'final_fields_finite', 'final_iteration_present',
-        'final_turbulence_fields_nonnegative', 'last_200_flow_residuals_below_1e-4',
+        'final_turbulence_fields_nonnegative', 'last_200_flow_residuals_below_1e-3',
         'mass_imbalance_below_0p1_percent', 'minimum_5000_outer_iterations_completed',
         'monitor_window_has_at_least_21_samples', 'pilot_derived_residual_floors_reached',
         'pressure_drop_span_below_0p5_percent', 'solver_clean_end',
@@ -69,9 +69,9 @@ def pressure_failure_at_cap(entry: dict) -> bool:
         report.get('status') == 'COLD_FLOW_VALIDATION_FAILED'
         and report.get('final_iteration') == 9500
         and required <= checks.keys()
-        and {key for key, value in checks.items() if value is not True} == {'last_200_flow_residuals_below_1e-4'}
-        and checks['last_200_flow_residuals_below_1e-4'] is False
-        and audit.get('target') == 1e-4
+        and {key for key, value in checks.items() if value is not True} == {'last_200_flow_residuals_below_1e-3'}
+        and checks['last_200_flow_residuals_below_1e-3'] is False
+        and audit.get('target') == 1e-3
         and audit.get('window_outer_iterations') == 200
         and fields == set(audit.get('checks', {}))
         and {key for key, value in audit['checks'].items() if value is not True} == {'coolant.p_rgh'}

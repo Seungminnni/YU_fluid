@@ -16,7 +16,7 @@ class SteadyConvergenceTests(unittest.TestCase):
             "checks": {
                 "solver_clean_end": True,
                 "battery_yplus_gate_passed": True,
-                "last_200_flow_residuals_below_1e-4": False,
+                "last_200_flow_residuals_below_1e-3": False,
             },
         }
         first = continuation_decision(report, stage="cold")
@@ -36,12 +36,12 @@ class SteadyConvergenceTests(unittest.TestCase):
             "final_iteration": 6000,
             "checks": {
                 "solver_clean_end": False,
-                "last_200_flow_and_energy_residuals_below_1e-4": False,
+                "last_200_flow_and_energy_residuals_below_1e-3": False,
             },
         }
         self.assertEqual(continuation_decision(report, stage="cht")["action"], "fail")
         report["checks"]["solver_clean_end"] = True
-        report["checks"]["last_200_flow_and_energy_residuals_below_1e-4"] = True
+        report["checks"]["last_200_flow_and_energy_residuals_below_1e-3"] = True
         report["status"] = "STEADY_CHT_VALIDATION_PASSED"
         self.assertEqual(continuation_decision(report, stage="cht")["action"], "pass")
 
@@ -52,7 +52,7 @@ class SteadyConvergenceTests(unittest.TestCase):
             "checks": {
                 "solver_clean_end": True,
                 "battery_yplus_gate_passed": True,
-                "last_200_flow_residuals_below_1e-4": False,
+                "last_200_flow_residuals_below_1e-3": False,
             },
         }
         decision = continuation_decision(report, stage="cold", maximum=20000)

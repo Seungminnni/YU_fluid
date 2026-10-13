@@ -1,0 +1,78 @@
+schema_version: 1
+name: rerun_missing_pressure_htc_20261007
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+  mesh_target_cells: 600000
+overlays:
+  - ../recalculation_600k_phi19_vertical_flip_20260922.yaml
+automatic_retry:
+  enabled: true
+  maximum_retries: 6
+  cold_flow_iteration_limits: [20000]
+  steady_numerics_profiles:
+    - pressure_relaxation_0p15
+    - pressure_limited_0p5
+    - pressure_reltol_zero
+    - pressure_relaxation_0p5
+cases:
+  - name: pressure_htc_phi19_water
+    mesh_profiles: &mesh_recovery_phi19
+      - production_600k
+      - production_frame_fit_8um_10layers_ab_B
+      - production_frame_fit_6um_10layers_motion
+      - production_frame_fit_4um_10layers_motion
+  - name: pressure_htc_phi21_water
+    overlays: [../recalculation_600k_c05_inlet_c19_outlet_phi21_20260923.yaml]
+    mesh_profiles:
+      - production_600k_phi21
+      - production_frame_fit_8um_10layers_ab_B
+      - production_frame_fit_6um_10layers_motion
+      - production_frame_fit_4um_10layers_motion
+  - name: pressure_htc_phi23_water
+    overlays: [../recalculation_600k_c05_inlet_c19_outlet_phi23_20260922.yaml]
+    mesh_profiles:
+      - production_600k_phi23
+      - production_frame_fit_8um_10layers_ab_B
+      - production_frame_fit_6um_10layers_motion
+      - production_frame_fit_4um_10layers_motion
+  - name: pressure_htc_phi25_water
+    overlays: [../recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml]
+    mesh_profiles: &mesh_recovery_phi25
+      - production_600k_phi25
+      - production_frame_fit_8um_10layers_ab_B
+      - production_frame_fit_6um_10layers_motion
+      - production_frame_fit_4um_10layers_motion
+  - name: pressure_htc_phi28_water
+    overlays: [../frame_fit_water_phi28_20260929.yaml]
+    mesh_profiles: &mesh_recovery_frame_fit
+      - production_frame_fit_8um_10layers_ab_B
+      - production_frame_fit_6um_10layers_motion
+      - production_frame_fit_4um_10layers_motion
+      - production_frame_fit_6um_11layers_motion
+  - name: pressure_htc_phi31_water
+    overlays: [../frame_fit_water_phi31_20260929.yaml]
+    mesh_profiles: *mesh_recovery_frame_fit
+  - name: pressure_htc_phi25_pao2
+    inputs:
+      coolant: dynalene_pao2_20c
+    overlays:
+      - ../recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml
+      - ../fluid_dynalene_pao2_20c.yaml
+    mesh_profiles: *mesh_recovery_phi25
+  - name: pressure_htc_phi25_ampcool
+    inputs:
+      coolant: ampcool_ac110_20c_interpolated
+    overlays:
+      - ../recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml
+      - ../fluid_ampcool_ac110_20c.yaml
+    mesh_profiles: *mesh_recovery_phi25
+  - name: pressure_htc_phi25_shell_s3x
+    inputs:
+      coolant: shell_s3x_20c_approximate
+    overlays:
+      - ../recalculation_600k_c05_inlet_c19_outlet_phi25_20260922.yaml
+      - ../fluid_shell_s3x_20c.yaml
+    mesh_profiles: *mesh_recovery_phi25

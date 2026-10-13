@@ -332,6 +332,10 @@ def execute_cad_source(config: ResolvedConfig, output_dir: str | Path) -> dict[s
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("XDG_CACHE_HOME", str(cache_dir))
     try:
+        # CadQuery/OCP 7.9의 Windows 프록시는 Python 3.14에서 VTK를
+        # OCP보다 먼저 불러오지 않으면 IVtkOCC 심볼을 비운 채 초기화할 수 있다.
+        # 명시적인 선행 import로 실제 CAD 백엔드가 완전히 로드된 뒤 CadQuery를 연다.
+        import vtk  # noqa: F401
         import cadquery  # noqa: F401
     except ImportError as exc:
         raise DependencyUnavailable(

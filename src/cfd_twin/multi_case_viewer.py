@@ -12,6 +12,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -212,6 +213,234 @@ def dataset_paths(value: Any) -> set[str]:
         for item in value:
             paths.update(dataset_paths(item))
     return paths
+
+
+def _nice_legend_upper(value: float) -> float:
+    """Round a positive maximum to a stable 1/2/5×10^n legend ceiling."""
+
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("surface heat-transfer range must have a positive maximum")
+    exponent = 10.0 ** math.floor(math.log10(value))
+    fraction = value / exponent
+    multiplier = next(item for item in (1.0, 2.0, 5.0, 10.0) if fraction <= item)
+    return multiplier * exponent
+
+
+def _nice_velocity_upper(value: float) -> float:
+    """Round a positive velocity ceiling to a compact half-decade step."""
+
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("velocity range must have a positive maximum")
+    exponent = 10.0 ** math.floor(math.log10(value))
+    step = exponent / 2.0
+    return math.ceil((value / step) - 1e-12) * step
+
+
+def _shared_velocity_display_upper(model: dict[str, Any]) -> float:
+    """Return a robust common ceiling from values the viewer actually draws."""
+
+    samples: list[float] = []
+    maxima: list[float] = []
+    for payload in model.get("interactive_cfd_by_mesh", {}).values():
+        if not isinstance(payload, dict):
+            continue
+        maximum = payload.get("velocity_max_m_s")
+        if isinstance(maximum, (int, float)) and math.isfinite(maximum) and maximum > 0:
+            maxima.append(float(maximum))
+        for section in payload.get("sections", {}).values():
+            if not isinstance(section, dict):
+                continue
+            samples.extend(
+                float(value)
+                for value in section.get("velocity_m_s", [])
+                if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+            )
+        for path in payload.get("streamlines", []):
+            if not isinstance(path, dict):
+                continue
+            samples.extend(
+                float(value)
+                for value in path.get("s", [])
+                if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+            )
+    if samples:
+        samples.sort()
+        # One common 99.9-percentile ceiling reveals the occupied range while
+        # retaining every original value. The rare upper 0.1% saturates only
+        # in colour and is never clipped from the stored CFD data.
+        index = max(0, min(len(samples) - 1, math.ceil(0.999 * len(samples)) - 1))
+        return _nice_velocity_upper(samples[index])
+    if maxima:
+        return _nice_velocity_upper(max(maxima))
+    return 1.0
+
+
+def _nice_mass_flow_upper(value: float) -> float:
+    """Round a per-patch mass-flow ceiling upward to a clean decade step."""
+
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("mass-flow range must have a positive maximum")
+    step = 10.0 ** math.floor(math.log10(value))
+    return math.ceil((value / step) - 1e-12) * step
+
+
+def _shared_mass_flow_display_upper(model: dict[str, Any]) -> float:
+    """Return a robust ceiling for rho*abs(U dot n)*patch_area in kg/s."""
+
+    inputs_by_mesh = model.get("inputs_by_mesh", {})
+    samples: list[float] = []
+    for run_id, payload in model.get("interactive_cfd_by_mesh", {}).items():
+        if not isinstance(payload, dict):
+            continue
+        inputs = inputs_by_mesh.get(run_id, {}) if isinstance(inputs_by_mesh, dict) else {}
+        density = inputs.get("fluid_density_kg_m3") if isinstance(inputs, dict) else None
+        if not isinstance(density, (int, float)) or not math.isfinite(density) or density <= 0:
+            continue
+        density = float(density)
+        for section in payload.get("sections", {}).values():
+            if not isinstance(section, dict):
+                continue
+            column = section.get("column_step_mm")
+            row = section.get("row_step_mm")
+            vectors = section.get("velocity_vectors_m_s")
+            if not (
+                isinstance(column, list)
+                and len(column) == 3
+                and isinstance(row, list)
+                and len(row) == 3
+                and isinstance(vectors, list)
+            ):
+                continue
+            area_vector_mm2 = (
+                column[1] * row[2] - column[2] * row[1],
+                column[2] * row[0] - column[0] * row[2],
+                column[0] * row[1] - column[1] * row[0],
+            )
+            if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in area_vector_mm2):
+                continue
+            samples.extend(
+                density
+                * abs(sum(float(vector[axis]) * area_vector_mm2[axis] for axis in range(3)))
+                * 1e-6
+                for vector in vectors
+                if isinstance(vector, list)
+                and len(vector) >= 3
+                and all(isinstance(value, (int, float)) and math.isfinite(value) for value in vector[:3])
+            )
+    if samples:
+        samples.sort()
+        # Use one global 99.9-percentile scale so normal differences remain
+        # visible. The rare upper 0.1% only saturates in colour; raw CFD values
+        # and integrated mass-flow calculations remain untouched.
+        index = max(0, min(len(samples) - 1, math.ceil(0.999 * len(samples)) - 1))
+        return _nice_mass_flow_upper(samples[index])
+    return 0.0006
+
+
+def synchronize_surface_heat_transfer_legend(model: dict[str, Any]) -> list[float] | None:
+    """Apply one immutable HTC scale to every directly sampled result.
+
+    Archived runs without coolant-interface probes are intentionally skipped;
+    the viewer reports those as unavailable instead of fabricating a value.
+    """
+
+    sampled: list[dict[str, Any]] = []
+    maxima: list[float] = []
+    for payload in model.get("interactive_cfd_by_mesh", {}).values():
+        if not isinstance(payload, dict):
+            continue
+        specification = payload.get("cell_surface_heat_transfer")
+        if not isinstance(specification, dict) or not specification.get("actual_dataset"):
+            continue
+        value_range = specification.get("value_range_w_m2k")
+        if (
+            not isinstance(value_range, list)
+            or len(value_range) != 2
+            or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in value_range)
+        ):
+            raise ValueError("direct surface HTC payload has no finite value range")
+        sampled.append(specification)
+        recommended = specification.get(
+            "recommended_fixed_display_upper_w_m2k"
+        )
+        maxima.append(
+            float(recommended)
+            if isinstance(recommended, (int, float))
+            and math.isfinite(recommended)
+            and recommended > 0
+            else _nice_legend_upper(float(value_range[1]))
+        )
+    if not sampled:
+        return None
+    fixed = [0.0, max(maxima)]
+    for specification in sampled:
+        specification["fixed_legend_range_w_m2k"] = fixed.copy()
+    metadata = model.setdefault("surface_heat_transfer_coefficient", {})
+    metadata["fixed_legend_range_w_m2k"] = fixed.copy()
+    metadata["legend_policy"] = (
+        "one shared fixed robust range across all directly sampled runs and times; "
+        "values above the global 99.9th-percentile display ceiling saturate but remain in data"
+    )
+    return fixed
+
+
+def synchronize_flow_legends(model: dict[str, Any]) -> dict[str, list[float]]:
+    """Freeze velocity, per-patch mass-flow and gauge-pressure scales.
+
+    Archived packages without spatial pressure samples stay unavailable.  A
+    scalar inlet/outlet pressure drop must never be expanded into a fabricated
+    pressure field.
+    """
+
+    velocity = [0.0, _shared_velocity_display_upper(model)]
+    mass_flow = [0.0, _shared_mass_flow_display_upper(model)]
+    pressure = [-500.0, 500.0]
+    pressure_runs: list[str] = []
+    for run_id, payload in model.get("interactive_cfd_by_mesh", {}).items():
+        if not isinstance(payload, dict):
+            continue
+        payload["fixed_velocity_legend_range_m_s"] = velocity.copy()
+        payload.pop("fixed_mass_flux_legend_range_kg_m2_s", None)
+        payload["fixed_mass_flow_legend_range_kg_s"] = mass_flow.copy()
+        sections = payload.get("sections", {})
+        available = bool(sections) and all(
+            isinstance(section, dict)
+            and isinstance(section.get("pressure_gauge_pa"), list)
+            for section in sections.values()
+        )
+        payload["pressure_available"] = available
+        if available:
+            payload["fixed_pressure_legend_range_pa"] = pressure.copy()
+            pressure_runs.append(str(run_id))
+        else:
+            payload.pop("fixed_pressure_legend_range_pa", None)
+    contract = model.setdefault("flow_legend_contract", {})
+    contract.update(
+        fixed_velocity_legend_range_m_s=velocity.copy(),
+        fixed_mass_flow_legend_range_kg_s=mass_flow.copy(),
+        fixed_pressure_legend_range_pa=pressure.copy(),
+        mass_flow_definition="mass crossing each rendered section patch: rho*abs(U dot n)*patch_area",
+        mass_flow_units="kg/s per rendered patch",
+        pressure_reference="p - outlet area-average p",
+        pressure_units="Pa gauge",
+        pressure_spatial_data_run_ids=pressure_runs,
+        missing_pressure_policy=(
+            "unavailable; never synthesize a spatial field from inlet/outlet averages"
+        ),
+        velocity_legend_policy=(
+            "one shared rounded 99.9th-percentile range from rendered CFD section and "
+            "streamline samples; higher values saturate in colour but remain in data"
+        ),
+        mass_flow_legend_policy=(
+            "one shared rounded 99.9th-percentile range from rendered CFD section patch mass-flow "
+            "samples; higher values saturate in colour but remain in data"
+        ),
+    )
+    contract.pop("fixed_mass_flux_legend_range_kg_m2_s", None)
+    contract.pop("mass_flux_definition", None)
+    contract.pop("mass_flux_units", None)
+    contract.pop("mass_flux_legend_policy", None)
+    return {"velocity": velocity, "mass_flow": mass_flow, "pressure": pressure}
 
 
 def _ready_run(model: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -490,7 +719,11 @@ def publish_diameter_mesh_viewer(viewer: Path, mesh_sources: dict[str, Path]) ->
     their native C05-top/C19-bottom coordinates.
     """
 
-    from .mesh_viewer import CSS as MESH_CSS, JAVASCRIPT as MESH_JAVASCRIPT
+    from .mesh_viewer import (
+        CSS as MESH_CSS,
+        JAVASCRIPT as MESH_JAVASCRIPT,
+        enable_multi_case_mesh_selection,
+    )
 
     viewer = viewer.resolve()
     manifest = json.loads((viewer / "four_case_manifest.json").read_text(encoding="utf-8"))
@@ -509,22 +742,9 @@ def publish_diameter_mesh_viewer(viewer: Path, mesh_sources: dict[str, Path]) ->
 
     html_path = viewer / "mesh.html"
     html = html_path.read_text(encoding="utf-8")
-    if 'id="mesh-case-select"' not in html:
-        marker = '<h1>메시 보기</h1><span id="count"></span>'
-        if html.count(marker) != 1:
-            raise ValueError("mesh page title marker missing")
-        html = html.replace(
-            marker,
-            '<h1>메시 보기</h1><label class="mesh-case-control" for="mesh-case-select">'
-            '결과 선택 <select id="mesh-case-select"></select></label><span id="count"></span>',
-        )
-    static_scripts = '  <script src="mesh-data.js"></script>\n  <script src="mesh-volume-data.js"></script>'
-    if static_scripts in html:
-        html = html.replace(static_scripts, '  <script src="four_case_data.js"></script>', 1)
-    elif 'src="four_case_data.js"' not in html:
-        raise ValueError("mesh page has no case-data script marker")
-    html = re.sub(r'href="mesh\.css(?:\?[^\"]*)?"', 'href="mesh.css?v=diameter-mesh-2"', html)
-    html = re.sub(r'src="mesh\.js(?:\?[^\"]*)?"', 'src="mesh.js?v=diameter-mesh-2"', html)
+    html = enable_multi_case_mesh_selection(html)
+    html = re.sub(r'href="mesh\.css(?:\?[^\"]*)?"', 'href="mesh.css?v=diameter-mesh-3"', html)
+    html = re.sub(r'src="mesh\.js(?:\?[^\"]*)?"', 'src="mesh.js?v=diameter-mesh-3"', html)
     html_path.write_text(html, encoding="utf-8")
     (viewer / "mesh.css").write_text(MESH_CSS, encoding="utf-8")
     (viewer / "mesh.js").write_text(MESH_JAVASCRIPT, encoding="utf-8")
@@ -534,6 +754,8 @@ def write_four_case_model(output: Path, combined: dict[str, Any]) -> str:
     """Write the selected result payload with a cache-safe model URL."""
 
     output = output.resolve()
+    synchronize_surface_heat_transfer_legend(combined)
+    synchronize_flow_legends(combined)
     model_source = (
         "window.CFD_TWIN_MODEL = "
         + json.dumps(combined, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

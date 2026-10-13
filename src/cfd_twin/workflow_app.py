@@ -233,14 +233,19 @@ def prepare_inputs(value: object, *, run_active: bool) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("입력은 JSON 객체여야 합니다.")
     coolant = value.get("coolant")
-    if coolant != "deionized_water":
-        raise ValueError("현재 물성 검증값은 탈이온수만 지원합니다.")
+    if coolant not in {
+        "deionized_water",
+        "dynalene_pao2_20c",
+        "ampcool_ac110_20c_interpolated",
+        "shell_s3x_20c_approximate",
+    }:
+        raise ValueError("지원되는 검증·비교 냉각수 식별자가 필요합니다.")
     numeric: dict[str, float] = {}
     ranges = {
         "inlet_temperature_k": (250.0, 370.0),
         "inlet_velocity_m_s": (0.001, 5.0),
         "outlet_pressure_pa": (50_000.0, 300_000.0),
-        "mesh_target_cells": (600_000.0, 900_000.0),
+        "mesh_target_cells": (400_000.0, 1_000_000.0),
     }
     for key, (lower, upper) in ranges.items():
         try:
@@ -250,8 +255,8 @@ def prepare_inputs(value: object, *, run_active: bool) -> dict[str, object]:
         if not math.isfinite(number) or not lower <= number <= upper:
             raise ValueError(f"{key}: 허용 범위 {lower:g}–{upper:g} 밖입니다.")
         numeric[key] = number
-    if numeric["mesh_target_cells"] not in {600_000, 700_000, 800_000}:
-        raise ValueError("메시 등급은 60만급, 70만급 또는 80만급 중 하나여야 합니다.")
+    if numeric["mesh_target_cells"] not in {400_000, 600_000, 700_000, 800_000, 1_000_000}:
+        raise ValueError("메시 등급은 40만급, 60만급, 70만급, 80만급 또는 100만급 중 하나여야 합니다.")
     cad_mode = value.get("cad_mode")
     if cad_mode not in {"baseline", "exact_baseline_upload"}:
         raise ValueError("검증되지 않은 CAD는 아직 계산에 연결할 수 없습니다.")

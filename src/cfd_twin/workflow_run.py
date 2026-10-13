@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -275,15 +276,21 @@ def _source_files(root: Path, selected: object) -> dict[str, Path]:
 
 
 def _operating_inputs(raw: object) -> dict[str, object]:
-    if not isinstance(raw, dict) or raw.get("coolant") != "deionized_water":
-        raise ValueError("현재 검증 물성은 탈이온수만 지원합니다.")
+    supported_coolants = {
+        "deionized_water",
+        "dynalene_pao2_20c",
+        "ampcool_ac110_20c_interpolated",
+        "shell_s3x_20c_approximate",
+    }
+    if not isinstance(raw, dict) or raw.get("coolant") not in supported_coolants:
+        raise ValueError("지원되는 검증·비교 냉각수 식별자가 필요합니다.")
     ranges = {
         "inlet_temperature_k": (250.0, 370.0),
         "inlet_velocity_m_s": (0.001, 5.0),
         "outlet_pressure_pa": (50_000.0, 300_000.0),
-        "mesh_target_cells": (600_000.0, 900_000.0),
+        "mesh_target_cells": (400_000.0, 1_000_000.0),
     }
-    values: dict[str, object] = {"coolant": "deionized_water"}
+    values: dict[str, object] = {"coolant": str(raw["coolant"])}
     for name, (lower, upper) in ranges.items():
         try:
             value = float(raw[name])
@@ -292,8 +299,8 @@ def _operating_inputs(raw: object) -> dict[str, object]:
         if not math.isfinite(value) or not lower <= value <= upper:
             raise ValueError(f"{name}: 허용 범위 {lower:g}–{upper:g} 밖입니다.")
         values[name] = int(value) if name == "mesh_target_cells" and value.is_integer() else value
-    if values["mesh_target_cells"] not in {600_000, 700_000, 800_000}:
-        raise ValueError("메시 등급은 60만급, 70만급 또는 80만급 중 하나여야 합니다.")
+    if values["mesh_target_cells"] not in {400_000, 600_000, 700_000, 800_000, 1_000_000}:
+        raise ValueError("메시 등급은 40만급, 60만급, 70만급, 80만급 또는 100만급 중 하나여야 합니다.")
     return values
 
 
@@ -466,25 +473,55 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
     validate_maximum_iterations(job.get("cold_flow_maximum_iterations"))
     files = {role: Path(job["files"][role]) for role in STEP_ROLES}
     base_overrides = _validated_geometry_overrides(job.get("geometry_overrides"))
-    imported = import_step_bundle(
-        files, BASE_CONFIG, THERMAL_OVERLAY, job_dir / "cad",
-        base_overrides=base_overrides,
-    )
     inputs = job["inputs"]
-    geometry_overrides = imported_config_overrides(imported["report"])
-    config = load_config(
-        BASE_CONFIG, overlay_paths=(THERMAL_OVERLAY,),
-        overrides=base_overrides + geometry_overrides + _operation_overrides(inputs),
-    )
+    frozen_cad = job.get("prevalidated_cad")
+    if frozen_cad is None:
+        imported = import_step_bundle(
+            files, BASE_CONFIG, THERMAL_OVERLAY, job_dir / "cad",
+            base_overrides=base_overrides,
+        )
+        geometry_overrides = imported_config_overrides(imported["report"])
+        config = load_config(
+            BASE_CONFIG, overlay_paths=(THERMAL_OVERLAY,),
+            overrides=base_overrides + geometry_overrides + _operation_overrides(inputs),
+        )
+        cad_dir = imported["cad_dir"]
+    else:
+        if not isinstance(frozen_cad, dict) or set(frozen_cad) != {"path", "file_sha256"}:
+            raise CfdTwinError("prevalidated CAD reference is malformed")
+        source = Path(str(frozen_cad["path"])).resolve()
+        expected = frozen_cad["file_sha256"]
+        if not isinstance(expected, dict) or not expected:
+            raise CfdTwinError("prevalidated CAD hash inventory is missing")
+        if source.is_relative_to(job_dir.resolve()) or not source.is_dir():
+            raise CfdTwinError("prevalidated CAD must be an external shared input")
+        for relative, digest in expected.items():
+            if not isinstance(relative, str) or not isinstance(digest, str):
+                raise CfdTwinError("prevalidated CAD hash inventory is malformed")
+            candidate = (source / relative).resolve()
+            if not candidate.is_relative_to(source) or not candidate.is_file():
+                raise CfdTwinError(f"prevalidated CAD file is missing: {relative}")
+            if hashlib.sha256(candidate.read_bytes()).hexdigest() != digest:
+                raise CfdTwinError(f"prevalidated CAD hash mismatch: {relative}")
+        cad_dir = job_dir / "cad"
+        if cad_dir.exists():
+            raise CfdTwinError(f"fresh job CAD directory must not exist: {cad_dir}")
+        shutil.copytree(source, cad_dir)
+        # The shared surfaces were generated directly from these frozen
+        # geometry overrides, so retain that exact configuration identity.
+        config = load_config(
+            BASE_CONFIG, overlay_paths=(THERMAL_OVERLAY,),
+            overrides=base_overrides + _operation_overrides(inputs),
+        )
     case = job_dir / "case"
     profile = job.get("mesh_profile", f"production_{inputs['mesh_target_cells']//1000}k")
     if profile not in MESH_PRESETS or MESH_PRESETS[profile].target_cells != inputs['mesh_target_cells']:
         raise CfdTwinError("Mesh profile must match the requested cell-count target")
-    write_production_mesh_source_bundle(config, imported["cad_dir"], case, mesh_level=profile)
+    write_production_mesh_source_bundle(config, cad_dir, case, mesh_level=profile)
     apply_steady_numerics(case, job.get("steady_numerics_profile"))
     apply_outlet_boundary(case, job.get("outlet_velocity_profile"))
     (job_dir / "resolved_config.json").write_text(config.to_json() + "\n", encoding="utf-8")
-    return {"case": case, "cad": imported["cad_dir"], "config": config}
+    return {"case": case, "cad": cad_dir, "config": config}
 
 
 def run_imported_case(job_manifest: Path) -> None:
@@ -494,16 +531,48 @@ def run_imported_case(job_manifest: Path) -> None:
     lock_path = root / "active_solver.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     current_stage = "cad"
+    run_started = time.time()
+    stage_started = run_started
+    runtime_report: dict[str, object] = {
+        "schema_version": 1,
+        "status": "running",
+        "started_at_epoch_s": run_started,
+        "solver_mpi_ranks": int(os.environ.get("OPENFOAM_MPI_RANKS", "1")),
+        "mesh_mpi_ranks": int(os.environ.get("OPENFOAM_MESH_MPI_RANKS", "1")),
+        "stage_wall_seconds": {},
+        "semantics": "measured host wall-clock seconds for this fresh isolated job",
+    }
+    runtime_path = job_dir / "execution_runtime.json"
+    case: Path | None = None
+
+    def write_runtime() -> None:
+        _write_json(runtime_path, runtime_report)
+        if case is not None:
+            _write_json(case / "reports/execution_runtime.json", runtime_report)
+
+    def finish_stage(stage: str) -> None:
+        nonlocal stage_started
+        now = time.time()
+        durations = runtime_report["stage_wall_seconds"]
+        assert isinstance(durations, dict)
+        durations[stage] = float(now - stage_started)
+        stage_started = now
+        runtime_report["last_completed_stage"] = stage
+        runtime_report["elapsed_wall_seconds"] = float(now - run_started)
+        write_runtime()
 
     def update(status: str, stage: str, message: str) -> None:
         _write_json(job_dir / "status.json", {"status": status, "stage": stage, "message": message, "pid": os.getpid()})
 
     try:
+        write_runtime()
         _check_cancel(cancel_path)
         update("running", "cad", "STEP 형상과 입·출구를 검증하고 STL로 내보내는 중")
         built = build_imported_case(job_dir)
+        case = built["case"]
+        finish_stage("cad")
         _check_cancel(cancel_path)
-        case, config = built["case"], built["config"]
+        config = built["config"]
         with lock_path.open("a+b") as lock:
             try:
                 _lock_solver_file(lock)
@@ -517,6 +586,7 @@ def run_imported_case(job_manifest: Path) -> None:
             for stage, service, message in stages:
                 _check_cancel(cancel_path)
                 current_stage = stage
+                stage_started = time.time()
                 update("running", stage, message)
                 environment = os.environ.copy()
                 if stage == "transient":
@@ -561,12 +631,20 @@ def run_imported_case(job_manifest: Path) -> None:
                 if stage == "transient":
                     _gate(case / "runs/frozen_flow_actual_1s/reports/solver/frozen_flow_validation.json", "FROZEN_FLOW_VALIDATION_PASSED")
                     _gate(case / "runs/frozen_flow_actual_1s/reports/solver/energy_balance.json", "TRANSIENT_ENERGY_BALANCE_PASSED")
+                finish_stage(stage)
             _check_cancel(cancel_path)
+            runtime_report["status"] = "analysis_complete"
+            runtime_report["analysis_wall_seconds"] = float(time.time() - run_started)
+            runtime_report["completed_analysis_at_epoch_s"] = time.time()
+            write_runtime()
             current_stage = "publish"
+            stage_started = time.time()
             update("running", "publish", "검증된 결과를 3D 뷰어에 연결 중")
             publish_completed_run(case, job_dir / "viewer", config=config, include_reference_cad=False)
+            finish_stage("publish")
             _check_cancel(cancel_path)
             current_stage = "release"
+            stage_started = time.time()
             update("running", "release", "서버 뷰어와 오프라인 데모 ZIP을 함께 갱신 중")
             try:
                 from .mesh_viewer import write_mesh_only_viewer
@@ -586,6 +664,12 @@ def run_imported_case(job_manifest: Path) -> None:
                     **labels,
                 )
             except Exception as exc:
+                finish_stage("release")
+                runtime_report["status"] = "release_failed"
+                runtime_report["total_wall_seconds"] = float(time.time() - run_started)
+                runtime_report["finished_at_epoch_s"] = time.time()
+                runtime_report["release_error"] = str(exc)
+                write_runtime()
                 _write_json(job_dir / "status.json", {
                     "status": "complete",
                     "stage": "release",
@@ -594,10 +678,21 @@ def run_imported_case(job_manifest: Path) -> None:
                     "pid": os.getpid(),
                 })
                 return
+            finish_stage("release")
+            runtime_report["status"] = "complete"
+            runtime_report["total_wall_seconds"] = float(time.time() - run_started)
+            runtime_report["finished_at_epoch_s"] = time.time()
+            write_runtime()
             update("complete", "release", "CFD 검증 완료 · 서버 뷰어와 데모 ZIP 동시 갱신 완료")
     except RunCancelled as exc:
+        runtime_report.update(status="cancelled", failed_or_stopped_stage=current_stage,
+                              elapsed_wall_seconds=float(time.time() - run_started))
+        write_runtime()
         update("cancelled", "stopped", str(exc))
     except Exception as exc:
+        runtime_report.update(status="failed", failed_or_stopped_stage=current_stage,
+                              elapsed_wall_seconds=float(time.time() - run_started), error=str(exc))
+        write_runtime()
         update("failed", current_stage, str(exc))
         raise
 

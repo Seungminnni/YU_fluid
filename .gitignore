@@ -6,6 +6,7 @@ __pycache__/
 .tox/
 .coverage
 .venv/
+.venv_*/
 venv/
 env/
 node_modules/
@@ -31,6 +32,11 @@ output/
 *.tar
 *.tar.gz
 *.tgz
+
+# Local ANSYS/Fluent launcher and session artifacts
+.sab
+FM_DESKTOP-*/
+cleanup-fluent-*.bat
 
 # Local research and design documents
 document/

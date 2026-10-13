@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import gzip
+import inspect
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from cfd_twin import viewer as viewer_module
 from cfd_twin.config import load_config
 from cfd_twin.viewer import (
     JAVASCRIPT,
@@ -24,6 +26,11 @@ BASELINE = ROOT / "configs" / "baseline_23cell.yaml"
 
 
 class ViewerTests(unittest.TestCase):
+    def test_coolant_only_sections_allow_no_solid_temperature_samples(self) -> None:
+        source = inspect.getsource(viewer_module._interactive_actual_cfd_payload)
+        self.assertIn("if valid_solid_temperature", source)
+        self.assertIn("else None", source)
+
     def test_temperature_display_ranges_follow_water_and_oil_legend_contract(self) -> None:
         self.assertIn("const selectedRange=activeMeshRun()?.temperature_legend_range_c;", JAVASCRIPT)
         self.assertIn("return dielectric?[19.500,23.000]:[19.908,21.044]", JAVASCRIPT)
@@ -33,10 +40,11 @@ class ViewerTests(unittest.TestCase):
         self.assertIn('const paletteStops=unit==="C"?temperaturePaletteStops', JAVASCRIPT)
         self.assertIn('function scalarPalette(value,field){return field==="temperature"?temperaturePalette(value):jet(value);}', JAVASCRIPT)
         self.assertIn('if(isPort&&visualMode==="cell-temperature")continue;', JAVASCRIPT)
-        self.assertIn('visibility.ports&&visualMode!=="xy-velocity"&&visualMode!=="cell-temperature"', JAVASCRIPT)
+        self.assertIn('visibility.ports&&!locationGuideMode&&visualMode!=="xy-velocity"&&visualMode!=="cell-temperature"', JAVASCRIPT)
         self.assertNotIn('if(isPort&&thermalDisplay){ctx.fillStyle=`rgba(182,198,207,', JAVASCRIPT)
         self.assertIn('fluentSurfaceShadow(item.face,basis)+(thermalCells&&!isPort?.19:0)', JAVASCRIPT)
         self.assertIn('function cellSurfacePalette(value)', JAVASCRIPT)
+        self.assertIn('return temperaturePalette(value);', JAVASCRIPT)
         self.assertIn('const [r,g,b]=cellSurfacePalette(normalised)', JAVASCRIPT)
         self.assertIn('if(visualMode==="cell-temperature")drawTemperaturePortOutlines(basis,scale,cx,cy)', JAVASCRIPT)
         self.assertIn('function drawTemperaturePortOutlines(basis,scale,cx,cy)', JAVASCRIPT)
@@ -286,6 +294,48 @@ class ViewerTests(unittest.TestCase):
                 {"coolant.Ux", "coolant.k", "batterySolid.h"},
             )
 
+    def test_convergence_payload_renders_preserved_failed_cold_flow_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            case = Path(directory)
+            run = case / "runs/steady_cold_flow"
+            log_dir = run / "logs/solver"
+            report_dir = run / "reports/solver"
+            log_dir.mkdir(parents=True)
+            report_dir.mkdir(parents=True)
+            (log_dir / "steady_cold_flow.log").write_text(
+                "\n".join(
+                    (
+                        "Time = 1",
+                        "Solving for fluid region coolant",
+                        "GAMG: Solving for p_rgh, Initial residual = 0.01, Final residual = 0.001, No Iterations 3",
+                        "Time = 2",
+                        "Solving for fluid region coolant",
+                        "GAMG: Solving for p_rgh, Initial residual = 0.0009, Final residual = 0.0002, No Iterations 2",
+                        "End",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            (report_dir / "cold_flow_validation.json").write_text(
+                json.dumps(
+                    {
+                        "status": "COLD_FLOW_VALIDATION_FAILED",
+                        "residual_floors": {"coolant.p_rgh": 1e-4},
+                        "residual_checks": {"coolant.p_rgh": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = _convergence_payload(case)
+
+            self.assertTrue(payload["available"])
+            self.assertEqual(payload["id"], "cold_flow")
+            self.assertEqual(payload["last_iteration"], 2)
+            self.assertEqual(payload["validation_status"], "COLD_FLOW_VALIDATION_FAILED")
+            self.assertFalse(payload["configured_residual_checks_passed"])
+            self.assertEqual(payload["series"][0]["configured_gate"], 1e-4)
+
     def test_dependency_free_viewer_is_truthfully_labelled(self) -> None:
         config = load_config(BASELINE)
         with tempfile.TemporaryDirectory() as directory:
@@ -346,11 +396,17 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('"#c62828","#1565c0","#2e7d32","#7b1fa2","#00838f"', script)
             self.assertIn("CFD 수렴 모니터", html)
             self.assertIn('id="convergence-chart-open"', html)
+            self.assertIn('id="failed-convergence-card"', html)
+            self.assertIn('id="failed-convergence-chart-open"', html)
+            self.assertIn("model.failed_convergence_histories", script)
+            self.assertIn('context.fillText(`${tr("합격 기준")}', script)
             self.assertIn('<option value="energy-balance">6. 에너지 수지</option>', html)
             self.assertIn('<option value="key-cells">7. 주요 배터리 5셀 온도</option>', html)
             self.assertIn("해석 세부정보", html)
             self.assertIn('id="kpi-outlet-temperature"', html)
             self.assertIn('id="kpi-cell-maximum"', html)
+            self.assertIn('id="kpi-cell-hotspot"', html)
+            self.assertIn('id="kpi-cell-hotspot-location"', html)
             self.assertNotIn("Figure 1 온도 처리", script)
             self.assertIn("논문 Figure", html)
             self.assertNotIn("필요 데이터:", script)
@@ -360,10 +416,15 @@ class ViewerTests(unittest.TestCase):
                 "종합 화면",
                 "셀 온도",
                 "유체 유선",
+                "가로 단면 위치",
                 "가로 단면 온도",
                 "가로 단면 유속",
+                "가로 단면 압력",
+                "배터리 표면 열전달계수",
+                "세로 단면 위치",
                 "세로 단면 온도",
                 "세로 단면 유속",
+                "세로 단면 압력",
             ):
                 self.assertIn(mode_label, html)
 
@@ -379,23 +440,39 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('id="flow-seek" type="range" min="0" max="1800" step="1"', html)
             self.assertIn('id="flow-sampling"', html)
             self.assertIn('id="flow-sampling"', html)
-            self.assertEqual(html.count('name="viz-mode"'), 7)
+            self.assertEqual(html.count('name="viz-mode"'), 15)
+            self.assertIn('value="xy-location"', html)
+            self.assertIn('value="xz-location"', html)
             self.assertIn('value="xy-temperature"', html)
             self.assertIn('value="xz-velocity"', html)
+            self.assertIn('value="xy-mass-flow"', html)
+            self.assertIn('value="xz-mass-flow"', html)
+            self.assertNotIn('value="xy-mass-flux"', html)
+            self.assertNotIn('value="xz-mass-flux"', html)
+            self.assertIn('value="xy-pressure"', html)
+            self.assertIn('value="xz-pressure"', html)
+            self.assertIn('value="surface-heat-transfer"', html)
+            self.assertNotIn('value="xy-heat-transfer"', html)
+            self.assertNotIn('value="xz-heat-transfer"', html)
             self.assertIn('id="show-cells"', html)
             self.assertIn('id="show-flow"', html)
             self.assertIn('id="show-grid"', html)
             self.assertIn('id="smooth-section"', html)
             self.assertIn('id="section-3d"', html)
+            self.assertIn("가로·세로 단면을 회전·확대 가능한 3D 평면", html)
             self.assertIn('id="head-rate"', html)
             self.assertIn('<option value="0.5" selected>0.5× 보기</option>', html)
             self.assertIn('id="cell-toast"', html)
             self.assertIn('id="scene-overlay"', html)
-            self.assertIn("contain:strict", (output / "style.css").read_text())
+            self.assertIn("contain:strict", (output / "style.css").read_text(encoding="utf-8"))
             self.assertIn('ctx.clearRect(0,0,canvas.width,canvas.height)', script)
             self.assertIn('new ResizeObserver', script)
             self.assertIn('id="horizontal-sections"', html)
-            self.assertEqual(html.count('name="horizontal-section"'), 5)
+            self.assertEqual(html.count('name="horizontal-section"'), 7)
+            self.assertIn('value="xy04"', html)
+            self.assertIn('value="xy96"', html)
+            self.assertIn("하부 간극 3.5 mm", html)
+            self.assertIn("상부 간극 78.5 mm", html)
             self.assertIn('id="horizontal-centre"', html)
             self.assertEqual(model["mesh_runs"][0]["counts"]["total_cells"], 1_316_854)
             self.assertEqual(model["mesh_runs"][1]["counts"]["total_cells"], 207_390)
@@ -436,6 +513,8 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('value="surface-average"', html)
             self.assertIn('value="internal-average"', html)
             self.assertIn('value="per-cell"', html)
+            self.assertIn('value="cell-extrema"', html)
+            self.assertIn('id="cell-extrema-cell"', html)
             self.assertIn('if(metric==="key-cells")', script)
             self.assertNotIn('function residualLineDash(key)', script)
             self.assertNotIn('context.setLineDash(residualLineDash', script)
@@ -485,8 +564,17 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('function temperatureSectionRange', script)
             self.assertIn('function drawDirectXYCellCuts', script)
             self.assertIn('function drawCellSectionCuts', script)
+            self.assertIn('BATTERY HOTTEST POINT', script)
+            self.assertIn('cellSurfaceExtrema()?.maximum', script)
             self.assertIn('function drawHorizontalCellCuts', script)
             self.assertIn('function drawVerticalCellCuts', script)
+            self.assertIn('function drawSectionLocationGuide', script)
+            self.assertIn('function sectionLocationMetrics', script)
+            self.assertIn('"축 전체 길이"', script)
+            self.assertIn('"절단 축"', script)
+            self.assertIn('"원점부터 거리"', script)
+            self.assertIn('"위치 비율"', script)
+            self.assertIn('function vertical2DView', script)
             self.assertIn('function exactSolidSectionActive', script)
             self.assertIn('solid_temperature_1800_c', script)
             self.assertIn(
@@ -499,7 +587,6 @@ class ViewerTests(unittest.TestCase):
             )
             self.assertIn('셀 전체표면 숨김 · 실제 교차 단면만 표시', script)
             self.assertIn('batterySolid 체적평균', script)
-            self.assertIn('테두리=직접 표면표본', script)
             self.assertIn('1,800 s batterySolid 저장 단면값', script)
             self.assertIn('function bilinear', script)
             self.assertIn('function bilinearPoint', script)
@@ -519,7 +606,6 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("area_average_pressure_pa", script)
             self.assertIn("pressure_drop_pa", script)
             self.assertIn("temperature_display_offset_c", script)
-            self.assertIn("DISPLAY CAL.", script)
             self.assertIn("T 표시보정", script)
             self.assertIn("function loadActualDataset", script)
             self.assertIn('location.protocol==="file:"', script)
@@ -534,9 +620,23 @@ class ViewerTests(unittest.TestCase):
             self.assertNotIn("const phase=simulationTime/30", script)
             self.assertIn("simulationTime*headDisplayScale()", script)
             self.assertIn("function sectionMarkerPhase", script)
+            self.assertNotIn("function hatchUnavailableCellCut", script)
+            self.assertIn("고체 내부 공간장 미저장 · 직접 표면+체적평균 제약 투영(표시 보간, 내부 CFD 셀 아님)", script)
+            self.assertIn("const horizontalCutAngularSubdivisions=4,horizontalCutRadialBands=8", script)
+            self.assertIn("const verticalCutAxialSubdivisions=4,verticalCutTransverseBands=16", script)
+            self.assertIn("function interpolatedCellSurfaceAtCut", script)
+            self.assertIn("function projectedHorizontalCellTemperature", script)
+            self.assertIn("function interpolatedCellSurfaceAtAxial", script)
+            self.assertIn("function projectedVerticalCellTemperature", script)
+            self.assertIn("직접 표면+체적평균 제약 투영(표시 보간, 내부 CFD 셀 아님)", script)
+            self.assertIn("방향 × ${horizontalCutRadialBands}반경 표시분할(보간)", script)
+            self.assertIn("not 1,024 independent CFD cells", script)
+            self.assertIn("const positions=[left,right],angularIndices=positions.map", script)
+            self.assertIn("높이 × ${verticalCutTransverseBands}가로 표시분할(보간)", script)
+            self.assertNotIn("셀 면색=해당 시각 체적평균", script)
             self.assertIn("function velocityDisplayRange", script)
             self.assertIn("function velocityDisplayMaximum", script)
-            self.assertIn("ACTUAL CFD · GLOBAL U SCALE", script)
+            self.assertNotIn("ACTUAL CFD · GLOBAL U SCALE", script)
             self.assertIn("전체 유동장 공통 색상범위", script)
             self.assertNotIn(
                 'const limit=Math.max(1e-9,section.velocity_range_m_s[1])',
@@ -562,15 +662,33 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('id="show-mesh"', html)
             self.assertIn('id="show-temperature-legend"', html)
             self.assertIn('id="show-velocity-legend"', html)
+            self.assertIn('id="show-mass-flow-legend"', html)
+            self.assertIn('id="show-pressure-legend"', html)
+            self.assertIn('function massFlowDisplayRange', script)
+            self.assertIn('field==="mass-flow"', script)
+            self.assertIn('Mass flow rate', script)
+            self.assertIn('normalVolumeFlow', script)
+            self.assertIn('id="show-heat-transfer-legend"', html)
             self.assertNotIn('id="show-legend"', html)
             self.assertIn("배터리 최고 온도 상승", script)
             self.assertIn("표준 − 정밀", script)
             self.assertIn("각 계산에 사용된 실제 polyMesh", script)
             self.assertIn("const groups=new Map()", script)
             self.assertNotIn("function eraseOverlayInsideCells", script)
-            self.assertIn('if(visualMode==="combined")drawFlow', script)
+            self.assertIn(
+                'if(["combined","cell-temperature"].includes(visualMode))drawFlow',
+                script,
+            )
             self.assertIn(
                 'if(visualMode==="velocity-streamlines")drawFlow', script
+            )
+            self.assertIn(
+                'if(!["combined","cell-temperature","velocity-streamlines"].includes(visualMode))return',
+                script,
+            )
+            self.assertIn(
+                'visibility.velocityLegend&&visualMode==="cell-temperature"&&visibility.flow',
+                script,
             )
             self.assertIn("function rayHitsCell", script)
             self.assertIn("function flowPointOccluded", script)
@@ -582,7 +700,11 @@ class ViewerTests(unittest.TestCase):
             self.assertIn('"temperature-legend","right"', script)
             self.assertIn("function sharedTemperatureRange", script)
             self.assertIn("return dielectric?[19.500,23.000]:[19.908,21.044]", script)
-            self.assertIn('preferredIntervals=unit==="C"?10:9', script)
+            self.assertIn('preferredIntervals=unit==="C"?10:legendId==="mass-flow-legend"?6:9', script)
+            self.assertIn('unit==="C"?"°C":unit', script)
+            self.assertIn('unit==="m/s"?"Velocity [m/s]":unit==="C"?"Temperature [°C]"', script)
+            self.assertNotIn("RAW SAMPLES · DISPLAY SMOOTH", script)
+            self.assertNotIn('ctx.fillText(`[${unit}]`', script)
             self.assertIn("const activeGeometry=(model.geometry_by_mesh||{})", script)
             self.assertIn('visibility.temperatureLegend', script)
             self.assertIn('visibility.velocityLegend', script)
@@ -603,6 +725,23 @@ class ViewerTests(unittest.TestCase):
             self.assertNotIn("sceneBaseCache", script)
             self.assertIn("function paintTemperatureChart", script)
             self.assertIn("function activeTemperatureGraph", script)
+            self.assertIn("function buildCellTemperatureExtrema", script)
+            self.assertIn("function ensureCellTemperatureExtrema", script)
+            self.assertIn('value="cell-extrema-map"', html)
+            self.assertIn("function drawCellExtremaMap", script)
+            self.assertIn("function cellTemperatureExtremaAtTime", script)
+            self.assertIn('`▲${values.maximum.toFixed(2)}`', script)
+            self.assertIn('`▼${values.minimum.toFixed(2)}`', script)
+            self.assertIn('ctx.strokeStyle="rgba(255,255,255,.96)";ctx.strokeText', script)
+            self.assertIn('"#8b1028",valueSize', script)
+            self.assertIn('"#003f73",valueSize', script)
+            self.assertIn("rotatedWidth=box.y,rotatedHeight=box.x", script)
+            self.assertIn("x:left+(box.y-y)*scale,y:layoutTop+(box.x-x)*scale", script)
+            self.assertIn('`${Number(box.y).toFixed(0)} mm`', script)
+            self.assertIn('"cell-temperature","cell-extrema-map"', script)
+            self.assertIn('metric==="cell-extrema"', script)
+            self.assertIn('`${cellId} 최고온도`', script)
+            self.assertIn('`${cellId} 최저온도`', script)
             self.assertIn("function downloadCsv", script)
             self.assertIn("battery_mesh_maximum_c", script)
             self.assertIn("battery_surface_area_average_c", script)
@@ -610,7 +749,9 @@ class ViewerTests(unittest.TestCase):
             self.assertIn("function directXYLayout", script)
             self.assertIn("plotLeft+(plotWidth-width)/2", script)
             self.assertIn("function drawDirectXYVelocityVectors", script)
-            self.assertIn('visualMode.startsWith("xy-")&&!section3DInput.checked&&horizontalSection()', script)
+            self.assertIn('visualMode.startsWith("xy-")&&!locationGuideMode&&!section3DInput.checked&&horizontalSection()', script)
+            self.assertIn('visualMode.startsWith("xz-")&&!locationGuideMode&&!section3DInput.checked&&verticalSection()', script)
+            self.assertIn('section3DOption.hidden=mode.endsWith("-location")||!(mode.startsWith("xy-")||mode.startsWith("xz-"))', script)
             self.assertIn("FROZEN-FLOW U(x) · 전체 유동장 공통 색상범위", script)
             self.assertIn("function drawXYPlaneTexture", script)
             self.assertIn("function drawDirectXYVelocity3D", script)
@@ -634,16 +775,30 @@ class ViewerTests(unittest.TestCase):
                 script,
             )
             self.assertIn("function cellSurfaceExtrema", script)
-            self.assertIn("CELL SURFACE MAX", script)
-            self.assertIn("CELL SURFACE MIN", script)
+            self.assertIn("BATTERY HOTTEST POINT", script)
+            self.assertIn("cellSurfaceExtrema()?.maximum", script)
             self.assertIn("data-cell-id", script)
             self.assertIn("showCellNotification", script)
             self.assertIn('6:"xy-temperature"', script)
             self.assertIn('11:"xy-velocity"', script)
-            self.assertIn('preferredIntervals=unit==="C"?10:9', script)
+            self.assertIn('preferredIntervals=unit==="C"?10:legendId==="mass-flow-legend"?6:9', script)
             self.assertIn('Math.floor(height/Math.max(18,tickFontPx*1.7))', script)
             self.assertNotIn("PAPER REF", script)
             self.assertIn("requestAnimationFrame(animate)", script)
+            self.assertIn("function surfaceHeatTransferValue", script)
+            self.assertIn("function heatTransferFaceGradient", script)
+            self.assertNotIn("function effectiveHeatTransferCoefficient", script)
+            self.assertIn("q''=OpenFOAM wallHeatFlux", script)
+            self.assertIn('kpi-inlet-mass-flow', html)
+            self.assertIn('kpi-outlet-mass-flow', html)
+            self.assertEqual(
+                model["surface_heat_transfer_coefficient"]["units"],
+                "W/(m^2*K)",
+            )
+            self.assertEqual(
+                model["surface_heat_transfer_coefficient"]["scope"],
+                "coolant-facing surfaces of batteries C01-C23 only",
+            )
             self.assertIn("let yaw = -0.96, pitch = 0.52", script)
             self.assertFalse(model["interactive_cfd"]["enabled"])
 

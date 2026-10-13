@@ -28,6 +28,7 @@ from cfd_twin.production_mesh import (
     EXPECTED_BATTERY_FILES,
     MESH_PRESETS,
     SINGLE_MESH_TARGET_COUNTS,
+    SUPPORTED_LEVELS,
     write_production_mesh_source_bundle,
 )
 
@@ -224,6 +225,479 @@ class ProductionMeshTests(unittest.TestCase):
             "CALIBRATED_EXECUTED_849284_YPLUS_PASSED",
         )
 
+    def test_phi19_mesh_study_v2_profiles_keep_wall_resolution_and_tighten_quality(self) -> None:
+        coarse = MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"]
+        medium = MESH_PRESETS["production_phi19_mesh_study_800k_smooth_v2"]
+        fine = MESH_PRESETS["production_phi19_mesh_study_1000k_smooth_v2"]
+        self.assertEqual([coarse.target_cells, medium.target_cells, fine.target_cells], [400_000, 800_000, 1_000_000])
+        self.assertTrue(all(item.first_layer_thickness_m == 10e-6 for item in (coarse, medium, fine)))
+        self.assertTrue(all(item.prism_layer_count == 10 for item in (coarse, medium, fine)))
+        self.assertEqual(coarse.battery_core_refinement_radius_m, 0.0080)
+        self.assertEqual(coarse.surface_max_level, 0)
+        self.assertEqual(medium.cells_between_levels, 5)
+        self.assertEqual(fine.cells_between_levels, 5)
+        self.assertEqual(fine.background_cell_m, 0.00275)
+        self.assertTrue(all(item.maximum_non_orthogonality == 65.0 for item in (coarse, medium, fine)))
+        coarse_v3 = MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"]
+        self.assertEqual(coarse_v3.mesh_shrinker, "displacementMotionSolver")
+        self.assertTrue(coarse_v3.preserve_wall_diagnostics)
+        coarse_v4 = MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v4"]
+        self.assertEqual(coarse_v4.background_cell_m, 0.00430)
+        self.assertEqual(coarse_v4.surface_max_level, 1)
+        self.assertEqual(coarse_v4.battery_core_refinement_radius_m, 0.0080)
+        self.assertEqual(coarse_v4.mesh_shrinker, "displacementMedialAxis")
+        self.assertTrue(coarse_v4.preserve_wall_diagnostics)
+        coarse_v5 = MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v5"]
+        self.assertEqual(coarse_v5.refined_battery_cells, ("C03", "C13"))
+        self.assertEqual(coarse_v5.first_layer_thickness_m, 10e-6)
+        self.assertEqual(coarse_v5.prism_layer_count, 10)
+        self.assertEqual(coarse_v5.minimum_hexahedron_fraction, 0.88)
+
+    def test_phi19_mesh_study_v12_restarts_with_thinner_wall_cells(self) -> None:
+        medium = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v12"]
+        fine = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v12"]
+        self.assertEqual([medium.target_cells, fine.target_cells], [800_000, 1_000_000])
+        self.assertTrue(all(item.first_layer_thickness_m == 8e-6 for item in (medium, fine)))
+        self.assertTrue(all(item.prism_layer_count == 10 for item in (medium, fine)))
+        self.assertTrue(all(item.cells_between_levels == 5 for item in (medium, fine)))
+        self.assertTrue(all(item.preserve_wall_diagnostics for item in (medium, fine)))
+        self.assertTrue(all(item.minimum_hexahedron_fraction == 0.88 for item in (medium, fine)))
+
+    def test_phi19_mesh_study_v13_changes_only_background_grid_phase(self) -> None:
+        pairs = (
+            (
+                MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v12"],
+                MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v13_quality"],
+                0.00300,
+            ),
+            (
+                MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v12"],
+                MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v13_quality"],
+                0.00280,
+            ),
+        )
+        for original, retry, expected_background in pairs:
+            changed = {
+                name
+                for name in original.__dataclass_fields__
+                if getattr(original, name) != getattr(retry, name)
+            }
+            self.assertEqual(changed, {"background_cell_m", "calibration_status"})
+            self.assertEqual(retry.background_cell_m, expected_background)
+            self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+            self.assertEqual(retry.prism_layer_count, 10)
+            self.assertEqual(retry.minimum_hexahedron_fraction, 0.88)
+
+    def test_phi19_mesh_study_v14_refines_only_failed_c18_wall(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v13_quality"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v14_c18"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"refined_battery_cells", "calibration_status"})
+        self.assertEqual(retry.refined_battery_cells, ("C18",))
+        self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+        self.assertEqual(retry.prism_layer_count, 10)
+        self.assertEqual(retry.minimum_hexahedron_fraction, 0.88)
+
+    def test_phi19_1000k_v14_corrects_only_wall_normal_resolution(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v13_quality"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v14_6um_11layers"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"first_layer_thickness_m", "prism_layer_count", "calibration_status"},
+        )
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertEqual(retry.background_cell_m, previous.background_cell_m)
+        self.assertEqual(retry.minimum_hexahedron_fraction, 0.88)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertIn("production_phi19_mesh_study_1000k_yplus_v14_6um_11layers", SUPPORTED_LEVELS)
+
+    def test_phi19_1000k_v15_refines_only_failed_c13_wall(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v14_6um_11layers"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v15_c13"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"refined_battery_cells", "calibration_status"})
+        self.assertEqual(retry.refined_battery_cells, ("C13",))
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertEqual(retry.minimum_hexahedron_fraction, 0.88)
+        self.assertIn("production_phi19_mesh_study_1000k_yplus_v15_c13", SUPPORTED_LEVELS)
+
+    def test_phi19_1000k_v16_changes_only_layer_termination_buffer(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v15_c13"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v16_layer_continuity"]
+
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"n_buffer_cells_no_extrude", "calibration_status"})
+        self.assertEqual(retry.n_buffer_cells_no_extrude, 0)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertEqual(retry.refined_battery_cells, ("C13",))
+        self.assertIn("production_phi19_mesh_study_1000k_yplus_v16_layer_continuity", SUPPORTED_LEVELS)
+
+    def test_phi19_1000k_v17_refines_only_measured_c18_wall(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v16_layer_continuity"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"refined_battery_cells", "calibration_status"})
+        self.assertEqual(retry.refined_battery_cells, ("C13", "C18"))
+        self.assertEqual(retry.n_buffer_cells_no_extrude, 0)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertIn("production_phi19_mesh_study_1000k_yplus_v17_c13_c18", SUPPORTED_LEVELS)
+
+    def test_phi19_1000k_v18_changes_only_layer_shrinker(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v18_motion"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"mesh_shrinker", "calibration_status"})
+        self.assertEqual(retry.mesh_shrinker, "displacementMotionSolver")
+        self.assertEqual(retry.refined_battery_cells, ("C13", "C18"))
+        self.assertEqual(retry.n_buffer_cells_no_extrude, 0)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertIn("production_phi19_mesh_study_1000k_yplus_v18_motion", SUPPORTED_LEVELS)
+
+    def test_phi19_1000k_v19_returns_to_passed_mesh_and_reduces_first_cell(self) -> None:
+        passed_mesh = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v19_4um"]
+        changed = {
+            name
+            for name in passed_mesh.__dataclass_fields__
+            if getattr(passed_mesh, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"first_layer_thickness_m", "calibration_status"})
+        self.assertEqual(retry.first_layer_thickness_m, 4e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertEqual(retry.mesh_shrinker, "displacementMedialAxis")
+        self.assertEqual(retry.refined_battery_cells, ("C13", "C18"))
+        self.assertIn("production_phi19_mesh_study_1000k_yplus_v19_4um", SUPPORTED_LEVELS)
+
+    def test_phi19_1000k_v20_restores_prism_envelope_with_thirteen_layers(self) -> None:
+        passed_mesh = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v20_4um_13layers"]
+        changed = {
+            name
+            for name in passed_mesh.__dataclass_fields__
+            if getattr(passed_mesh, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"first_layer_thickness_m", "prism_layer_count", "calibration_status"},
+        )
+        self.assertEqual(retry.first_layer_thickness_m, 4e-6)
+        self.assertEqual(retry.prism_layer_count, 13)
+        self.assertEqual(retry.mesh_shrinker, "displacementMedialAxis")
+        self.assertEqual(retry.refined_battery_cells, ("C13", "C18"))
+        self.assertIn(
+            "production_phi19_mesh_study_1000k_yplus_v20_4um_13layers",
+            SUPPORTED_LEVELS,
+        )
+
+    def test_phi19_1000k_v21_scales_only_layer_insertion_minimum(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v20_4um_13layers"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v21_4um_13layers_min2"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"minimum_layer_thickness_m", "calibration_status"})
+        self.assertEqual(retry.first_layer_thickness_m, 4e-6)
+        self.assertEqual(retry.minimum_layer_thickness_m, 2e-6)
+        self.assertEqual(retry.prism_layer_count, 13)
+        self.assertIn(
+            "production_phi19_mesh_study_1000k_yplus_v21_4um_13layers_min2",
+            SUPPORTED_LEVELS,
+        )
+
+    def test_phi19_1000k_v22_changes_only_layer_feature_angle(self) -> None:
+        passed_mesh = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v22_feature120"]
+        changed = {
+            name
+            for name in passed_mesh.__dataclass_fields__
+            if getattr(passed_mesh, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"layer_feature_angle_degrees", "calibration_status"})
+        self.assertEqual(retry.layer_feature_angle_degrees, 120.0)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertEqual(retry.refined_battery_cells, ("C13", "C18"))
+        self.assertIn(
+            "production_phi19_mesh_study_1000k_yplus_v22_feature120",
+            SUPPORTED_LEVELS,
+        )
+
+    def test_phi19_1000k_v23_relaxes_only_temporary_layer_insertion_quality(self) -> None:
+        passed_mesh = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v23_layer_insert75"]
+        changed = {
+            name
+            for name in passed_mesh.__dataclass_fields__
+            if getattr(passed_mesh, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"generation_max_non_orthogonality", "calibration_status"},
+        )
+        self.assertEqual(retry.generation_max_non_orthogonality, 75.0)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertIn(
+            "production_phi19_mesh_study_1000k_yplus_v23_layer_insert75",
+            SUPPORTED_LEVELS,
+        )
+
+    def test_phi19_1000k_v24_coarsens_only_generic_battery_skin(self) -> None:
+        passed_mesh = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v24_surface_l0"]
+        changed = {
+            name
+            for name in passed_mesh.__dataclass_fields__
+            if getattr(passed_mesh, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"surface_max_level", "calibration_status"})
+        self.assertEqual(retry.surface_min_level, 0)
+        self.assertEqual(retry.surface_max_level, 0)
+        self.assertEqual(retry.generation_max_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.refined_battery_cells, ("C13", "C18"))
+        self.assertIn(
+            "production_phi19_mesh_study_1000k_yplus_v24_surface_l0",
+            SUPPORTED_LEVELS,
+        )
+
+    def test_phi19_1000k_v25_combines_surface_l0_with_corrected_wall_stack(self) -> None:
+        passed_mesh = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v24_surface_l0"]
+        retry = MESH_PRESETS[
+            "production_phi19_mesh_study_1000k_yplus_v25_surface_l0_4um_13layers"
+        ]
+        changed = {
+            name
+            for name in passed_mesh.__dataclass_fields__
+            if getattr(passed_mesh, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {
+                "first_layer_thickness_m",
+                "prism_layer_count",
+                "minimum_layer_thickness_m",
+                "calibration_status",
+            },
+        )
+        self.assertEqual(retry.surface_max_level, 0)
+        self.assertEqual(retry.first_layer_thickness_m, 4e-6)
+        self.assertEqual(retry.prism_layer_count, 13)
+        self.assertEqual(retry.minimum_layer_thickness_m, 2e-6)
+        self.assertEqual(retry.generation_max_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertIn(
+            "production_phi19_mesh_study_1000k_yplus_v25_surface_l0_4um_13layers",
+            SUPPORTED_LEVELS,
+        )
+
+    def test_phi19_1000k_v26_relaxes_only_temporary_insertion_limit(self) -> None:
+        passed_mesh = MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v24_surface_l0"]
+        retry = MESH_PRESETS[
+            "production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67"
+        ]
+        changed = {
+            name
+            for name in passed_mesh.__dataclass_fields__
+            if getattr(passed_mesh, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"generation_max_non_orthogonality", "calibration_status"},
+        )
+        self.assertEqual(retry.generation_max_non_orthogonality, 67.0)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+        self.assertEqual(retry.surface_max_level, 0)
+        self.assertIn(
+            "production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67",
+            SUPPORTED_LEVELS,
+        )
+
+    def test_phi19_400k_v6_changes_only_first_cell_and_diagnostics_label(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v5"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_400k_yplus_v6"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"first_layer_thickness_m", "calibration_status"},
+        )
+        self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+        self.assertEqual(retry.refined_battery_cells, ("C03", "C13"))
+        self.assertIn("production_phi19_mesh_study_400k_yplus_v6", SUPPORTED_LEVELS)
+
+    def test_phi19_mesh_study_v15_widens_only_quality_transition(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v14_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"cells_between_levels", "calibration_status"})
+        self.assertEqual(retry.cells_between_levels, 6)
+        self.assertEqual(retry.refined_battery_cells, ("C18",))
+        self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+
+    def test_phi19_mesh_study_v16_keeps_gates_while_smoothing_top_wall(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v16_transition"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"background_cell_m", "cells_between_levels", "calibration_status"},
+        )
+        self.assertEqual(retry.background_cell_m, 0.00301)
+        self.assertEqual(retry.cells_between_levels, 7)
+        self.assertEqual(retry.refined_battery_cells, ("C18",))
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
+    def test_phi19_mesh_study_v17_v18_isolate_background_phase(self) -> None:
+        baseline = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"]
+        for name, background in (
+            ("production_phi19_mesh_study_800k_yplus_v17_phase_3p01", 0.00301),
+            ("production_phi19_mesh_study_800k_yplus_v18_phase_2p99", 0.00299),
+        ):
+            retry = MESH_PRESETS[name]
+            changed = {
+                field
+                for field in baseline.__dataclass_fields__
+                if getattr(baseline, field) != getattr(retry, field)
+            }
+            self.assertEqual(changed, {"background_cell_m", "calibration_status"})
+            self.assertEqual(retry.background_cell_m, background)
+            self.assertEqual(retry.cells_between_levels, 6)
+            self.assertEqual(retry.refined_battery_cells, ("C18",))
+            self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+            self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
+    def test_phi19_mesh_study_v19_v20_change_block_counts_without_relaxing_gates(self) -> None:
+        v19 = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v19_xy_blocks"]
+        v20 = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v20_xyz_blocks"]
+        self.assertEqual(v19.background_cell_m, 0.00295)
+        self.assertEqual(v19.cells_between_levels, 6)
+        self.assertEqual(v20.background_cell_m, 0.00290)
+        self.assertEqual(v20.cells_between_levels, 5)
+        for retry in (v19, v20):
+            self.assertEqual(retry.refined_battery_cells, ("C18",))
+            self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+            self.assertEqual(retry.prism_layer_count, 10)
+            self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+            self.assertEqual(retry.maximum_skewness, 5.0)
+            self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
+    def test_phi19_mesh_study_v21_adds_only_measured_c12_wall(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v20_xyz_blocks"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v21_c12_c18"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"refined_battery_cells", "calibration_status"})
+        self.assertEqual(retry.refined_battery_cells, ("C12", "C18"))
+        self.assertEqual(retry.background_cell_m, 0.00290)
+        self.assertEqual(retry.cells_between_levels, 5)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
+    def test_phi19_mesh_study_v22_changes_only_the_sliver_cell_shrinker(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v21_c12_c18"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v22_motion"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"mesh_shrinker", "calibration_status"})
+        self.assertEqual(retry.mesh_shrinker, "displacementMotionSolver")
+        self.assertEqual(retry.refined_battery_cells, ("C12", "C18"))
+        self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+        self.assertEqual(retry.prism_layer_count, 10)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_skewness, 5.0)
+        self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
+    def test_phi19_mesh_study_v23_removes_only_c12_island_via_v20_motion(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v20_xyz_blocks"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v23_c18_motion"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"mesh_shrinker", "calibration_status"})
+        self.assertEqual(retry.mesh_shrinker, "displacementMotionSolver")
+        self.assertEqual(retry.refined_battery_cells, ("C18",))
+        self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+        self.assertEqual(retry.prism_layer_count, 10)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_skewness, 5.0)
+        self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
+    def test_phi19_mesh_study_v24_smooths_only_corrected_port_transitions(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v23_c18_motion"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v24_transition6"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"cells_between_levels", "calibration_status"})
+        self.assertEqual(retry.cells_between_levels, 6)
+        self.assertEqual(retry.mesh_shrinker, "displacementMotionSolver")
+        self.assertEqual(retry.refined_battery_cells, ("C18",))
+        self.assertEqual(retry.background_cell_m, 0.00290)
+        self.assertEqual(retry.first_layer_thickness_m, 8e-6)
+        self.assertEqual(retry.prism_layer_count, 10)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_skewness, 5.0)
+        self.assertEqual(retry.total_tolerance_fraction, 0.12)
+
     def test_frame_fit_800k_trial_keeps_the_passing_wall_treatment(self) -> None:
         preset = MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"]
         self.assertEqual(preset.target_cells, 800_000)
@@ -250,6 +724,17 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertEqual(three_mm_retry.background_cell_m, 0.003)
         self.assertEqual(three_mm_retry.port_cap_refinement_level, 1)
         self.assertEqual(three_mm_retry.target_cells, 800_000)
+
+        refined = MESH_PRESETS[
+            "production_frame_fit_800k_6um_11layers_motion_port_refined"
+        ]
+        self.assertEqual(refined.background_cell_m, 0.003)
+        self.assertEqual(refined.first_layer_thickness_m, 6e-6)
+        self.assertEqual(refined.prism_layer_count, 11)
+        self.assertEqual(refined.port_cap_refinement_level, 2)
+        self.assertEqual(refined.port_cap_refinement_depth_m, 0.008)
+        self.assertEqual(refined.cells_between_levels, 5)
+        self.assertEqual(refined.minimum_total_cells, 700_000)
 
     def test_600k_profile_is_recalibrated_above_the_minimum(self) -> None:
         preset = MESH_PRESETS["production_600k"]
@@ -723,10 +1208,16 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("actual_xy_temperature_1s", actual_control)
             self.assertIn("actual_xy15_temperature_1s", actual_control)
             self.assertIn("actual_xy85_temperature_1s", actual_control)
+            self.assertIn("actual_xy04_temperature_1s", actual_control)
+            self.assertIn("actual_xy96_temperature_1s", actual_control)
             self.assertIn("actual_yz15_temperature_1s", actual_control)
             self.assertIn("actual_yz85_temperature_1s", actual_control)
             self.assertIn("actual_battery_near_surface_temperature_1s", actual_control)
-            self.assertEqual(actual_control.count("interpolationScheme cell;"), 16)
+            self.assertEqual(actual_control.count("interpolationScheme cell;"), 20)
+            self.assertIn("type wallHeatFlux;", actual_control)
+            self.assertIn("type patchProbes;", actual_control)
+            self.assertIn("fields (T wallHeatFlux);", actual_control)
+            self.assertIn("actual_battery_near_surface_fluid_temperature_1s", actual_control)
             self.assertIn("coolant_temperature_volume_integral", actual_control)
             self.assertIn("batterySolid_temperature_volume_integral", actual_control)
             self.assertEqual(actual_control.count("operation volIntegrate;"), 2)

@@ -86,6 +86,20 @@ cases:
 `batch.json`과 각 `job.json`에 값이 고정되므로, 준비 후 값을 바꾸려면 반드시 새
 `--output` 폴더와 새 작업 ID를 사용한다.
 
+### 자동 진단·재시도
+
+실패한 작업은 메시나 유동장을 이어서 사용하지 않는다. 실행기는 실제 보고서가
+있는 메시 품질 또는 배터리 y+ 실패만 다음 `mesh_profiles` 항목으로 새 메시부터
+재실행한다. 잔차·질량 불균형·압력 변동 등 측정된 수렴 항목만 실패한 경우에는
+`automatic_retry.cold_flow_iteration_limits`와
+`automatic_retry.steady_numerics_profiles`를 순서대로 적용해 새 작업 ID에서 S0부터
+재실행한다. 합격 기준과 물리 조건은 유지된다. Docker 오류, 보고서 누락, 알 수
+없는 안전 게이트 실패는 반복하지 않고 `needs_attention`으로 멈춘다.
+
+각 판단은 배치의 `retry_decisions/`, 보존 진단은 `diagnostic_attempts/`에 기록된다.
+자동 재시도는 기본적으로 최대 6회이며 YAML의 `automatic_retry`에서 더 낮게
+제한하거나 끌 수 있다.
+
 이 예시는 `configs/experiments/` 아래에 저장한다. 준비가 끝난 배치의 조건과 rank 수는 고정된다. 동일한 출력 폴더에 다른 설정을 덮어쓰지 않는다. 지원 범위는 현재 검증된 **23셀 탱크 계열·탈이온수**이며, 새로운 CAD도 실제 형상/간섭 검사를 통과해야 한다. 형상과 운전조건을 바꿨다고 계산의 수렴이나 메시 품질 통과가 보장되지는 않는다.
 
 ## 진행·재시도·결과

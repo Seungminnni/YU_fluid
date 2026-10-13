@@ -68,11 +68,17 @@ class MeshPreset:
     surface_max_level: int
     battery_inside_level: int
     first_layer_thickness_m: float
+    minimum_layer_thickness_m: float = 3e-6
     prism_layer_count: int = PRISM_LAYER_COUNT
+    layer_feature_angle_degrees: float = 60.0
+    n_buffer_cells_no_extrude: int = 1
     refined_battery_cells: tuple[str, ...] = ()
     preserve_wall_diagnostics: bool = False
     mesh_shrinker: str = "displacementMedialAxis"
     port_cap_refinement_level: int | None = None
+    port_cap_refinement_depth_m: float = 0.004
+    cells_between_levels: int = 3
+    battery_core_refinement_radius_m: float = BATTERY_CORE_REFINEMENT_RADIUS_M
     target_solid_cells: int | None = None
     target_fluid_cells: int | None = None
     target_points: int | None = None
@@ -216,6 +222,458 @@ MESH_PRESETS = {
     ),
 }
 
+# Ø19 deionized-water mesh-independence study.  Geometry, surface levels,
+# 10 µm first layer, ten prism layers and all physics/solver gates stay equal
+# to the validated 611,313-cell Ø19 reference.  The coarse class enlarges only
+# the solid-core hexa refinement cylinder so that it can meet the unchanged
+# 88% hexa gate without over-refining the coolant-facing boundary layer.
+# Actual polyMesh counts are always reported and must pass the declared gate.
+for _name, _target, _background in (
+    # 4.10 mm / 4 mm-core produced 314,608 cells and 84.866% hexahedra.
+    # 3.60 mm / 4 mm-core produced 454,757 cells, but its inlet patch was
+    # under-resolved.  Retain the cleaner 4.10 mm wall mesh and add only
+    # hexa-topology resolution inside the battery solid cores.
+    ("production_phi19_mesh_study_400k", 400_000, 0.00410),
+    ("production_phi19_mesh_study_800k", 800_000, 0.00295),
+    ("production_phi19_mesh_study_1000k", 1_000_000, 0.00270),
+):
+    MESH_PRESETS[_name] = replace(
+        MESH_PRESETS["production_600k"],
+        target_cells=_target,
+        background_cell_m=_background,
+        minimum_total_cells=None,
+        total_tolerance_fraction=0.12,
+        calibration_status="PHI19_MESH_INDEPENDENCE_STUDY_REQUIRES_FRESH_VALIDATION",
+    )
+    SUPPORTED_LEVELS += (_name,)
+
+MESH_PRESETS["production_phi19_mesh_study_400k"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_400k"],
+    # The 6.7 mm-core trial hit 399,973 cells exactly, but curved level-1
+    # battery skins left only 86.218% hexes.  A coarse-grid study should also
+    # coarsen tangential skin resolution: keep the 10 µm x 10-layer normal
+    # wall resolution, use level 0 on the battery skin, and return the saved
+    # cells as hexa-topology solid-core refinement.
+    surface_max_level=0,
+    battery_core_refinement_radius_m=0.0075,
+    calibration_status="PHI19_400K_COARSE_SKIN_L0_CORE_7P5MM_REQUIRES_FRESH_VALIDATION",
+)
+
+# Fresh mesh-independence retries requested after the first coarse mesh missed
+# the 88% hexa gate and the first 800k cold-flow field stalled on p_rgh.  These
+# are new profiles rather than edits to the historical presets, so the failed
+# meshes remain reproducible in their archived diagnostics.  Physics, wall
+# treatment (10 um x 10 layers), y+ and result acceptance gates are unchanged.
+MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_400k"],
+    background_cell_m=0.00420,
+    battery_core_refinement_radius_m=0.0080,
+    generation_max_non_orthogonality=65.0,
+    maximum_non_orthogonality=65.0,
+    calibration_status="PHI19_400K_HEXA_CORE_AND_QUALITY_RETRY_REQUIRES_VALIDATION",
+)
+MESH_PRESETS["production_phi19_mesh_study_800k_smooth_v2"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k"],
+    cells_between_levels=5,
+    generation_max_non_orthogonality=65.0,
+    maximum_non_orthogonality=65.0,
+    calibration_status="PHI19_800K_SMOOTH_TRANSITION_PRESSURE_RETRY_REQUIRES_VALIDATION",
+)
+MESH_PRESETS["production_phi19_mesh_study_1000k_smooth_v2"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k"],
+    background_cell_m=0.00275,
+    cells_between_levels=5,
+    generation_max_non_orthogonality=65.0,
+    maximum_non_orthogonality=65.0,
+    calibration_status="PHI19_1000K_SMOOTH_TRANSITION_PRESSURE_RETRY_REQUIRES_VALIDATION",
+)
+# The executed Ø19 800k smooth-v2 mesh passed its mesh gates at 766,470
+# cells, but its cold-flow field put only 92.798% of battery area below y+=1
+# (the unchanged gate is 95%).  Create new wall-corrected profiles rather
+# than mutating or reusing that failed mesh.  Only the first prism height is
+# reduced from 10 to 8 µm; the ten layers, tangential grid, physics and all
+# acceptance limits remain unchanged.  Both sizes must be generated and
+# validated from S0 again.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v12"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_smooth_v2"],
+    first_layer_thickness_m=8e-6,
+    preserve_wall_diagnostics=True,
+    calibration_status="PHI19_800K_8UM_YPLUS_RETRY_REQUIRES_FRESH_VALIDATION",
+)
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v12"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_smooth_v2"],
+    first_layer_thickness_m=8e-6,
+    preserve_wall_diagnostics=True,
+    calibration_status="PHI19_1000K_8UM_YPLUS_RETRY_REQUIRES_FRESH_VALIDATION",
+)
+# The first two fresh 800k v12 meshes reproduced exactly two low-twist
+# coolant faces on the C12 fluid/solid interface (x=60.57/60.83 mm,
+# y=63.33/62.39 mm, z=7.73/9.20 mm).  Layer coverage and every other mesh
+# gate passed.  Move only the background-grid phase by 0.05 mm so those two
+# wall faces are rebuilt while retaining the validated 8 um x 10-layer wall
+# treatment, refinement levels, physics and acceptance limits.  The predicted
+# count remains inside the unchanged +/-12% study band.  Keep matching 1000k
+# fallback available in case the same deterministic wall/grid intersection is
+# encountered there; neither preset inherits a pass.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v13_quality"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v12"],
+    background_cell_m=0.00300,
+    calibration_status="PHI19_800K_C12_LOW_TWIST_GRID_PHASE_RETRY_REQUIRES_VALIDATION",
+)
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v13_quality"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v12"],
+    background_cell_m=0.00280,
+    calibration_status="PHI19_1000K_LOW_TWIST_GRID_PHASE_RETRY_REQUIRES_VALIDATION",
+)
+# The fresh 1000k v13 mesh passed every production mesh gate, but its stable
+# 6000-iteration S0 field measured only 92.269% of battery area below y+=1
+# (unchanged gate: 95%).  Correct only the wall-normal resolution: a 6 um
+# first cell with eleven layers keeps a comparable requested prism envelope
+# (about 193 um versus 208 um for 8 um x 10), while the tangential grid,
+# quality limits, physics and convergence criteria remain unchanged.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v14_6um_11layers"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v13_quality"],
+    first_layer_thickness_m=6e-6,
+    prism_layer_count=11,
+    calibration_status="PHI19_1000K_6UM_11L_YPLUS_RETRY_REQUIRES_FRESH_VALIDATION",
+)
+# v14 retained all 23 wall layers but C13 alone reached 42.7% of the wanted
+# prism thickness, below the unchanged 45% gate. Refine only the measured C13
+# surface; keep the 6 um x 11-layer wall treatment and every other setting.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v15_c13"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v14_6um_11layers"],
+    refined_battery_cells=("C13",),
+    calibration_status="PHI19_1000K_6UM_11L_C13_LOCAL_WALL_RETRY_REQUIRES_VALIDATION",
+)
+# The fresh v15 mesh passed all mesh gates, but its final S0 field put only
+# 91.0417% of battery area below y+=1.  The failed area tracks the unlayered
+# surface fraction (not the first-cell height): C08/C13/C17 had only
+# 80.7/83.8/83.4% layer coverage and 83.5/78.1/85.9% y+ pass area.  Remove
+# only the one-cell no-extrusion buffer at layer termination so snappy can
+# retain wall-normal cells through those transitions.  Keep the proven 6 um
+# x 11-layer treatment, C13 tangential correction, quality/physics gates and
+# solver stabilization unchanged; the fresh mesh must pass every gate anew.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v16_layer_continuity"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v15_c13"],
+    n_buffer_cells_no_extrude=0,
+    calibration_status="PHI19_1000K_LAYER_CONTINUITY_YPLUS_RETRY_REQUIRES_VALIDATION",
+)
+# v16 doubled the retained layer-face count and kept all layer/count/integral
+# gates valid, but five low-twist coolant faces remained together on the C18
+# upper rim (x=79.67..80.06 mm, y=91.16..94.56 mm, z=69.65..74.16 mm).
+# Refine only that measured C18 wall in addition to the existing C13 fix.
+# Layer continuity, wall dimensions, quality thresholds and physics stay fixed.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v16_layer_continuity"],
+    refined_battery_cells=("C13", "C18"),
+    calibration_status="PHI19_1000K_LAYER_CONTINUITY_C18_TWIST_RETRY_REQUIRES_VALIDATION",
+)
+# v17 passed every mesh gate, but the final 6000-iteration S0 field measured
+# only 88.3979% of battery area below y+=1 and the retained layer coverage fell
+# to 79.5--99.0% despite removing the termination buffer.  The validated 800k
+# sibling reached 95.8763% with the motion shrinker and substantially more
+# continuous wall layers.  Change only the layer shrinker so the 1000k mesh is
+# rebuilt from empty using that measured remedy.  Wall dimensions, local
+# C13/C18 refinement, count/quality limits, physics and solver gates stay fixed.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v18_motion"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"],
+    mesh_shrinker="displacementMotionSolver",
+    calibration_status="PHI19_1000K_C13_C18_MOTION_YPLUS_RETRY_REQUIRES_VALIDATION",
+)
+# v18 showed that the motion shrinker is not compatible with this finer
+# 6 um x 11-layer wall stack: ten batteries missed the unchanged 75% layer
+# coverage gate and eight missed the 45% thickness gate.  Return to the v17
+# medial-axis mesh, which passed every mesh gate, and correct its measured
+# 88.3979% y+ area only in the wall-normal direction.  Reducing the first
+# cell from 6 to 4 um also shortens the requested prism envelope, so it is a
+# bounded wall correction that should improve both y+ and retained thickness
+# without changing tangential refinement, cell-count, physics or any gate.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v19_4um"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"],
+    first_layer_thickness_m=4e-6,
+    calibration_status="PHI19_1000K_4UM_11L_YPLUS_RETRY_REQUIRES_VALIDATION",
+)
+# v19 confirmed that 4 um is the required bounded y+ direction, but keeping
+# only eleven layers reduced the requested final prism thickness enough that
+# snappy rejected layers globally (only 7,019 layer faces remained versus
+# 135,023 on v17).  With the unchanged 1.2 expansion ratio, thirteen layers
+# restore the v17 final-layer scale while retaining the 4 um wall-adjacent
+# cell.  No tangential mesh, quality threshold, physics or solver setting is
+# changed, and the fresh mesh must pass all original gates.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v20_4um_13layers"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"],
+    first_layer_thickness_m=4e-6,
+    prism_layer_count=13,
+    calibration_status="PHI19_1000K_4UM_13L_ENVELOPE_RETRY_REQUIRES_VALIDATION",
+)
+# v20 restored the final-layer scale and recovered 89,733 layer faces, but
+# the hard-coded 3 um insertion minimum was still 75% of the new 4 um first
+# cell (versus 50% on the mesh-passing v17), so local smoothing removed layers
+# from fourteen batteries.  Scale only the mesher's insertion minimum to the
+# same 50% ratio.  This is not an acceptance-gate relaxation: every generated
+# wall still has to satisfy the unchanged 75% coverage and 45% wanted-thickness
+# gates before S0 may start.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v21_4um_13layers_min2"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v20_4um_13layers"],
+    minimum_layer_thickness_m=2e-6,
+    calibration_status="PHI19_1000K_4UM_13L_MIN2_RETRY_REQUIRES_VALIDATION",
+)
+# v21 proved that the insertion minimum was not the limiting control: its
+# retained layer-face count and every per-battery layer metric were bit-for-bit
+# identical to v20.  The validated v17 S0 wall diagnostic instead attributes
+# 99.67% of the y+>1 area to faces with no prism layer.  Return to v17's
+# mesh-passing 6 um x 11-layer stack and let extrusion continue across the
+# battery's measured 90-degree cap/rim feature by raising only snappy's layer
+# feature angle above 90 degrees.  Final mesh quality, layer coverage/thickness,
+# y+, physics and convergence gates remain unchanged and must all pass anew.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v22_feature120"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"],
+    layer_feature_angle_degrees=120.0,
+    calibration_status="PHI19_1000K_FEATURE120_LAYER_COVERAGE_RETRY_REQUIRES_VALIDATION",
+)
+# v22 showed the cap/rim feature angle was not the limiter and reduced final
+# extrusion to 80.56%.  Its last layer attempt identified 351 faces solely by
+# the temporary 65-degree non-orthogonality insertion limit, while the v17
+# mesh already proved that the authoritative post-split coolant/solid quality
+# gate can pass at 65 degrees.  Keep v17's mesh-passing geometry and wall stack,
+# but permit 75 degrees only while the still-baffled CHT interface is inserting
+# layers.  The post-split 65-degree acceptance gate is unchanged.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v23_layer_insert75"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"],
+    generation_max_non_orthogonality=75.0,
+    calibration_status="PHI19_1000K_LAYER_INSERT75_RETRY_REQUIRES_VALIDATION",
+)
+# v23 confirmed that continuous layers are achievable, but accepting them at
+# the temporary 75-degree insertion limit created 4,247 coolant faces above
+# the unchanged 65-degree release gate and overshot the requested cell class.
+# Return to the strict v17 insertion limit and coarsen only the generic curved
+# battery skin from adaptive level 0..1 to level 0.  The larger tangential
+# faces reduce prism-to-face distortion and layer cell count; C13/C18 retain
+# their measured local level-1 correction.  All final gates remain unchanged.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v24_surface_l0"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v17_c13_c18"],
+    surface_max_level=0,
+    calibration_status="PHI19_1000K_SURFACE_L0_LAYER_QUALITY_RETRY_REQUIRES_VALIDATION",
+)
+# v24 passed every mesh, layer and quality gate at the strict 65-degree limit,
+# but its fresh 6000-iteration S0 field put only 86.8332% of battery area below
+# y+=1 (unchanged gate: 95%).  The failed area again aligns with incompletely
+# layered wall regions.  Earlier 4 um trials used the finer generic skin and
+# lost layers; v24 proves that level-0 tangential faces retain a valid layer
+# topology.  Keep that validated topology and change only the wall-normal
+# stack to 4 um x 13 layers with the proportional 2 um insertion minimum.
+# This restores the v17/v24 outer prism scale while reducing the first cell;
+# all count, quality, layer, y+, physics and convergence gates stay unchanged.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v25_surface_l0_4um_13layers"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v24_surface_l0"],
+    first_layer_thickness_m=4e-6,
+    prism_layer_count=13,
+    minimum_layer_thickness_m=2e-6,
+    calibration_status="PHI19_1000K_SURFACE_L0_4UM_13L_YPLUS_RETRY_REQUIRES_VALIDATION",
+)
+# v25 proved that the 4 um x 13-layer wall stack itself is incompatible with
+# the strict insertion pass even on the level-0 skin: only 90,042 layer faces
+# remained and fifteen batteries missed the unchanged 75% coverage gate.
+# Return to v24's mesh-passing 6 um x 11-layer stack.  Its last insertion pass
+# rejected 401 faces at the temporary 65-degree limit, so allow only two extra
+# degrees during layer insertion on the already coarsened skin.  The
+# authoritative post-split 65-degree quality gate remains unchanged.
+MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v24_surface_l0"],
+    generation_max_non_orthogonality=67.0,
+    calibration_status="PHI19_1000K_SURFACE_L0_INSERT67_LAYER_RETRY_REQUIRES_VALIDATION",
+)
+# The 800k v13 grid-phase correction removed the low-twist faces, but C18
+# retained only 39.1% of the requested prism thickness (unchanged gate: 45%).
+# Refine that one coolant-facing battery surface only.  The 8 um first cell,
+# ten-layer wall model, global grid and every quality/y+/physics gate remain
+# unchanged; this fresh mesh must establish its own count and wall passes.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v14_c18"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v13_quality"],
+    refined_battery_cells=("C18",),
+    calibration_status="PHI19_800K_C18_LOCAL_WALL_RETRY_REQUIRES_VALIDATION",
+)
+# v14 passed every layer gate (C18 improved from 39.1% to 47.9%) and removed
+# all low-twist faces, but thirteen internal coolant faces at the enclosure
+# transition beside x=41.8/61.2 mm and y=0.8/120.2 mm produced a narrowly
+# excessive 65.1149 degree maximum non-orthogonality (gate: 65).  Widen only
+# the refinement transition from five to six cells; do not relax the gate or
+# alter the wall layers, local C18 correction, physics, or requested count.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v14_c18"],
+    cells_between_levels=6,
+    calibration_status="PHI19_800K_OUTER_WALL_TRANSITION_RETRY_REQUIRES_VALIDATION",
+)
+# v15 reduced the affected outer-wall transition faces from thirteen to six
+# and max non-orthogonality from 65.1149 to 65.0523 degrees while keeping all
+# layer gates passed (C18 thickness 52.3%).  Continue that measured trend with
+# a seven-cell transition.  Its observed cell-count slope predicts a result at
+# the upper edge of the unchanged +/-12% band, so change the background step
+# by only 0.01 mm to keep the fresh mesh safely inside the count contract and
+# shift the remaining top-wall intersection.  No quality limit is relaxed.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v16_transition"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"],
+    background_cell_m=0.00301,
+    cells_between_levels=7,
+    calibration_status="PHI19_800K_TOP_WALL_TRANSITION_RETRY_REQUIRES_VALIDATION",
+)
+# v16's simultaneous seven-cell transition and 3.01 mm phase increased the
+# affected faces, so isolate the phase variable against the best measured v15
+# transition.  Keep six transition cells and test a 3.01 mm phase first; a
+# symmetric 2.99 mm phase is the bounded fallback.  Both remain comfortably
+# inside the original count band and preserve every wall/quality/physics gate.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v17_phase_3p01"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"],
+    background_cell_m=0.00301,
+    calibration_status="PHI19_800K_TOP_WALL_PHASE_3P01_RETRY_REQUIRES_VALIDATION",
+)
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v18_phase_2p99"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"],
+    background_cell_m=0.00299,
+    calibration_status="PHI19_800K_TOP_WALL_PHASE_2P99_RETRY_REQUIRES_VALIDATION",
+)
+# v18 changed only X from 38 to 39 blocks and worsened the quality peak.  The
+# remaining defect is at the Y enclosure/notch transition, so the next bounded
+# trial uses 2.95 mm: X/Y become 39/42 while Z remains unchanged.  If that
+# still fails, the 2.90 mm fallback uses the lower-count five-cell transition
+# so all three block directions change without exceeding the original count
+# band.  Local C18 refinement and all acceptance criteria remain unchanged.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v19_xy_blocks"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v15_transition"],
+    background_cell_m=0.00295,
+    calibration_status="PHI19_800K_XY_BLOCK_TRANSITION_RETRY_REQUIRES_VALIDATION",
+)
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v20_xyz_blocks"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v14_c18"],
+    background_cell_m=0.00290,
+    calibration_status="PHI19_800K_XYZ_BLOCK_TRANSITION_RETRY_REQUIRES_VALIDATION",
+)
+# v20 finally passed the 65-degree non-orthogonality gate at 64.9884 degrees
+# and retained 857,524 cells, but two low-twist faces remained on the C12
+# coolant/solid interface.  Refine only that measured wall in addition to the
+# already corrected C18 wall.  The observed count leaves adequate room inside
+# the unchanged +12% ceiling; all layer and quality thresholds stay fixed.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v21_c12_c18"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v20_xyz_blocks"],
+    refined_battery_cells=("C12", "C18"),
+    calibration_status="PHI19_800K_C12_C18_LOCAL_WALL_RETRY_REQUIRES_VALIDATION",
+)
+# v21 met the cell-count, layer, non-orthogonality and skewness gates, but its
+# minimum cell volume (1.799e-13 m3) was about 18 times smaller than the
+# completed diameter-33 mesh (3.213e-12 m3).  The same local pressure/velocity
+# runaway survived every approved pressure relaxation and an outlet-backflow
+# treatment, identifying sliver-cell conditioning rather than the outlet as
+# the remaining fault.  Keep the measured C12/C18 refinement and every gate,
+# changing only the layer shrinker so the mesh is rebuilt without those
+# medial-axis slivers.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v22_motion"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v21_c12_c18"],
+    mesh_shrinker="displacementMotionSolver",
+    calibration_status="PHI19_800K_C12_C18_MOTION_SHRINKER_RETRY_REQUIRES_VALIDATION",
+)
+# v22 retained a 1.982e-13 m3 minimum cell and still drove the baseline solver
+# unstable at iteration 455; applying the approved coupled stabilization made
+# the same local mode fail earlier at iteration 106.  The C12 level-2 patch was
+# introduced only to repair two low-twist faces in v20, while v20 itself had a
+# nearly two-times larger minimum cell.  Rebuild v20 with the motion shrinker:
+# this tests whether the alternate layer motion removes the two C12 twist faces
+# without the C12 level-2 island.  C18 refinement and every acceptance gate stay
+# unchanged, and the result must pass the complete mesh and y+ gates afresh.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v23_c18_motion"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v20_xyz_blocks"],
+    mesh_shrinker="displacementMotionSolver",
+    calibration_status="PHI19_800K_C18_MOTION_NO_C12_ISLAND_RETRY_REQUIRES_VALIDATION",
+)
+# The corrected C05/C19 port geometry in v23 passed the count and layer gates,
+# but its authoritative post-split coolant check narrowly exceeded both fixed
+# quality limits: max non-orthogonality 65.0520 degrees (limit 65) and max
+# skewness 5.0201 (limit 5).  The offending faces lie at enclosure/notch/port
+# and battery-rim transitions.  Smooth only the refinement transition from
+# five to six cells, following the measured v14 -> v15 improvement; preserve
+# the grid phase, motion shrinker, C18 correction, wall stack and every gate.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v24_transition6"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v23_c18_motion"],
+    cells_between_levels=6,
+    calibration_status="PHI19_800K_CORRECTED_PORTS_TRANSITION6_RETRY_REQUIRES_VALIDATION",
+)
+MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
+    mesh_shrinker="displacementMotionSolver",
+    preserve_wall_diagnostics=True,
+    calibration_status="PHI19_400K_MOTION_LAYER_HEXA_RETRY_REQUIRES_VALIDATION",
+)
+# The v2 level-0 skin left C02/C03/C04/C12/C13/C14 below the unchanged
+# layer-coverage gate, while the v3 motion shrinker reduced coverage further.
+# Restore the level-1 curved wall resolution used by the validated Ø19 mesh,
+# retain the enlarged hexahedral solid core, and coarsen only the background
+# grid so the actual count can remain in the 400k study band.  This is a new
+# mesh that must pass count, 88% hexa, layer, quality and y+ gates afresh.
+MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v4"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
+    background_cell_m=0.00430,
+    surface_max_level=1,
+    mesh_shrinker="displacementMedialAxis",
+    preserve_wall_diagnostics=True,
+    calibration_status="PHI19_400K_LEVEL1_WALL_CORE8_RETRY_REQUIRES_VALIDATION",
+)
+# v4 restored most wall coverage, but C03/C13 remained at 69.2%/67.9% and
+# C03 retained only 42.9% of wanted layer thickness.  Refine only those two
+# curved battery surfaces; global wall dimensions and every acceptance gate
+# remain unchanged.  The added cells are measured, never assumed.
+MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v5"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v4"],
+    refined_battery_cells=("C03", "C13"),
+    calibration_status="PHI19_400K_C03_C13_LOCAL_WALL_RETRY_REQUIRES_VALIDATION",
+)
+# v5 cleared every per-battery layer-coverage gate; only C13 retained 43.2%
+# of wanted thickness against the unchanged 45% requirement.  Generate a new
+# mesh with the same tangential corrections and a shorter 8 um wall envelope.
+# This is also the wall treatment already validated by the 800k sibling and
+# must independently pass count, quality, layer, y+ and solver gates here.
+MESH_PRESETS["production_phi19_mesh_study_400k_yplus_v6"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v5"],
+    first_layer_thickness_m=8e-6,
+    preserve_wall_diagnostics=True,
+    calibration_status="PHI19_400K_C03_C13_8UM_RETRY_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (
+    "production_phi19_mesh_study_400k_smooth_v2",
+    "production_phi19_mesh_study_800k_smooth_v2",
+    "production_phi19_mesh_study_1000k_smooth_v2",
+    "production_phi19_mesh_study_800k_yplus_v12",
+    "production_phi19_mesh_study_1000k_yplus_v12",
+    "production_phi19_mesh_study_800k_yplus_v13_quality",
+    "production_phi19_mesh_study_1000k_yplus_v13_quality",
+    "production_phi19_mesh_study_1000k_yplus_v14_6um_11layers",
+    "production_phi19_mesh_study_1000k_yplus_v15_c13",
+    "production_phi19_mesh_study_1000k_yplus_v16_layer_continuity",
+    "production_phi19_mesh_study_1000k_yplus_v17_c13_c18",
+    "production_phi19_mesh_study_1000k_yplus_v18_motion",
+    "production_phi19_mesh_study_1000k_yplus_v19_4um",
+    "production_phi19_mesh_study_1000k_yplus_v20_4um_13layers",
+    "production_phi19_mesh_study_1000k_yplus_v21_4um_13layers_min2",
+    "production_phi19_mesh_study_1000k_yplus_v22_feature120",
+    "production_phi19_mesh_study_1000k_yplus_v23_layer_insert75",
+    "production_phi19_mesh_study_1000k_yplus_v24_surface_l0",
+    "production_phi19_mesh_study_1000k_yplus_v25_surface_l0_4um_13layers",
+    "production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67",
+    "production_phi19_mesh_study_800k_yplus_v14_c18",
+    "production_phi19_mesh_study_800k_yplus_v15_transition",
+    "production_phi19_mesh_study_800k_yplus_v16_transition",
+    "production_phi19_mesh_study_800k_yplus_v17_phase_3p01",
+    "production_phi19_mesh_study_800k_yplus_v18_phase_2p99",
+    "production_phi19_mesh_study_800k_yplus_v19_xy_blocks",
+    "production_phi19_mesh_study_800k_yplus_v20_xyz_blocks",
+    "production_phi19_mesh_study_800k_yplus_v21_c12_c18",
+    "production_phi19_mesh_study_800k_yplus_v22_motion",
+    "production_phi19_mesh_study_800k_yplus_v23_c18_motion",
+    "production_phi19_mesh_study_800k_yplus_v24_transition6",
+    "production_phi19_mesh_study_400k_smooth_v3",
+    "production_phi19_mesh_study_400k_smooth_v4",
+    "production_phi19_mesh_study_400k_smooth_v5",
+    "production_phi19_mesh_study_400k_yplus_v6",
+)
+
 
 # New larger-port geometries can require thinner first cells. These are trial
 # meshes, not inherited calibration passes; every existing gate still applies.
@@ -344,6 +802,28 @@ MESH_PRESETS[_name] = replace(
     MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion_port_l1"],
     background_cell_m=0.00300,
     calibration_status="FRAME_FIT_800K_3MM_PORT_RIM_QUALITY_TRIAL_REQUIRES_VALIDATION",
+)
+SUPPORTED_LEVELS += (_name,)
+
+# Fresh Ø34 retry requested after the 8 um / 10-layer calculation narrowly
+# missed the y+ area gate.  The 6 um / 11-layer treatment already passed the
+# unchanged y+ gate on this geometry, while the 3.00 mm background grid adds
+# tangential resolution at every battery wall.  Keep level 2 in longer inlet
+# and outlet cap volumes and widen the transition to five cells so the port
+# region is genuinely finer without the abrupt level transition seen in the
+# rejected 2.90 mm trials.  This is a new mesh-only trial: no failed mesh or
+# flow field is reused and every existing quality/solver gate still applies.
+_name = "production_frame_fit_800k_6um_11layers_motion_port_refined"
+MESH_PRESETS[_name] = replace(
+    MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"],
+    target_cells=800_000,
+    background_cell_m=0.00300,
+    port_cap_refinement_level=2,
+    port_cap_refinement_depth_m=0.008,
+    cells_between_levels=5,
+    minimum_total_cells=700_000,
+    total_tolerance_fraction=0.25,
+    calibration_status="PHI34_BATTERY_AND_PORT_REFINEMENT_REQUIRES_VALIDATION",
 )
 SUPPORTED_LEVELS += (_name,)
 
@@ -523,7 +1003,7 @@ def _snappy_dict(config: ResolvedConfig, preset: MeshPreset) -> str:
         # deliberately left unchanged for the closest possible 600k count.
         port_refinement_level = 2
     if port_refinement_level is not None:
-        refinement_depth = 0.004
+        refinement_depth = preset.port_cap_refinement_depth_m
         for name, center, diameter, end_z, inward_sign in (
             (
                 "inletCapRefinement",
@@ -630,7 +1110,7 @@ castellatedMeshControls
     // zero spent dozens of parallel iterations refining 1--5 cells without
     // changing the resolved battery surfaces.
     minRefinementCells  10;
-    nCellsBetweenLevels 3;
+    nCellsBetweenLevels {preset.cells_between_levels};
     resolveFeatureAngle 30;
     // Keep only faces that actually bound their associated battery cellZone.
     // Free-standing intersections created multiply-connected faceZones in the
@@ -698,9 +1178,9 @@ addLayersControls
     }}
     expansionRatio          1.2;
     firstLayerThickness     {preset.first_layer_thickness_m:.12g};
-    minThickness            3e-6;
+    minThickness            {preset.minimum_layer_thickness_m:.12g};
     nGrow                   0;
-    featureAngle            60;
+    featureAngle            {preset.layer_feature_angle_degrees:.12g};
     slipFeatureAngle        30;
     nRelaxIter              5;
     nSmoothSurfaceNormals   5;
@@ -709,7 +1189,7 @@ addLayersControls
     maxFaceThicknessRatio   0.5;
     maxThicknessToMedialRatio 0.3;
     minMedialAxisAngle      90;
-    nBufferCellsNoExtrude   1;
+    nBufferCellsNoExtrude   {preset.n_buffer_cells_no_extrude};
     detectExtrusionIsland   true;
     additionalReporting     true;
     nLayerIter              50;
@@ -826,7 +1306,7 @@ def _topo_set_coolant_dict(config: ResolvedConfig) -> str:
 '''
 
 
-def _topo_set_battery_core_dict(config: ResolvedConfig) -> str:
+def _topo_set_battery_core_dict(config: ResolvedConfig, radius_m: float) -> str:
     """CHT 표면은 유지하면서 각 배터리 내부 코어만 추가 세분할 셀을 고른다."""
 
     placements = cell_placements(config)
@@ -842,7 +1322,7 @@ def _topo_set_battery_core_dict(config: ResolvedConfig) -> str:
         source cylinderToCell;
         p1 ({_fmt(cell.center_x_m)} {_fmt(cell.center_y_m)} {_fmt(z1 + BATTERY_CORE_END_CLEARANCE_M)});
         p2 ({_fmt(cell.center_x_m)} {_fmt(cell.center_y_m)} {_fmt(z2 - BATTERY_CORE_END_CLEARANCE_M)});
-        radius {_fmt(BATTERY_CORE_REFINEMENT_RADIUS_M)};
+        radius {_fmt(radius_m)};
     }}'''
         )
     return _foam_header("topoSetDict.batteryCore") + "actions\n(\n" + "\n".join(entries) + "\n);\n"
@@ -1718,7 +2198,7 @@ def write_production_mesh_source_bundle(
     )
     _atomic_write(
         output / "system" / "topoSetDict.batteryCore",
-        _topo_set_battery_core_dict(config),
+        _topo_set_battery_core_dict(config, preset.battery_core_refinement_radius_m),
     )
     _atomic_write(
         output / "system" / "refineMeshDict.batteryCore",

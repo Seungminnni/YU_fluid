@@ -1,0 +1,28 @@
+schema_version: 1
+name: phi19_mesh_independence_400_800_1000k_20261006
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+overlays:
+  - ../recalculation_600k_phi19_vertical_flip_20260922.yaml
+cases:
+  - name: phi19_mesh_400k
+    inputs:
+      mesh_target_cells: 400000
+    mesh_profiles:
+      - production_phi19_mesh_study_400k
+  - name: phi19_mesh_800k
+    cold_flow_maximum_iterations: 20000
+    steady_numerics_profile: pressure_relaxation_0p15
+    inputs:
+      mesh_target_cells: 800000
+    mesh_profiles:
+      - production_phi19_mesh_study_800k
+  - name: phi19_mesh_1000k
+    cold_flow_maximum_iterations: 20000
+    inputs:
+      mesh_target_cells: 1000000
+    mesh_profiles:
+      - production_phi19_mesh_study_1000k

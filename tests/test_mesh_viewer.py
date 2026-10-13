@@ -18,6 +18,15 @@ class MeshOnlyViewerTest(unittest.TestCase):
         self.assertNotIn("gl.uniform1f(uniforms.scale,fitScale(aspect)*zoom)", MESH_JS)
         self.assertIn('document.getElementById("fit").onclick=fitView', MESH_JS)
 
+    def test_complete_volume_uses_depth_and_crisp_boundary_pass(self) -> None:
+        self.assertIn("gl.enable(gl.DEPTH_TEST)", MESH_JS)
+        self.assertIn("gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT", MESH_JS)
+        self.assertIn("-depth*uDepthScale", MESH_JS)
+        self.assertNotIn("z*uScale,0.0,1.0", MESH_JS)
+        self.assertIn("if(mode===\"volume\"){gl.disable(gl.BLEND)", MESH_JS)
+        self.assertIn("kind:`${group.kind}_outline`,outline:true", MESH_JS)
+        self.assertIn("깊이 판정 및 경계 강조", MESH_JS)
+
     def test_simulation_does_not_draw_sampled_mesh_overlay(self) -> None:
         self.assertIn('id="show-mesh" type="checkbox" hidden', SIMULATION_HTML)
         self.assertIn('id="home-tab" href="index.html"', SIMULATION_HTML)

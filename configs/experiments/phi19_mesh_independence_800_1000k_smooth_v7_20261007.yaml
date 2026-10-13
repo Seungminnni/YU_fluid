@@ -1,0 +1,31 @@
+schema_version: 1
+name: phi19_mesh_independence_800_1000k_smooth_v7_20261007
+
+# Fresh Ø19 deionized-water mesh-independence run.  The abandoned v6
+# preparation and every failed/queued predecessor are excluded.  Geometry,
+# physics, 10 µm x 10-layer wall treatment and all acceptance gates remain
+# identical to the validated 611,313-cell reference.  Only mesh density and
+# the already-reviewed five-cell level transition are changed.
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+
+overlays:
+  - ../recalculation_600k_phi19_vertical_flip_20260922.yaml
+
+cases:
+  - name: phi19_mesh_800k_smooth_v7
+    cold_flow_maximum_iterations: 20000
+    inputs:
+      mesh_target_cells: 800000
+    mesh_profiles:
+      - production_phi19_mesh_study_800k_smooth_v2
+
+  - name: phi19_mesh_1000k_smooth_v7
+    cold_flow_maximum_iterations: 20000
+    inputs:
+      mesh_target_cells: 1000000
+    mesh_profiles:
+      - production_phi19_mesh_study_1000k_smooth_v2

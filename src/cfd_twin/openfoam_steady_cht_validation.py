@@ -173,7 +173,7 @@ def validate_steady_cht(
         "final_iteration_present": final_record is not None,
         "minimum_5000_outer_iterations_completed": final_time is not None
         and final_time >= MINIMUM_STEADY_ITERATIONS,
-        "last_200_flow_and_energy_residuals_below_1e-4": all(
+        "last_200_flow_and_energy_residuals_below_1e-3": all(
             acceptance_residual_checks.values()
         ),
         "pilot_derived_residual_floors_reached": all(residual_checks.values()),
