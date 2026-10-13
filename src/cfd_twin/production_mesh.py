@@ -596,6 +596,17 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v24_transition6"] = replace
     cells_between_levels=6,
     calibration_status="PHI19_800K_CORRECTED_PORTS_TRANSITION6_RETRY_REQUIRES_VALIDATION",
 )
+# v24 reduced the corrected-port quality peaks, but its six-cell transition
+# raised the pre-split count to 939,370, above the unchanged 800k contract,
+# while still narrowly missing 65 degrees / skewness 5.  Return to v23's
+# five-cell transition and shift/coarsen the background grid by only 0.01 mm.
+# This changes the offending grid intersections and lowers cell count without
+# altering wall layers, local C18 treatment, physics, or any acceptance gate.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v25_phase_2p91"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v23_c18_motion"],
+    background_cell_m=0.00291,
+    calibration_status="PHI19_800K_CORRECTED_PORTS_PHASE_2P91_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -668,6 +679,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v22_motion",
     "production_phi19_mesh_study_800k_yplus_v23_c18_motion",
     "production_phi19_mesh_study_800k_yplus_v24_transition6",
+    "production_phi19_mesh_study_800k_yplus_v25_phase_2p91",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
