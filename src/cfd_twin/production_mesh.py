@@ -69,6 +69,7 @@ class MeshPreset:
     battery_inside_level: int
     first_layer_thickness_m: float
     minimum_layer_thickness_m: float = 3e-6
+    minimum_wanted_thickness_fraction: float = MINIMUM_WANTED_THICKNESS_FRACTION
     prism_layer_count: int = PRISM_LAYER_COUNT
     layer_feature_angle_degrees: float = 60.0
     n_buffer_cells_no_extrude: int = 1
@@ -691,6 +692,16 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v32_c11"] = replace(
     refined_battery_cells=("C06", "C07", "C09", "C11", "C12", "C13", "C15", "C18"),
     calibration_status="PHI19_800K_6UM_11L_C11_LAYER_RETRY_REQUIRES_VALIDATION",
 )
+# v32 cleared every 75% coverage gate and every 45% thickness gate except C17,
+# whose measured wanted-thickness fraction was 0.440 while its coverage was
+# 0.75337.  The user explicitly accepted this one-percentage-point tolerance
+# for this run.  Keep the mesh topology and all other count, quality, y+ and
+# physics gates unchanged; only this profile uses the 44% thickness floor.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v33_accept_c17"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v32_c11"],
+    minimum_wanted_thickness_fraction=0.44,
+    calibration_status="PHI19_800K_C17_44PCT_USER_ACCEPTED_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -771,6 +782,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v30_local_layers",
     "production_phi19_mesh_study_800k_yplus_v31_c07",
     "production_phi19_mesh_study_800k_yplus_v32_c11",
+    "production_phi19_mesh_study_800k_yplus_v33_accept_c17",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
@@ -1729,7 +1741,7 @@ python3 "$case_dir/tools/parse_layercheck.py" \
     --field-dir "$case_dir/0" \
     --expected-target-layers {preset.prism_layer_count} \
     --minimum-layer-coverage {MINIMUM_LAYER_COVERAGE} \
-    --minimum-thickness-fraction {MINIMUM_WANTED_THICKNESS_FRACTION} \
+    --minimum-thickness-fraction {preset.minimum_wanted_thickness_fraction} \
     --output "$report_dir/layer_coverage.json"
 
 # These are snappyHexMesh diagnostics, not solver fields.  Keeping them after
@@ -2614,7 +2626,7 @@ def write_production_mesh_source_bundle(
             "first_layer_thickness_m": preset.first_layer_thickness_m,
             "expansion_ratio": 1.2,
             "minimum_average_layer_coverage_fraction": MINIMUM_LAYER_COVERAGE,
-            "minimum_average_wanted_thickness_fraction": MINIMUM_WANTED_THICKNESS_FRACTION,
+            "minimum_average_wanted_thickness_fraction": preset.minimum_wanted_thickness_fraction,
             "validated": False,
             "required_gate": "coverage plus actual y+ distribution",
         },
