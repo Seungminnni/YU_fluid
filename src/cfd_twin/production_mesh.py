@@ -636,6 +636,19 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v27_6um_11layers"] = replac
     prism_layer_count=11,
     calibration_status="PHI19_800K_6UM_11L_S0_YPLUS_RETRY_REQUIRES_VALIDATION",
 )
+# v27 retained the corrected 6 um x 11-layer wall stack but stopped at the
+# unchanged layer gate: C06/C12 coverage was 72.7/74.7%, and
+# C06/C09/C12/C13/C15 thickness was 42.5/42.7/44.1/43.3/44.8%.  The earlier
+# 1000k continuity trial showed that removing only snappy's one-cell
+# no-extrusion termination buffer substantially increased retained layer
+# faces.  Apply that same single-variable continuity correction here.  Wall
+# dimensions, local refinement, grid phase and every acceptance/physics gate
+# remain unchanged and the mesh is rebuilt from empty.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v28_layer_continuity"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v27_6um_11layers"],
+    n_buffer_cells_no_extrude=0,
+    calibration_status="PHI19_800K_6UM_11L_LAYER_CONTINUITY_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -711,6 +724,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v25_phase_2p91",
     "production_phi19_mesh_study_800k_yplus_v26_y45",
     "production_phi19_mesh_study_800k_yplus_v27_6um_11layers",
+    "production_phi19_mesh_study_800k_yplus_v28_layer_continuity",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
