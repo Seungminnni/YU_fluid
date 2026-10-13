@@ -712,6 +712,15 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v34_generation64"] = replac
     generation_max_non_orthogonality=64.0,
     calibration_status="PHI19_800K_GENERATION_NONORTH64_RETRY_REQUIRES_VALIDATION",
 )
+# v34's full one-degree generation tightening removed too much extrusion and
+# caused broad layer regressions.  Return to v33 and apply only a 0.1-degree
+# generation margin, which targets the narrow post-split quality overshoot
+# without accepting it or changing any final gate.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v35_generation64p9"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v33_accept_c17"],
+    generation_max_non_orthogonality=64.9,
+    calibration_status="PHI19_800K_GENERATION_NONORTH64P9_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -794,6 +803,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v32_c11",
     "production_phi19_mesh_study_800k_yplus_v33_accept_c17",
     "production_phi19_mesh_study_800k_yplus_v34_generation64",
+    "production_phi19_mesh_study_800k_yplus_v35_generation64p9",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
