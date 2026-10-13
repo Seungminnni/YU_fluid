@@ -673,6 +673,15 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v30_local_layers"] = replac
     refined_battery_cells=("C06", "C09", "C12", "C13", "C15", "C18"),
     calibration_status="PHI19_800K_6UM_11L_LOCAL_LAYER_RETRY_REQUIRES_VALIDATION",
 )
+# v30 corrected every originally measured layer miss; only adjacent C07 then
+# remained below both unchanged layer gates.  Extend the same local surface
+# refinement set by C07 only.  No global refinement, wall dimension, grid,
+# shrinker, acceptance gate or physics is altered.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v31_c07"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v30_local_layers"],
+    refined_battery_cells=("C06", "C07", "C09", "C12", "C13", "C15", "C18"),
+    calibration_status="PHI19_800K_6UM_11L_C07_LAYER_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -751,6 +760,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v28_layer_continuity",
     "production_phi19_mesh_study_800k_yplus_v29_medial",
     "production_phi19_mesh_study_800k_yplus_v30_local_layers",
+    "production_phi19_mesh_study_800k_yplus_v31_c07",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
