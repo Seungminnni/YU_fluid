@@ -607,6 +607,20 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v25_phase_2p91"] = replace(
     background_cell_m=0.00291,
     calibration_status="PHI19_800K_CORRECTED_PORTS_PHASE_2P91_RETRY_REQUIRES_VALIDATION",
 )
+# v25 reproduced v23 exactly because 2.90 and 2.91 mm both quantize to the
+# same 43x46x54 background divisions.  Its four failed coolant faces were
+# measured at the inlet/outlet-side enclosure transitions (x/y/z in metres):
+# (0.02288, 0.10328, 0.08691), (0.00461, 0.10816, 0.08696),
+# (0.02210, 0.01110, 0.00700), and (0.09154, 0.00593, -0.00491).
+# Move only the Y background division from 46 to 45 by using 2.92 mm.  The
+# observed 738,871-cell result leaves enough margin above the unchanged -12%
+# count gate for this single-axis phase change.  Wall treatment, local C18
+# refinement, physics, and every quality gate remain fixed.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v26_y45"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v25_phase_2p91"],
+    background_cell_m=0.00292,
+    calibration_status="PHI19_800K_CORRECTED_PORTS_Y45_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -680,6 +694,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v23_c18_motion",
     "production_phi19_mesh_study_800k_yplus_v24_transition6",
     "production_phi19_mesh_study_800k_yplus_v25_phase_2p91",
+    "production_phi19_mesh_study_800k_yplus_v26_y45",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
