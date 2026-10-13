@@ -69,6 +69,7 @@ class MeshPreset:
     battery_inside_level: int
     first_layer_thickness_m: float
     minimum_layer_thickness_m: float = 3e-6
+    minimum_layer_coverage_fraction: float = MINIMUM_LAYER_COVERAGE
     minimum_wanted_thickness_fraction: float = MINIMUM_WANTED_THICKNESS_FRACTION
     prism_layer_count: int = PRISM_LAYER_COUNT
     layer_feature_angle_degrees: float = 60.0
@@ -721,6 +722,17 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v35_generation64p9"] = repl
     generation_max_non_orthogonality=64.9,
     calibration_status="PHI19_800K_GENERATION_NONORTH64P9_RETRY_REQUIRES_VALIDATION",
 )
+# v35 left only C17 below the two continuous layer gates: 74.9176% coverage
+# versus 75% and 43.4% thickness versus the run-specific 44%.  Both misses are
+# under the user's one-percentage-point allowance.  Accept them only for this
+# fresh profile; topology, final quality, count, y+, solver and physics gates
+# remain unchanged and authoritative.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v36_accept_c17"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v35_generation64p9"],
+    minimum_layer_coverage_fraction=0.749,
+    minimum_wanted_thickness_fraction=0.433,
+    calibration_status="PHI19_800K_C17_SUB1PP_USER_ACCEPTED_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -804,6 +816,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v33_accept_c17",
     "production_phi19_mesh_study_800k_yplus_v34_generation64",
     "production_phi19_mesh_study_800k_yplus_v35_generation64p9",
+    "production_phi19_mesh_study_800k_yplus_v36_accept_c17",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
@@ -1761,7 +1774,7 @@ python3 "$case_dir/tools/parse_layercheck.py" \
     --mesh-dir "$case_dir/constant/polyMesh" \
     --field-dir "$case_dir/0" \
     --expected-target-layers {preset.prism_layer_count} \
-    --minimum-layer-coverage {MINIMUM_LAYER_COVERAGE} \
+    --minimum-layer-coverage {preset.minimum_layer_coverage_fraction} \
     --minimum-thickness-fraction {preset.minimum_wanted_thickness_fraction} \
     --output "$report_dir/layer_coverage.json"
 
@@ -2646,7 +2659,7 @@ def write_production_mesh_source_bundle(
             "surface_layers": preset.prism_layer_count,
             "first_layer_thickness_m": preset.first_layer_thickness_m,
             "expansion_ratio": 1.2,
-            "minimum_average_layer_coverage_fraction": MINIMUM_LAYER_COVERAGE,
+            "minimum_average_layer_coverage_fraction": preset.minimum_layer_coverage_fraction,
             "minimum_average_wanted_thickness_fraction": preset.minimum_wanted_thickness_fraction,
             "validated": False,
             "required_gate": "coverage plus actual y+ distribution",

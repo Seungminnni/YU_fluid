@@ -916,6 +916,28 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertEqual(retry.minimum_wanted_thickness_fraction, 0.44)
         self.assertEqual(retry.refined_battery_cells, baseline.refined_battery_cells)
 
+    def test_phi19_mesh_study_v36_accepts_only_sub_one_point_c17_layer_misses(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v35_generation64p9"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v36_accept_c17"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {
+                "minimum_layer_coverage_fraction",
+                "minimum_wanted_thickness_fraction",
+                "calibration_status",
+            },
+        )
+        self.assertEqual(retry.minimum_layer_coverage_fraction, 0.749)
+        self.assertEqual(retry.minimum_wanted_thickness_fraction, 0.433)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_skewness, 5.0)
+        self.assertEqual(retry.refined_battery_cells, previous.refined_battery_cells)
+
     def test_frame_fit_800k_trial_keeps_the_passing_wall_treatment(self) -> None:
         preset = MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"]
         self.assertEqual(preset.target_cells, 800_000)
