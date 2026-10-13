@@ -702,6 +702,16 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v33_accept_c17"] = replace(
     minimum_wanted_thickness_fraction=0.44,
     calibration_status="PHI19_800K_C17_44PCT_USER_ACCEPTED_REQUIRES_VALIDATION",
 )
+# v33 passed the user-approved 44% C17 layer floor and all topology/interface
+# checks, but the coolant region reached 65.667 degrees non-orthogonality,
+# 1.026% above the 65-degree limit.  This exceeds the user's new automatic
+# under-1% exception, so retain every final gate and make generation one degree
+# stricter to absorb the split/repatch increase observed in v33.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v34_generation64"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v33_accept_c17"],
+    generation_max_non_orthogonality=64.0,
+    calibration_status="PHI19_800K_GENERATION_NONORTH64_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -783,6 +793,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v31_c07",
     "production_phi19_mesh_study_800k_yplus_v32_c11",
     "production_phi19_mesh_study_800k_yplus_v33_accept_c17",
+    "production_phi19_mesh_study_800k_yplus_v34_generation64",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",

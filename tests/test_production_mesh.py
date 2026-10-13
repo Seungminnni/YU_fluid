@@ -881,6 +881,24 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertEqual(retry.maximum_skewness, 5.0)
         self.assertEqual(retry.total_tolerance_fraction, 0.12)
 
+    def test_phi19_mesh_study_v34_tightens_only_generation_nonorthogonality(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v33_accept_c17"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v34_generation64"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"generation_max_non_orthogonality", "calibration_status"},
+        )
+        self.assertEqual(retry.generation_max_non_orthogonality, 64.0)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.0)
+        self.assertEqual(retry.maximum_skewness, 5.0)
+        self.assertEqual(retry.minimum_wanted_thickness_fraction, 0.44)
+        self.assertEqual(retry.refined_battery_cells, previous.refined_battery_cells)
+
     def test_frame_fit_800k_trial_keeps_the_passing_wall_treatment(self) -> None:
         preset = MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"]
         self.assertEqual(preset.target_cells, 800_000)
