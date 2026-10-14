@@ -752,6 +752,21 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v38_count"] = replace(
     background_cell_m=0.00314,
     calibration_status="PHI19_800K_MEASURED_COUNT_CORRECTION_REQUIRES_VALIDATION",
 )
+# v38 hit the requested count almost exactly (800,628 layered cells) but the
+# coarser 40x42x50 background destroyed layer retention on unrefined walls.
+# Earlier v30 measurements establish a better count path on the passing
+# 43x45x54 phase: keeping only the six actually required local wall patches
+# produced 748,149 layered cells, while C07 alone retained 74.411% coverage
+# and 43.3% wanted thickness.  Restore that measured local-refinement set and
+# use the user's under-one-percentage-point coverage allowance (74.4% versus
+# 75%) for this fresh profile.  The already accepted 43.3% thickness floor,
+# final quality, core, y+, physics and convergence gates remain unchanged.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v39_local_count"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v37_accept_nonorth"],
+    refined_battery_cells=("C06", "C09", "C12", "C13", "C15", "C18"),
+    minimum_layer_coverage_fraction=0.744,
+    calibration_status="PHI19_800K_MEASURED_LOCAL_COUNT_CORRECTION_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -838,6 +853,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v36_accept_c17",
     "production_phi19_mesh_study_800k_yplus_v37_accept_nonorth",
     "production_phi19_mesh_study_800k_yplus_v38_count",
+    "production_phi19_mesh_study_800k_yplus_v39_local_count",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
