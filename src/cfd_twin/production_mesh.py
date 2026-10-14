@@ -733,6 +733,15 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v36_accept_c17"] = replace(
     minimum_wanted_thickness_fraction=0.433,
     calibration_status="PHI19_800K_C17_SUB1PP_USER_ACCEPTED_REQUIRES_VALIDATION",
 )
+# v36 passed the accepted layer floors and every hard topology/interface/
+# volume gate.  Its coolant maximum non-orthogonality was 65.596 degrees,
+# 0.917% above 65 and therefore inside the user's relative under-1% allowance.
+# Set this run-specific final limit to 65.6 degrees; all other gates remain.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v37_accept_nonorth"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v36_accept_c17"],
+    maximum_non_orthogonality=65.6,
+    calibration_status="PHI19_800K_NONORTH_SUB1PCT_USER_ACCEPTED_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -817,6 +826,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v34_generation64",
     "production_phi19_mesh_study_800k_yplus_v35_generation64p9",
     "production_phi19_mesh_study_800k_yplus_v36_accept_c17",
+    "production_phi19_mesh_study_800k_yplus_v37_accept_nonorth",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
