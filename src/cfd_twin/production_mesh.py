@@ -742,6 +742,16 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v37_accept_nonorth"] = repl
     maximum_non_orthogonality=65.6,
     calibration_status="PHI19_800K_NONORTH_SUB1PCT_USER_ACCEPTED_REQUIRES_VALIDATION",
 )
+# v37 passed every layer, quality, topology, interface and hexa-fraction gate,
+# but the core-refined final mesh reached 988,705 cells.  Cube-root scaling of
+# the measured 988,705/800,000 ratio gives a 3.13 mm nominal background.  Use
+# 3.14 mm so the discrete block grid changes only from 43x45x54 to 40x42x50;
+# wall, local refinement, core, acceptance and physics settings are unchanged.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v38_count"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v37_accept_nonorth"],
+    background_cell_m=0.00314,
+    calibration_status="PHI19_800K_MEASURED_COUNT_CORRECTION_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -827,6 +837,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v35_generation64p9",
     "production_phi19_mesh_study_800k_yplus_v36_accept_c17",
     "production_phi19_mesh_study_800k_yplus_v37_accept_nonorth",
+    "production_phi19_mesh_study_800k_yplus_v38_count",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
