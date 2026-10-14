@@ -2101,6 +2101,61 @@ Mesh OK.
             self.assertEqual(overridden["status"], "CHECKMESH_LOG_PASSED")
             self.assertEqual(overridden["metrics"]["max_skewness"], 4.7)
             self.assertEqual(overridden["metrics"]["user_quality_pass_count"], 2)
+            self.assertEqual(
+                overridden["metrics"]["observed_internal_skewness_limits"], [4.0]
+            )
+            self.assertEqual(
+                overridden["metrics"]["observed_boundary_skewness_limits"], [20.0]
+            )
+            self.assertEqual(
+                overridden["metrics"]["high_skew_face_count_from_quality_tables"], 0
+            )
+            self.assertIn(
+                "combined_internal_and_boundary",
+                overridden["metrics"]["max_skewness_scope"],
+            )
+
+            strict = parse_checkmesh_log(log, max_boundary_skewness=5.0)
+            self.assertFalse(
+                strict["checks"]["observed_boundary_skewness_limit_not_looser"]
+            )
+            self.assertEqual(strict["status"], "CHECKMESH_LOG_FAILED")
+
+            mesh = Path(directory) / "coolant" / "polyMesh"
+            (mesh / "sets").mkdir(parents=True)
+            (mesh / "boundary").write_text(
+                """2
+(
+outerWall
+{
+    type wall;
+    nFaces 10;
+    startFace 100;
+}
+battery_C05_interface
+{
+    type mappedWall;
+    nFaces 20;
+    startFace 110;
+}
+)
+""",
+                encoding="utf-8",
+            )
+            (mesh / "sets" / "skewFaces").write_text(
+                "2(115 119)\n", encoding="utf-8"
+            )
+            (mesh / "sets" / "meshQualityFaces").write_text(
+                "2(42 115)\n", encoding="utf-8"
+            )
+            scoped = parse_checkmesh_log(log, mesh_dirs=(mesh,))
+            self.assertEqual(scoped["metrics"]["max_skewness_scope"], "boundary")
+            audit = scoped["face_set_audit"]["regions"]["coolant"]
+            self.assertEqual(
+                audit["skew_faces"]["boundary_patches"],
+                {"battery_C05_interface": 2},
+            )
+            self.assertEqual(audit["mesh_quality_faces"]["internal"], 1)
 
     def test_surfacecheck_parser_requires_closed_connected_surface(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -218,8 +218,8 @@ def _retryable(job: Path, state: dict) -> bool:
         return False
     if state.get("stage") == "mesh":
         # Do not cycle mesh profiles for missing Docker/images or an interrupted
-        # build; actual mesh reports must exist first.
-        return (job / "case/reports/production_mesh/mesh_target_composition.json").is_file() or (job / "case/reports/production_mesh/layer_coverage.json").is_file()
+        # build.  A report must contain a measured failed gate, not merely exist.
+        return bool(_failed_mesh_reports(job))
     report = job / "case/runs/steady_cold_flow/reports/solver/cold_flow_validation.json"
     return state.get("stage") == "steady" and report.is_file() and read(report).get("checks", {}).get("battery_yplus_gate_passed") is False
 
@@ -230,6 +230,119 @@ def _optional_report(path: Path) -> dict:
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+MESH_REPORT_EXPECTATIONS = {
+    "mesh_target_composition.json": "MESH_TARGET_VALIDATION_PASSED",
+    "layer_coverage.json": "LAYER_VALIDATION_PASSED",
+    "checkMesh_all_regions.json": "CHECKMESH_LOG_PASSED",
+    "checkmesh.json": "CHECKMESH_LOG_PASSED",  # legacy report name
+    "cellZones_pre_split.json": "CELLZONE_VALIDATION_PASSED",
+    "cellZones_batterySolid.json": "CELLZONE_VALIDATION_PASSED",
+    "interfaces_post_split.json": "INTERFACE_VALIDATION_PASSED",
+    "mesh_integrals_pre_split.json": "MESH_INTEGRAL_VALIDATION_PASSED",
+    "production_mesh_gate.json": "PRODUCTION_MESH_GATE_PASSED",
+}
+
+
+def _failed_mesh_reports(job: Path) -> dict[str, dict]:
+    directory = job / "case/reports/production_mesh"
+    failed: dict[str, dict] = {}
+    for name, expected in MESH_REPORT_EXPECTATIONS.items():
+        report = _optional_report(directory / name)
+        if report and report.get("status") != expected:
+            failed[name] = report
+    for path in sorted(directory.glob("surfaceCheck_*.json")):
+        report = _optional_report(path)
+        if report and report.get("status") != "SURFACECHECK_LOG_PASSED":
+            failed[path.name] = report
+    return failed
+
+
+def _mesh_failure_diagnosis(job: Path) -> dict:
+    """Classify mesh failure by the measured gate that actually failed."""
+
+    reports = _failed_mesh_reports(job)
+    categories: set[str] = set()
+    failed_checks: list[str] = []
+    evidence: dict[str, object] = {}
+    for name, report in reports.items():
+        checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+        report_failures = sorted(key for key, value in checks.items() if value is not True)
+        failed_checks.extend(f"{name}:{key}" for key in report_failures)
+        if name == "mesh_target_composition.json":
+            count_checks = {
+                "total_cell_count_at_least_configured_minimum_if_set",
+                "total_cell_count_within_configured_tolerance",
+                "solid_cell_count_within_configured_tolerance_if_targeted",
+                "fluid_cell_count_within_configured_tolerance_if_targeted",
+                "point_count_within_configured_tolerance_if_targeted",
+            }
+            if set(report_failures) & count_checks:
+                categories.add("mesh_cell_budget")
+            if "hexahedron_fraction_at_least_configured_minimum" in report_failures:
+                categories.add("mesh_composition")
+            evidence[name] = {
+                "targets": report.get("targets"),
+                "actual": report.get("actual"),
+                "relative_error": report.get("relative_error"),
+                "limits": report.get("limits"),
+            }
+        elif name == "layer_coverage.json":
+            categories.add("mesh_layers")
+            evidence[name] = {
+                "thresholds": report.get("thresholds"),
+                "low_coverage_batteries": report.get("low_coverage_batteries", []),
+                "low_thickness_batteries": report.get("low_thickness_batteries", []),
+                "missing_batteries": report.get("missing_batteries", []),
+                "snappy_final_illegal_face_count": report.get("snappy_final_illegal_face_count"),
+            }
+        elif name in {"checkMesh_all_regions.json", "checkmesh.json"}:
+            categories.add("mesh_geometry_quality")
+            evidence[name] = {
+                "metrics": report.get("metrics"),
+                "limits": report.get("limits"),
+                "failed_lines": report.get("failed_lines", []),
+            }
+        elif name != "production_mesh_gate.json":
+            categories.add("mesh_topology_or_interface")
+            evidence[name] = {
+                "status": report.get("status"),
+                "error": report.get("error"),
+            }
+
+    if not categories and reports:
+        categories.add("mesh_gate_incomplete")
+    category = next(iter(categories)) if len(categories) == 1 else "mesh_multiple_gates"
+    recommendations = {
+        "mesh_cell_budget": (
+            "adjust background/region cell allocation from measured counts; preserve layer and quality gates"
+        ),
+        "mesh_composition": (
+            "adjust refinement transitions to recover hexahedral fraction; do not relax the composition gate"
+        ),
+        "mesh_layers": (
+            "change only the failed battery-wall layer/refinement transition and regenerate from an empty mesh"
+        ),
+        "mesh_geometry_quality": (
+            "locate offending faces and change local topology/refinement; keep internal and boundary skewness separate"
+        ),
+        "mesh_topology_or_interface": (
+            "repair the measured topology, region, volume, or interface defect before any solver run"
+        ),
+        "mesh_gate_incomplete": "regenerate only after the missing authoritative gate is identified",
+        "mesh_multiple_gates": (
+            "fix hard topology/interface defects first, then layer/quality, and tune cell count last"
+        ),
+    }
+    return {
+        "category": category,
+        "categories": sorted(categories),
+        "failed_checks": sorted(failed_checks),
+        "failed_reports": sorted(reports),
+        "evidence": evidence,
+        "recommendation": recommendations[category],
+    }
 
 
 def diagnose_failure(job: Path, state: dict) -> dict:
@@ -248,18 +361,16 @@ def diagnose_failure(job: Path, state: dict) -> dict:
         diagnosis["reason"] = "job is not in failed state"
         return diagnosis
     if state.get("stage") == "mesh":
-        reports = job / "case/reports/production_mesh"
-        measured = [
-            name for name in (
-                "mesh_target_composition.json", "layer_coverage.json",
-                "production_mesh_gate.json", "checkmesh.json",
-            ) if (reports / name).is_file()
-        ]
-        if measured:
+        measured = _mesh_failure_diagnosis(job)
+        if measured["failed_reports"]:
             diagnosis.update(
-                category="mesh_quality", retryable=True,
+                category=measured["category"], retryable=True,
                 reason="measured production-mesh gate failure",
-                evidence=measured,
+                categories=measured["categories"],
+                evidence=measured["evidence"],
+                failed_checks=measured["failed_checks"],
+                failed_reports=measured["failed_reports"],
+                recommendation=measured["recommendation"],
             )
         else:
             diagnosis.update(
@@ -349,7 +460,7 @@ def automatic_retry_decision(entry: dict, specification: dict, job: Path, state:
 
     current = read(job / "job.json")
     category = diagnosis["category"]
-    if category in {"mesh_quality", "wall_yplus"}:
+    if category.startswith("mesh_") or category == "wall_yplus":
         next_profile = int(entry.get("profile_index", 0)) + 1
         if next_profile >= len(specification["mesh_profiles"]):
             decision["reason"] = "no further approved mesh profile is available"

@@ -106,7 +106,35 @@ class ExperimentTests(unittest.TestCase):
         )
         self.assertEqual(decision["action"], "retry")
         self.assertEqual(decision["profile_index"], 1)
-        self.assertEqual(decision["diagnosis"]["category"], "mesh_quality")
+        self.assertEqual(decision["diagnosis"]["category"], "mesh_layers")
+        self.assertEqual(
+            decision["diagnosis"]["failed_reports"], ["layer_coverage.json"]
+        )
+
+    def test_cell_count_failure_is_not_mislabeled_as_quality_failure(self):
+        batch = self.prepare()
+        entry = batch["jobs"][0]
+        job = Path(entry["job_dir"])
+        report = job / "case/reports/production_mesh/mesh_target_composition.json"
+        _write_json(report, {
+            "status": "MESH_TARGET_VALIDATION_FAILED",
+            "checks": {
+                "total_cell_count_within_configured_tolerance": False,
+                "hexahedron_fraction_at_least_configured_minimum": True,
+            },
+            "targets": {"total_cells": 800000},
+            "actual": {"total_cells": 988705, "hexahedron_fraction": 0.881218},
+            "relative_error": {"total_cells": 0.23588125},
+            "limits": {"total_tolerance_fraction": 0.12},
+        })
+        diagnosis = experiments.diagnose_failure(
+            job, {"status": "failed", "stage": "mesh", "message": "target failed"}
+        )
+        self.assertEqual(diagnosis["category"], "mesh_cell_budget")
+        self.assertEqual(
+            diagnosis["evidence"]["mesh_target_composition.json"]["actual"]["total_cells"],
+            988705,
+        )
 
     def test_convergence_failure_increases_cap_then_changes_numerics(self):
         batch = self.prepare()

@@ -778,6 +778,19 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v40_accept_c07"] = replace(
     minimum_wanted_thickness_fraction=0.430,
     calibration_status="PHI19_800K_C07_THICKNESS_SUB1PP_USER_ACCEPTED_REQUIRES_VALIDATION",
 )
+# v40 then passed the accepted layer floors, all region/interface/positive-
+# volume gates, and produced 881,900 cells (inside 800k +/-12%).  The final
+# coolant check found exactly one boundary-skew face at 5.016287 versus 5.0
+# and one internal non-orthogonal face at 65.610554 versus 65.6.  These are
+# 0.326% and 0.016% relative misses, respectively, inside the user's explicit
+# under-1% continuous-metric allowance.  Keep internal skewness at 4.0 and
+# apply only the bounded final boundary/non-orthogonality limits below.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v41_quality_margin"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v40_accept_c07"],
+    maximum_skewness=5.05,
+    maximum_non_orthogonality=65.65,
+    calibration_status="PHI19_800K_MEASURED_SUB1PCT_QUALITY_RETRY_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -866,6 +879,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v38_count",
     "production_phi19_mesh_study_800k_yplus_v39_local_count",
     "production_phi19_mesh_study_800k_yplus_v40_accept_c07",
+    "production_phi19_mesh_study_800k_yplus_v41_quality_margin",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
@@ -1910,6 +1924,10 @@ python3 "$case_dir/tools/parse_checkmesh.py" \
     --expected-mesh-ok-count 2 \
     --max-non-orthogonality {preset.maximum_non_orthogonality:.12g} \
     --max-skewness {preset.maximum_skewness:.12g} \
+    --max-internal-skewness {min(4.0, preset.maximum_skewness):.12g} \
+    --max-boundary-skewness {preset.maximum_skewness:.12g} \
+    --mesh-dir "$case_dir/constant/coolant/polyMesh" \
+    --mesh-dir "$case_dir/constant/batterySolid/polyMesh" \
     --output "$report_dir/checkMesh_all_regions.json" || check_status=$?
 if [ "$check_status" -ne 0 ]; then
     echo "all-region checkMesh gate failed" >&2
