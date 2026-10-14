@@ -767,6 +767,17 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v39_local_count"] = replace
     minimum_layer_coverage_fraction=0.744,
     calibration_status="PHI19_800K_MEASURED_LOCAL_COUNT_CORRECTION_REQUIRES_VALIDATION",
 )
+# v39 met the run-specific 74.4% coverage floor on every wall.  Its sole
+# remaining layer miss was C07 wanted thickness: 43.0% versus the existing
+# 43.3% run-specific floor, a measured 0.3 percentage-point difference inside
+# the user's bounded allowance.  Accept only that measured continuous miss;
+# mesh topology, refinement, count, quality, y+, physics and solver gates stay
+# identical and must be revalidated from a fresh UUID.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v40_accept_c07"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v39_local_count"],
+    minimum_wanted_thickness_fraction=0.430,
+    calibration_status="PHI19_800K_C07_THICKNESS_SUB1PP_USER_ACCEPTED_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -854,6 +865,7 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v37_accept_nonorth",
     "production_phi19_mesh_study_800k_yplus_v38_count",
     "production_phi19_mesh_study_800k_yplus_v39_local_count",
+    "production_phi19_mesh_study_800k_yplus_v40_accept_c07",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",

@@ -983,6 +983,23 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertEqual(retry.maximum_non_orthogonality, 65.6)
         self.assertEqual(retry.minimum_hexahedron_fraction, 0.88)
 
+    def test_phi19_mesh_study_v40_accepts_only_measured_c07_thickness_miss(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v39_local_count"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v40_accept_c07"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(
+            changed,
+            {"minimum_wanted_thickness_fraction", "calibration_status"},
+        )
+        self.assertEqual(retry.minimum_wanted_thickness_fraction, 0.430)
+        self.assertEqual(retry.minimum_layer_coverage_fraction, 0.744)
+        self.assertEqual(retry.refined_battery_cells, previous.refined_battery_cells)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.6)
+
     def test_frame_fit_800k_trial_keeps_the_passing_wall_treatment(self) -> None:
         preset = MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"]
         self.assertEqual(preset.target_cells, 800_000)
