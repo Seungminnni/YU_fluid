@@ -11,6 +11,11 @@ PROFILES = (
     "pressure_relaxation_0p15",
     "pressure_relaxation_0p5",
     "coupled_relaxation_0p1",
+    "coupled_pressure_relaxation_0p05",
+    "coupled_limited_reltol_0p05",
+    "coupled_stable_reltol_0p005",
+    "coupled_equation_relaxation_0p025",
+    "coupled_equation_relaxation_0p005",
 )
 
 
@@ -26,7 +31,14 @@ def apply_profile(case: Path, profile: str | None) -> None:
         return
     if (case / "runs").exists() and any((case / "runs").iterdir()):
         raise ValueError("Numerical profiles may only be applied before a case has run")
-    if profile == "coupled_relaxation_0p1":
+    if profile in (
+        "coupled_relaxation_0p1",
+        "coupled_pressure_relaxation_0p05",
+        "coupled_limited_reltol_0p05",
+        "coupled_stable_reltol_0p005",
+        "coupled_equation_relaxation_0p025",
+        "coupled_equation_relaxation_0p005",
+    ):
         solution_paths = [case / "system/coolant/fvSolution"] + [
             case / "profiles" / stage / "system/coolant/fvSolution"
             for stage in ("steady_cold_flow", "steady")
@@ -37,12 +49,45 @@ def apply_profile(case: Path, profile: str | None) -> None:
         ]
         pressure_solver = ("    p_rgh\n    {\n        solver GAMG;\n        tolerance 1e-8;\n"
                            "        relTol 0.05;\n        smoother GaussSeidel;\n    }")
-        pressure_solver_stable = pressure_solver.replace("relTol 0.05;", "relTol 0;")
+        pressure_relative_tolerance = (
+            0.05
+            if profile == "coupled_limited_reltol_0p05"
+            else 0.005
+            if profile == "coupled_stable_reltol_0p005"
+            else 0.0
+        )
+        pressure_solver_stable = (
+            pressure_solver.replace(
+                "relTol 0.05;", f"relTol {pressure_relative_tolerance:g};"
+            )
+            if pressure_relative_tolerance > 0
+            else pressure_solver.replace("relTol 0.05;", "relTol 0;")
+        )
+        pressure_relaxation = (
+            0.1
+            if profile == "coupled_relaxation_0p1"
+            else 0.01
+            if profile in (
+                "coupled_equation_relaxation_0p005",
+                "coupled_stable_reltol_0p005",
+            )
+            else 0.05
+        )
+        equation_relaxation = (
+            0.005
+            if profile in (
+                "coupled_equation_relaxation_0p005",
+                "coupled_stable_reltol_0p005",
+            )
+            else 0.025
+            if profile == "coupled_equation_relaxation_0p025"
+            else 0.05
+        )
         relaxation_tokens = {
-            "        p_rgh 0.3;": "        p_rgh 0.1;",
-            "        U 0.15;": "        U 0.05;",
-            "        k 0.15;": "        k 0.05;",
-            "        omega 0.15;": "        omega 0.05;",
+            "        p_rgh 0.3;": f"        p_rgh {pressure_relaxation:g};",
+            "        U 0.15;": f"        U {equation_relaxation:g};",
+            "        k 0.15;": f"        k {equation_relaxation:g};",
+            "        omega 0.15;": f"        omega {equation_relaxation:g};",
         }
         laplacian = "laplacianSchemes\n{\n    default Gauss linear corrected;\n}"
         laplacian_stable = (laplacian[:-1]
@@ -59,7 +104,9 @@ def apply_profile(case: Path, profile: str | None) -> None:
             after = before.replace(pressure_solver, pressure_solver_stable)
             for original, replacement in relaxation_tokens.items():
                 after = after.replace(original, replacement)
-            after = after.replace(h_tokens[0], "        h 0.05;")
+            after = after.replace(
+                h_tokens[0], f"        h {equation_relaxation:g};"
+            )
             edits.append((path, before, after))
         for path in scheme_paths:
             before = path.read_text(encoding="utf-8")
@@ -77,11 +124,19 @@ def apply_profile(case: Path, profile: str | None) -> None:
         report.write_text(json.dumps({
             "profile": profile,
             "changes": changes,
-            "pressure_relaxation": 0.1,
-            "equation_relaxation": {"U": 0.05, "h": 0.05, "k": 0.05, "omega": 0.05},
-            "pressure_relTol": 0,
+            "pressure_relaxation": pressure_relaxation,
+            "equation_relaxation": {
+                field: equation_relaxation for field in ("U", "h", "k", "omega")
+            },
+            "pressure_relTol": pressure_relative_tolerance,
             "pressure_laplacian": "Gauss linear limited 0.5",
-            "evidence": "local pressure/velocity runaway after initially stable SIMPLE iterations",
+            "evidence": (
+                "local pressure/velocity/enthalpy runaway after initially stable "
+                "SIMPLE iterations; the selected coupled-relaxation follow-up "
+                "preserves pressure controls, acceptance limits, and physical inputs. "
+                "The relTol=0.05 variant retains the original pressure stopping rule "
+                "after measured relTol=0 trials reached 1000 GAMG iterations per solve."
+            ),
             "acceptance_limits_changed": False,
             "physical_inputs_changed": False,
         }, indent=2) + "\n", encoding="utf-8", newline="\n")

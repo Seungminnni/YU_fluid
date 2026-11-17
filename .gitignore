@@ -3,6 +3,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.nox/
 .tox/
 .coverage
 .venv/
@@ -16,6 +18,7 @@ viewer/
 dist/
 tmp/
 output/
+outputs/
 
 # Local configuration and generated logs
 .env
@@ -23,6 +26,9 @@ output/
 *.log
 *.bak
 *.orig
+*.pid
+*.swp
+*.tmp
 *~
 
 # Generated archives are release artifacts, not source files
@@ -30,6 +36,7 @@ output/
 *.7z
 *.rar
 *.tar
+*.tar.*
 *.tar.gz
 *.tgz
 
@@ -40,6 +47,10 @@ cleanup-fluent-*.bat
 
 # Local research and design documents
 document/
+
+# One-off local run-control helpers tied to a specific container/PID
+tools/continue_romfom*.ps1
+tools/pause_romfom*_helper_after_*.ps1
 
 # Editor and operating-system metadata
 .idea/

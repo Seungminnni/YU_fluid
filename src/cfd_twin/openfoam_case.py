@@ -366,6 +366,7 @@ gradSchemes
 divSchemes
 {
     default                         none;
+    div(div(phi,U))                 Gauss linear;
     div(phi,U)                      bounded Gauss upwind;
     div(phi,K)                      Gauss linear;
     div(phi,h)                      bounded Gauss upwind;
@@ -441,10 +442,19 @@ def _fluid_solution(
 {
     Phi
     {
-        solver GAMG;
+        solver PCG;
+        preconditioner DIC;
         tolerance 1e-8;
         relTol 0;
-        smoother GaussSeidel;
+        maxIter 4000;
+    }
+    pPotential
+    {
+        solver PCG;
+        preconditioner DIC;
+        tolerance 1e-8;
+        relTol 0;
+        maxIter 4000;
     }
     p_rgh
     {
@@ -1207,9 +1217,23 @@ def _steady_pilot_script(
     )
     if profile == "steady_cold_flow":
         required_initialisation_tool = " potentialFoam python3"
-        flow_initialisation = '''
-potentialFoam -case "$run_dir" -region coolant -initialiseUBCs \
+        flow_initialisation = f'''
+potentialFoam -case "$run_dir" -region coolant -initialiseUBCs -writephi \
+    -pName pPotential -writep \
     -noFunctionObjects >"$run_dir/logs/solver/potentialFoam.log" 2>&1
+python3 "$case_dir/tools/convert_potential_phi_to_mass.py" \
+    --phi "$run_dir/0/coolant/phi.gz" \
+    --density {config.fluid.density_kg_m3:.12g} \
+    --report "$run_dir/reports/solver/potential_phi_mass_conversion.json" \
+    >"$run_dir/logs/solver/potential_phi_mass_conversion.log" 2>&1
+python3 "$case_dir/tools/initialize_pressure_from_potential.py" \
+    --potential "$run_dir/0/coolant/pPotential.gz" \
+    --pressure "$run_dir/0/coolant/p" \
+    --pressure-rgh "$run_dir/0/coolant/p_rgh" \
+    --density {config.fluid.density_kg_m3:.12g} \
+    --outlet-pressure {config.boundary.outlet_absolute_pressure_pa:.12g} \
+    --report "$run_dir/reports/solver/potential_pressure_initialization.json" \
+    >"$run_dir/logs/solver/potential_pressure_initialization.log" 2>&1
 '''
         post_validation = '''
 latest_time=$(foamListTimes -case "$run_dir" -latestTime)

@@ -177,13 +177,38 @@ def _queue(jobs: Path, prepared: dict, files: dict, specification: dict, *, prof
     return {"name": specification["name"], "id": run_id, "job_dir": str(directory), "profile_index": profile_index}
 
 
+def _is_mesh_profile_tail_extension(previous: dict, updated: dict) -> bool:
+    """Allow only appending explicitly approved mesh retries to a frozen plan."""
+
+    if len(previous.get("cases", [])) != len(updated.get("cases", [])):
+        return False
+    previous_copy, updated_copy = copy.deepcopy(previous), copy.deepcopy(updated)
+    for old_case, new_case in zip(
+        previous_copy.get("cases", []), updated_copy.get("cases", []), strict=True
+    ):
+        old_profiles = old_case.pop("mesh_profiles", [])
+        new_profiles = new_case.pop("mesh_profiles", [])
+        if len(new_profiles) <= len(old_profiles) or new_profiles[: len(old_profiles)] != old_profiles:
+            return False
+    return previous_copy == updated_copy
+
+
 def prepare_batch(config_path: Path, output: Path, jobs: Path, ranks: int) -> dict:
     plan = load_plan(config_path)
     plan_hash = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
     manifest = output / "batch.json"
     if manifest.exists():
         batch = read(manifest)
-        if batch.get("plan_sha256") != plan_hash or batch["solver_mpi_ranks"] != ranks or Path(batch["jobs_root"]) != jobs:
+        compatible_extension = (
+            batch["solver_mpi_ranks"] == ranks
+            and Path(batch["jobs_root"]) == jobs
+            and _is_mesh_profile_tail_extension(batch.get("plan", {}), plan)
+        )
+        if batch.get("plan_sha256") != plan_hash and compatible_extension:
+            batch["plan"] = plan
+            batch["plan_sha256"] = plan_hash
+            _write_json(manifest, batch)
+        elif batch.get("plan_sha256") != plan_hash or batch["solver_mpi_ranks"] != ranks or Path(batch["jobs_root"]) != jobs:
             raise ValueError("Existing batch has different inputs. Use a new --output for a new experiment.")
         return batch
     if (output / "preparation_started.json").exists():
@@ -496,6 +521,21 @@ def automatic_retry_decision(entry: dict, specification: dict, job: Path, state:
                 action="retry", profile_index=int(entry.get("profile_index", 0)),
                 job_overrides={"steady_numerics_profile": profile},
                 remedy=f"restart from S0 with approved numerical profile {profile}",
+            )
+            return decision
+    # A measured numerical abort that survives every approved solver-only
+    # profile is evidence for a mesh-conditioning retry when, and only when,
+    # the experiment explicitly lists a later approved mesh profile.  This
+    # still starts from an empty UUID and never reuses the failed field.
+    if category == "numerical_instability":
+        next_profile = int(entry.get("profile_index", 0)) + 1
+        if next_profile < len(specification["mesh_profiles"]):
+            decision.update(
+                action="retry", profile_index=next_profile, job_overrides={},
+                remedy=(
+                    "all approved numerical profiles exhausted; regenerate "
+                    "the mesh from empty with the next measured conditioning profile"
+                ),
             )
             return decision
     decision["reason"] = "no unused approved numerical recovery profile is available"

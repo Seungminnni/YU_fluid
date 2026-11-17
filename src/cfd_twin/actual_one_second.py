@@ -126,6 +126,21 @@ def iter_probe_series_rows(series: ProbeSeries):
             yield time_s, values
 
 
+def _iter_post_initial_probe_rows(series: ProbeSeries):
+    """Yield samples after the viewer's explicit time-zero frame.
+
+    Solver-time probes normally start at 1 s.  Offline ``postProcess -time
+    0:...`` also writes the stored time-zero field, which would duplicate the
+    initial frame that this packer creates from the configured temperature.
+    Accept that optional row while retaining the strict 1..end-time contract.
+    """
+
+    for time_s, values in iter_probe_series_rows(series):
+        if time_s == 0:
+            continue
+        yield time_s, values
+
+
 def _probe_specs(run_dir: Path) -> dict[str, dict[str, object]]:
     root = run_dir / "postProcessing"
     specs: dict[str, dict[str, object]] = {
@@ -334,7 +349,7 @@ def build_actual_one_second_bundle(
         dataset_initial_k = dataset_initial_temperature(name)
         dataset_low = dataset_initial_k
         dataset_high = dataset_initial_k
-        for time_s, values in iter_probe_series_rows(probe):
+        for time_s, values in _iter_post_initial_probe_rows(probe):
             times.append(time_s)
             selected = values[valid]
             if not np.all(np.isfinite(selected)):
@@ -364,7 +379,7 @@ def build_actual_one_second_bundle(
         initial = np.full(len(valid), dataset_initial_k)
         with destination.open("wb") as stream:
             stream.write(np.rint((initial - low) / quantum_k).astype("<u2").tobytes())
-            for _, values in iter_probe_series_rows(probe):
+            for _, values in _iter_post_initial_probe_rows(probe):
                 selected = values[valid]
                 quantized = np.rint((selected - low) / quantum_k).clip(0, 65535)
                 stream.write(quantized.astype("<u2").tobytes())
@@ -547,7 +562,9 @@ def validate_actual_one_second_bundle(
                 ),
             )
             maximum_error = float(np.max(np.abs(low + frames[0] * quantum - initial)))
-            for frame, (time_s, values) in enumerate(iter_probe_series_rows(probe), start=1):
+            for frame, (time_s, values) in enumerate(
+                _iter_post_initial_probe_rows(probe), start=1
+            ):
                 if frame >= int(specification["frame_count"]):
                     raise ValueError(f"{name}: more source rows than encoded frames")
                 times.append(time_s)

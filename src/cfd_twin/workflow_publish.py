@@ -33,7 +33,14 @@ def _write_json(path: Path, value: dict[str, object]) -> None:
 
 
 def publish_completed_run(
-    case_dir: Path, viewer_dir: Path, *, config=None, include_reference_cad: bool = True
+    case_dir: Path,
+    viewer_dir: Path,
+    *,
+    config=None,
+    include_reference_cad: bool = True,
+    cold_flow_run_dir: Path | None = None,
+    steady_cht_run_dir: Path | None = None,
+    transient_run_dir: Path | None = None,
 ) -> dict[str, object]:
     """Gate, pack, verify, and display one completed single-mesh run."""
 
@@ -46,7 +53,21 @@ def publish_completed_run(
 
     case = case_dir.resolve()
     viewer = viewer_dir.resolve()
-    run = case / "runs/frozen_flow_actual_1s"
+    cold_flow_run = (
+        cold_flow_run_dir.resolve()
+        if cold_flow_run_dir is not None
+        else case / "runs/steady_cold_flow"
+    )
+    steady_cht_run = (
+        steady_cht_run_dir.resolve()
+        if steady_cht_run_dir is not None
+        else case / "runs/steady_cht"
+    )
+    run = (
+        transient_run_dir.resolve()
+        if transient_run_dir is not None
+        else case / "runs/frozen_flow_actual_1s"
+    )
     report_dir = run / "reports/solver"
     state_path = case / "reports/workflow_postprocess.json"
 
@@ -59,11 +80,11 @@ def publish_completed_run(
             "PRODUCTION_MESH_GATE_PASSED",
         ),
         "cold_flow": (
-            case / "runs/steady_cold_flow/reports/solver/cold_flow_validation.json",
+            cold_flow_run / "reports/solver/cold_flow_validation.json",
             "COLD_FLOW_VALIDATION_PASSED",
         ),
         "steady_cht": (
-            case / "runs/steady_cht/reports/solver/steady_cht_validation.json",
+            steady_cht_run / "reports/solver/steady_cht_validation.json",
             "STEADY_CHT_VALIDATION_PASSED",
         ),
         "transient": (
@@ -151,7 +172,14 @@ def publish_completed_run(
                 "에너지 잔차 목표를 충족하지 못했습니다."
             ]
     _write_json(case / "results/result_manifest.json", result_manifest)
-    model = write_viewer_bundle(config, viewer, case_dir=case, include_reference_cad=include_reference_cad)
+    model = write_viewer_bundle(
+        config,
+        viewer,
+        case_dir=case,
+        include_reference_cad=include_reference_cad,
+        precision_steady_run_dir=steady_cht_run,
+        precision_transient_run_dir=run,
+    )
     if (
         not model.get("actual_solver_data")
         or not model.get("interactive_cfd_by_mesh", {}).get("precision", {}).get(
@@ -174,9 +202,37 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Publish validated baseline CFD review viewer")
     parser.add_argument("--case-dir", required=True, type=Path)
     parser.add_argument("--viewer-dir", required=True, type=Path)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--cold-flow-run-dir", type=Path)
+    parser.add_argument("--steady-cht-run-dir", type=Path)
+    parser.add_argument("--transient-run-dir", type=Path)
     args = parser.parse_args()
     try:
-        result = publish_completed_run(args.case_dir, args.viewer_dir)
+        config = None
+        if args.config is not None:
+            from .config import load_config
+
+            snapshot = _read_json(args.config)
+            if "source_path" in snapshot and "applied_overrides" in snapshot:
+                config = load_config(
+                    Path(str(snapshot["source_path"])),
+                    overlay_paths=tuple(
+                        str(path) for path in snapshot.get("applied_overlays", [])
+                    ),
+                    overrides=tuple(
+                        str(value) for value in snapshot.get("applied_overrides", [])
+                    ),
+                )
+            else:
+                config = load_config(args.config)
+        result = publish_completed_run(
+            args.case_dir,
+            args.viewer_dir,
+            config=config,
+            cold_flow_run_dir=args.cold_flow_run_dir,
+            steady_cht_run_dir=args.steady_cht_run_dir,
+            transient_run_dir=args.transient_run_dir,
+        )
     except Exception as exc:
         _write_json(
             args.case_dir / "reports/workflow_postprocess.json",

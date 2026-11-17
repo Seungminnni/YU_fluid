@@ -475,6 +475,23 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
     base_overrides = _validated_geometry_overrides(job.get("geometry_overrides"))
     inputs = job["inputs"]
     frozen_cad = job.get("prevalidated_cad")
+    external_mesh = job.get("external_structured_mesh_import")
+    external_mesh_authoritative = external_mesh is not None
+    if external_mesh_authoritative:
+        if not isinstance(external_mesh, dict) or set(external_mesh) != {"source", "file_sha256"}:
+            raise CfdTwinError("external structured mesh reference is malformed")
+        mesh_source = Path(str(external_mesh["source"])).resolve()
+        mesh_hashes = external_mesh["file_sha256"]
+        if mesh_source.is_relative_to(job_dir.resolve()) or not mesh_source.is_dir():
+            raise CfdTwinError("external structured mesh must be an external shared input")
+        if not isinstance(mesh_hashes, dict) or not mesh_hashes:
+            raise CfdTwinError("external structured mesh hash inventory is missing")
+        for relative, digest in mesh_hashes.items():
+            candidate = (mesh_source / str(relative)).resolve()
+            if not candidate.is_relative_to(mesh_source) or not candidate.is_file():
+                raise CfdTwinError(f"external structured mesh evidence is missing: {relative}")
+            if hashlib.sha256(candidate.read_bytes()).hexdigest() != digest:
+                raise CfdTwinError(f"external structured mesh evidence hash mismatch: {relative}")
     if frozen_cad is None:
         imported = import_step_bundle(
             files, BASE_CONFIG, THERMAL_OVERLAY, job_dir / "cad",
@@ -517,7 +534,13 @@ def build_imported_case(job_dir: Path) -> dict[str, object]:
     profile = job.get("mesh_profile", f"production_{inputs['mesh_target_cells']//1000}k")
     if profile not in MESH_PRESETS or MESH_PRESETS[profile].target_cells != inputs['mesh_target_cells']:
         raise CfdTwinError("Mesh profile must match the requested cell-count target")
-    write_production_mesh_source_bundle(config, cad_dir, case, mesh_level=profile)
+    write_production_mesh_source_bundle(
+        config,
+        cad_dir,
+        case,
+        mesh_level=profile,
+        external_structured_mesh_authoritative=external_mesh_authoritative,
+    )
     apply_steady_numerics(case, job.get("steady_numerics_profile"))
     apply_outlet_boundary(case, job.get("outlet_velocity_profile"))
     (job_dir / "resolved_config.json").write_text(config.to_json() + "\n", encoding="utf-8")

@@ -573,12 +573,17 @@ async function start(){try{if(!gl)throw Error("이 브라우저에서 WebGL을 �
 '''
 
 
-def write_mesh_only_viewer(case_dir: str | Path, output_dir: str | Path) -> dict[str, object]:
+def write_mesh_only_viewer(
+    case_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    steady_run_dir: str | Path | None = None,
+) -> dict[str, object]:
     """Publish actual boundary, sections and every unique 3D volume edge."""
 
     case = Path(case_dir).resolve()
     output = Path(output_dir).resolve()
-    mesh = extract_full_mesh_views(case)
+    mesh = extract_full_mesh_views(case, steady_run_dir=steady_run_dir)
     report = json.loads(
         (case / "reports/production_mesh/mesh_target_composition.json").read_text(
             encoding="utf-8"

@@ -7,6 +7,7 @@ verified snapshot of that directory, not a second viewer to maintain by hand.
 from __future__ import annotations
 
 from .file_lock import lock_file, unlock_file
+import copy
 import json
 import os
 import re
@@ -18,7 +19,14 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from .multi_case_viewer import append_validated_run, dataset_paths, read_viewer_model, write_four_case_model
+from .multi_case_viewer import (
+    append_validated_run,
+    dataset_paths,
+    four_case_manifest,
+    read_viewer_model,
+    write_four_case_manifest,
+    write_four_case_model,
+)
 
 
 WINDOWS_VIEWER_LAUNCHER = r'''@echo off
@@ -427,6 +435,10 @@ def publish_experiment_and_demo(
     run_id: str | None = None,
     label: str | None = None,
     label_en: str | None = None,
+    legacy_run_id: str | None = None,
+    legacy_label: str | None = None,
+    legacy_label_en: str | None = None,
+    prefer_run: bool = False,
 ) -> dict[str, object]:
     """Synchronize one verified server publication and its offline demo."""
     viewer = Path(viewer_dir).resolve()
@@ -437,12 +449,82 @@ def publish_experiment_and_demo(
             if not (viewer / "results.html").is_file():
                 _initialize_publication(viewer, Path(source_viewer).resolve(), run_id=run_id, label=label, label_en=label_en)
             current, _ = read_viewer_model(viewer)
-            if not any(str(run.get("id")) == run_id for run in current.get("mesh_runs", [])):
+            existing = next(
+                (
+                    item
+                    for item in current.get("mesh_runs", [])
+                    if str(item.get("id")) == run_id
+                ),
+                None,
+            )
+            if existing is None:
                 append_validated_run(
                     viewer, Path(source_viewer), run_id=run_id, label=label, label_en=label_en
                 )
+            else:
+                # A previous atomic ZIP attempt can fail after the run payload
+                # has already been installed. Refresh only small validation
+                # metadata from the same independently gated source so a retry
+                # is idempotent and never duplicates the large CFD datasets.
+                source_model, _ = read_viewer_model(Path(source_viewer))
+                source_ids = [
+                    str(item["id"])
+                    for item in source_model.get("mesh_runs", [])
+                    if item.get("data_ready")
+                ]
+                if len(source_ids) != 1:
+                    raise ValueError(
+                        f"source viewer must contain one ready run, got {source_ids}"
+                    )
+                source_id = source_ids[0]
+                for key in ("convergence_by_mesh", "energy_balance_by_mesh"):
+                    value = source_model.get(key, {}).get(source_id)
+                    if value is None:
+                        raise ValueError(f"source viewer is missing {key}[{source_id!r}]")
+                    current.setdefault(key, {})[run_id] = copy.deepcopy(value)
+                if label is not None:
+                    existing["label"] = label
+                if label_en is not None:
+                    existing["label_en"] = label_en
+                write_four_case_model(viewer, current)
+                write_four_case_manifest(viewer, four_case_manifest(current, viewer))
         elif run_id is not None:
             raise ValueError("run_id requires a source viewer")
+        if legacy_run_id is not None or prefer_run:
+            current, _ = read_viewer_model(viewer)
+            runs = current.get("mesh_runs", [])
+            if not isinstance(runs, list):
+                raise ValueError("viewer mesh_runs is not a list")
+            if legacy_run_id is not None:
+                legacy = next(
+                    (item for item in runs if str(item.get("id")) == legacy_run_id),
+                    None,
+                )
+                if legacy is None:
+                    raise ValueError(f"legacy run was not found: {legacy_run_id}")
+                if legacy_label is not None:
+                    legacy["label"] = legacy_label
+                if legacy_label_en is not None:
+                    legacy["label_en"] = legacy_label_en
+                runs.remove(legacy)
+                runs.append(legacy)
+            if prefer_run:
+                if not run_id:
+                    raise ValueError("prefer_run requires run_id")
+                preferred = next(
+                    (item for item in runs if str(item.get("id")) == run_id),
+                    None,
+                )
+                if preferred is None:
+                    raise ValueError(f"preferred run was not found: {run_id}")
+                runs.remove(preferred)
+                runs.insert(0, preferred)
+                current["interactive_cfd"] = current["interactive_cfd_by_mesh"][run_id]
+            current.setdefault("four_case_comparison", {})["run_ids"] = [
+                str(item["id"]) for item in runs
+            ]
+            write_four_case_model(viewer, current)
+            write_four_case_manifest(viewer, four_case_manifest(current, viewer))
         report = validate_server_viewer(viewer)
         removed = prune_old_viewer_assets(viewer)
         packaged = package_demo_viewer(viewer, zip_path)

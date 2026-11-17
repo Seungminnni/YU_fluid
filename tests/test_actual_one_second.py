@@ -178,6 +178,46 @@ class ActualOneSecondTests(unittest.TestCase):
                 report["status"], "ACTUAL_ONE_SECOND_BUNDLE_VALIDATION_PASSED"
             )
 
+    def test_bundle_accepts_offline_postprocess_time_zero_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self._probe_file(root, "T")
+            source.write_text(
+                source.read_text(encoding="ascii").replace(
+                    "# Time T\n",
+                    "# Time T\n0 293.15 -1e+300 293.15\n",
+                ),
+                encoding="ascii",
+            )
+            specs = {
+                name: {
+                    "path": source,
+                    "kind": "battery-near-surface" if name == "cell_surface" else "xy",
+                    "columns": 3,
+                    "rows": 1,
+                }
+                for name in (
+                    "xy15", "xy33", "xy", "xy68", "xy85",
+                    "xz15", "xz33", "xz50", "xz68", "xz85",
+                    "yz15", "yz33", "yz50", "yz68", "yz85", "cell_surface",
+                )
+            }
+            with (
+                patch("cfd_twin.actual_one_second._probe_specs", return_value=specs),
+                patch(
+                    "cfd_twin.actual_one_second._mesh_identity",
+                    return_value=("precision", 662_670),
+                ),
+            ):
+                manifest = build_actual_one_second_bundle(
+                    root, root / "output", end_time_s=2
+                )
+                report = validate_actual_one_second_bundle(root, root / "output")
+            self.assertEqual(manifest["datasets"]["xy"]["frame_count"], 3)
+            self.assertEqual(
+                report["status"], "ACTUAL_ONE_SECOND_BUNDLE_VALIDATION_PASSED"
+            )
+
     def test_local_surface_heat_transfer_is_packed_from_direct_interface_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

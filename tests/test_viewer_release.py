@@ -93,6 +93,31 @@ class ViewerReleaseTests(unittest.TestCase):
                 self.assertEqual(zipped.read("viewer/data/new_28/a.u16"), b"binary")
                 self.assertEqual(zipped.read("viewer/data/new_31/a.u16"), b"binary")
 
+    def test_new_result_can_be_preferred_while_legacy_is_relabelled_and_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            server, source = root / "server", root / "source"
+            _viewer(server, 19)
+            _viewer(source, 19)
+            result = publish_experiment_and_demo(
+                server,
+                root / "demo.zip",
+                source_viewer=source,
+                run_id="new_phi19",
+                label="new",
+                legacy_run_id="precision",
+                legacy_label="legacy hybrid",
+                legacy_label_en="legacy hybrid",
+                prefer_run=True,
+            )
+            self.assertEqual(result["runs"], ["new_phi19", "precision"])
+            model, _ = read_viewer_model(server)
+            self.assertEqual(model["mesh_runs"][1]["label"], "legacy hybrid")
+            self.assertEqual(
+                model["interactive_cfd"],
+                model["interactive_cfd_by_mesh"]["new_phi19"],
+            )
+
     def test_invalid_first_result_leaves_no_publication_and_can_be_retried(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

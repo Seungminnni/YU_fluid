@@ -24,6 +24,10 @@ def main() -> int:
     parser.add_argument("--run-id")
     parser.add_argument("--label")
     parser.add_argument("--label-en")
+    parser.add_argument("--legacy-run-id")
+    parser.add_argument("--legacy-label")
+    parser.add_argument("--legacy-label-en")
+    parser.add_argument("--prefer-run", action="store_true")
     args = parser.parse_args()
     result = publish_experiment_and_demo(
         args.server_viewer,
@@ -32,6 +36,10 @@ def main() -> int:
         run_id=args.run_id,
         label=args.label,
         label_en=args.label_en,
+        legacy_run_id=args.legacy_run_id,
+        legacy_label=args.legacy_label,
+        legacy_label_en=args.legacy_label_en,
+        prefer_run=args.prefer_run,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

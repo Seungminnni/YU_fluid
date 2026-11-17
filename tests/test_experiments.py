@@ -56,6 +56,24 @@ class ExperimentTests(unittest.TestCase):
             self.prepare()
         self.assertEqual(experiments.read(Path(batch["jobs"][0]["job_dir"]) / "job.json"), job)
 
+    def test_existing_batch_accepts_only_mesh_profile_tail_extension(self):
+        batch = self.prepare()
+        original_profiles = list(batch["plan"]["cases"][0]["mesh_profiles"])
+        appended_profile = "production_frame_fit_8um_10layers_local2"
+        self.assertNotIn(appended_profile, original_profiles)
+        self.raw["mesh_profiles"].append(appended_profile)
+        self.write_config()
+        extended = self.prepare()
+        self.assertEqual(
+            extended["plan"]["cases"][0]["mesh_profiles"],
+            original_profiles + [appended_profile],
+        )
+
+        self.raw["inputs"]["inlet_velocity_m_s"] = 0.7
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "different inputs"):
+            self.prepare()
+
     def test_explicit_numerical_profile_is_frozen_and_validated(self):
         self.raw['cases'][0]['steady_numerics_profile'] = 'pressure_limited_0p5'
         self.raw['cases'][0]['outlet_velocity_profile'] = 'pressure_backflow'
@@ -183,6 +201,33 @@ class ExperimentTests(unittest.TestCase):
             decision["job_overrides"],
             {"steady_numerics_profile": "pressure_relaxation_0p15"},
         )
+
+    def test_exhausted_numerical_profiles_select_next_measured_mesh_profile(self):
+        batch = self.prepare()
+        entry = batch["jobs"][0]
+        job = Path(entry["job_dir"])
+        specification = batch["plan"]["cases"][0]
+        specification["automatic_retry"]["maximum_retries"] = 12
+        manifest = experiments.read(job / "job.json")
+        manifest["steady_numerics_profile"] = "coupled_relaxation_0p1"
+        _write_json(job / "job.json", manifest)
+        log_dir = job / "case/runs/steady_cold_flow/logs/solver"
+        log_dir.mkdir(parents=True)
+        (log_dir / "steady_cold_flow.log").write_text(
+            "Negative initial temperature T0: -195\nFOAM parallel run aborting\n",
+            encoding="utf-8",
+        )
+        entry["prior_attempts"] = [
+            {"steady_numerics_profile": profile}
+            for profile in specification["automatic_retry"]["steady_numerics_profiles"]
+        ]
+        decision = experiments.automatic_retry_decision(
+            entry, specification, job,
+            {"status": "failed", "stage": "steady", "message": "FOAM parallel run aborting"},
+        )
+        self.assertEqual(decision["action"], "retry")
+        self.assertEqual(decision["profile_index"], 1)
+        self.assertEqual(decision["job_overrides"], {})
 
     def test_unmeasured_mesh_failure_is_not_retried_blindly(self):
         batch = self.prepare()

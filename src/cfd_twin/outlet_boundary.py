@@ -11,7 +11,7 @@ import re
 from .openfoam_mesh_integrals import _boundary
 from .openfoam_yplus_validation import _balanced_block, parse_scalar_boundary_field
 
-PROFILES = ("pressure_backflow",)
+PROFILES = ("pressure_backflow", "flux_corrected_outflow")
 
 
 def validate_profile(profile: str | None) -> None:
@@ -29,7 +29,12 @@ def apply_profile(case: Path, profile: str | None) -> None:
     before = path.read_text(encoding='utf-8')
     old = ('    outlet\n    {\n        type inletOutlet;\n'
            '        inletValue uniform (0 0 0);\n        value uniform (0 0 0);\n    }')
-    new = ('    outlet\n    {\n        type pressureInletOutletVelocity;\n'
+    boundary_type = (
+        "fluxCorrectedVelocity"
+        if profile == "flux_corrected_outflow"
+        else "pressureInletOutletVelocity"
+    )
+    new = (f'    outlet\n    {{\n        type {boundary_type};\n'
            '        value uniform (0 0 0);\n    }')
     if before.count(old) != 1:
         raise ValueError('Unexpected fresh outlet velocity boundary')
@@ -39,12 +44,16 @@ def apply_profile(case: Path, profile: str | None) -> None:
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps({
         'profile': profile, 'field': 'U', 'patch': 'outlet',
-        'before_type': 'inletOutlet', 'after_type': 'pressureInletOutletVelocity',
+        'before_type': 'inletOutlet', 'after_type': boundary_type,
         'before_sha256': hashlib.sha256(before.encode()).hexdigest(),
         'after_sha256': hashlib.sha256(after.encode()).hexdigest(),
         'boundary_condition_changed': True, 'operating_inputs_changed': False,
         'acceptance_limits_changed': False,
-        'comparison_note': 'Outlet reverse-flow treatment differs from the original runs.',
+        'comparison_note': (
+            'Outlet velocity is explicitly corrected from phi on outflow.'
+            if profile == 'flux_corrected_outflow'
+            else 'Outlet reverse-flow treatment differs from the original runs.'
+        ),
     }, indent=2) + '\n', encoding='utf-8', newline='\n')
 
 

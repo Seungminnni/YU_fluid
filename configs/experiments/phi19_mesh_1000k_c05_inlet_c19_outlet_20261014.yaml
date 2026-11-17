@@ -1,0 +1,31 @@
+schema_version: 1
+name: phi19_mesh_1000k_c05_inlet_c19_outlet_20261014
+
+inputs:
+  coolant: deionized_water
+  inlet_temperature_k: 293.0
+  inlet_velocity_m_s: 0.4
+  outlet_pressure_pa: 101325.0
+
+overlays:
+  - ../recalculation_800k_c05_inlet_c19_outlet_phi19_20261013.yaml
+
+steady_numerics_profile: coupled_relaxation_0p1
+cold_flow_maximum_iterations: 20000
+automatic_retry:
+  maximum_retries: 12
+  steady_numerics_profiles:
+    - pressure_relaxation_0p15
+    - pressure_limited_0p5
+    - pressure_reltol_zero
+    - pressure_relaxation_0p5
+    - coupled_relaxation_0p1
+
+cases:
+  - name: phi19_mesh_1000k_c05_inlet_c19_outlet
+    inputs:
+      mesh_target_cells: 1000000
+    mesh_profiles:
+      - production_phi19_mesh_study_1000k_yplus_v24_surface_l0
+      - production_phi19_mesh_study_1000k_yplus_v25_surface_l0_4um_13layers
+      - production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67

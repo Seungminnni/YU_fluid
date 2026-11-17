@@ -1,0 +1,26 @@
+schema_version: 1
+name: gambit_20260831_user_reference
+format: fluent_ascii
+generator: GAMBIT 2.2.30
+mesh_sha256: ccb2f7e7002e9c708f9c2d5767c186966421cfef07e23d9916da72537e5d4e8c
+unit_policy:
+  source_unit: mm_candidate_requires_geometry_confirmation
+  openfoam_scale_candidate: 0.001
+  prevent_double_scaling: true
+expected:
+  nodes: 178660
+  faces: 511818
+  cells: 166704
+  solid_cells: 69920
+  fluid_cells: 96784
+  solid_components: 23
+  fluid_components: 1
+  interface_faces_in_mixed_wall_zone: 21712
+  external_faces_in_mixed_wall_zone: 12132
+  inlet_faces: 152
+  outlet_faces: 152
+policy:
+  role: immutable_structural_baseline
+  do_not_treat_as_gmsh_msh: true
+  require_openfoam_conversion_validation: true
+  require_fresh_fom_validation_before_release: true

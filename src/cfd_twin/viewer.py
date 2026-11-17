@@ -53,10 +53,16 @@ CURRENT_PRECISION_MESH = {
 }
 
 
-def _energy_balance_payload(case: Path) -> dict[str, object]:
+def _energy_balance_payload(
+    case: Path,
+    *,
+    transient_run_dir: Path | None = None,
+) -> dict[str, object]:
     """Read the persisted transient heat balance without inventing samples."""
 
     source = case / "results/energy_balance.csv"
+    if transient_run_dir is not None:
+        source = transient_run_dir / "reports/solver/energy_balance.csv"
     if not source.is_file():
         source = case / "runs/frozen_flow_actual_1s/reports/solver/energy_balance.csv"
     if not source.is_file():
@@ -1315,6 +1321,8 @@ def _interactive_actual_cfd_payload(
     *,
     enabled: bool,
     mesh_id: str = "precision",
+    steady_run_dir: Path | None = None,
+    transient_run_dir: Path | None = None,
 ) -> dict[str, object] | None:
     """Build the browser payload from a completed, validated result package."""
 
@@ -1330,7 +1338,11 @@ def _interactive_actual_cfd_payload(
         else case / f"production/{production_profile}/runs"
     )
     upgraded_run = runs_root / "frozen_flow_actual_1s_xy5"
-    run = runs_root / "frozen_flow_actual_1s"
+    run = (
+        transient_run_dir.resolve()
+        if mesh_id == "precision" and transient_run_dir is not None
+        else runs_root / "frozen_flow_actual_1s"
+    )
     if (
         mesh_id == "precision"
         and (upgraded_run / "reports/viewer/actual_1s_manifest.json").is_file()
@@ -1338,7 +1350,11 @@ def _interactive_actual_cfd_payload(
         run = upgraded_run
     manifest_path = run / "reports/viewer/actual_1s_manifest.json"
     validation_path = run / "reports/viewer/actual_1s_validation.json"
-    foam_file = runs_root / "steady_cht/steady_cht.foam"
+    foam_file = (
+        steady_run_dir.resolve() / "steady_cht.foam"
+        if mesh_id == "precision" and steady_run_dir is not None
+        else runs_root / "steady_cht/steady_cht.foam"
+    )
     if (
         not manifest_path.is_file()
         or not validation_path.is_file()
@@ -5263,6 +5279,8 @@ def write_viewer_bundle(
     *,
     case_dir: str | Path | None = None,
     include_reference_cad: bool = True,
+    precision_steady_run_dir: str | Path | None = None,
+    precision_transient_run_dir: str | Path | None = None,
 ) -> dict[str, object]:
     """검증 보고서와 CFD 필드를 읽어 첫 화면, 결과 및 데이터 파일을 만든다.
 
@@ -5422,11 +5440,23 @@ def write_viewer_bundle(
         )
         calculation_note = "이 화면의 색은 셀 구분용이며 온도장이 아닙니다."
     payload_case = case if case is not None else Path(".")
+    precision_steady_run = (
+        Path(precision_steady_run_dir).resolve()
+        if precision_steady_run_dir is not None
+        else None
+    )
+    precision_transient_run = (
+        Path(precision_transient_run_dir).resolve()
+        if precision_transient_run_dir is not None
+        else None
+    )
     precision_cfd = _interactive_actual_cfd_payload(
         config,
         payload_case,
         enabled=actual_solver_data and case is not None,
         mesh_id="precision",
+        steady_run_dir=precision_steady_run,
+        transient_run_dir=precision_transient_run,
     )
     if precision_cfd is None:
         precision_cfd = _interactive_legacy_cfd_payload(
@@ -5540,6 +5570,9 @@ def write_viewer_bundle(
                 runs_root / "frozen_flow_actual_1s_xy5/reports/viewer"
             )
             source_dir = (
+                precision_transient_run / "reports/viewer"
+                if mesh_id == "precision" and precision_transient_run is not None
+                else
                 upgraded_source
                 if mesh_id == "precision"
                 and (upgraded_source / "actual_1s_manifest.json").is_file()
@@ -5586,7 +5619,12 @@ def write_viewer_bundle(
             if mesh_id not in interactive_cfd_by_mesh:
                 continue
             convergence_by_mesh[mesh_id] = _convergence_payload(mesh_case)
-            energy_balance_by_mesh[mesh_id] = _energy_balance_payload(mesh_case)
+            energy_balance_by_mesh[mesh_id] = _energy_balance_payload(
+                mesh_case,
+                transient_run_dir=(
+                    precision_transient_run if mesh_id == "precision" else None
+                ),
+            )
     convergence = convergence_by_mesh.get(
         "precision",
         convergence_by_mesh.get("single", {"available": False}),
@@ -5597,10 +5635,14 @@ def write_viewer_bundle(
     )
     mesh_wireframes = mesh_wireframes_for_viewer(case) if case is not None else {}
     mesh_only_summary = (
-        write_mesh_only_viewer(case, output)
+        write_mesh_only_viewer(
+            case,
+            output,
+            steady_run_dir=precision_steady_run,
+        )
         if case is not None
         and actual_solver_data
-        and (case / "runs/steady_cht/steady_cht.foam").is_file()
+        and (case / "constant/polyMesh/points").is_file()
         and (case / "reports/production_mesh/mesh_target_composition.json").is_file()
         else None
     )

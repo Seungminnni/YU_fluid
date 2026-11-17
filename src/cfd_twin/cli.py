@@ -12,6 +12,8 @@ from .errors import CfdTwinError
 from .geometry import write_geometry_bundle
 from .heat_source import source_from_config, write_heat_source_bundle
 from .production_mesh import SUPPORTED_LEVELS, write_production_mesh_source_bundle
+from .reference_mesh import inspect_fluent_ascii_mesh, register_reference_archive
+from .sweep_mesh import SUPPORTED_SWEEP_TARGETS, write_sweep_mesh_source_bundle
 from .animation_validation import validate_animations
 from .comparison import prepare_comparison_case, publish_comparison_results
 from .viewer import write_viewer_bundle
@@ -118,10 +120,37 @@ def _build_production_mesh_source(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_sweep_mesh_source(args: argparse.Namespace) -> int:
+    config = _load(args)
+    manifest = write_sweep_mesh_source_bundle(
+        config,
+        args.output,
+        target_cells=args.target_cells,
+        journal_path=args.reference_journal,
+    )
+    _json(manifest)
+    return 0
+
+
 def _doctor(_: argparse.Namespace) -> int:
     report = dependency_report()
     _json(report)
     return 0
+
+
+def _inspect_reference_mesh(args: argparse.Namespace) -> int:
+    output = Path(args.output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    if args.archive:
+        result = register_reference_archive(args.archive, output)
+        report = result["report"]
+    else:
+        report = inspect_fluent_ascii_mesh(args.mesh)
+        (output / "reference_mesh_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    _json(report)
+    return 0 if report["status"] == "REFERENCE_MESH_VALIDATION_PASSED" else 2
 
 
 def _validate_animations(args: argparse.Namespace) -> int:
@@ -240,6 +269,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     production_mesh.set_defaults(func=_build_production_mesh_source)
+
+    sweep_mesh = subparsers.add_parser(
+        "build-sweep-mesh-source",
+        help="build a reference-guided quad-source/all-hexa sweep mesh bundle",
+    )
+    add_config_inputs(sweep_mesh)
+    sweep_mesh.add_argument(
+        "--target-cells",
+        type=int,
+        choices=SUPPORTED_SWEEP_TARGETS,
+        required=True,
+    )
+    sweep_mesh.add_argument(
+        "--reference-journal",
+        help="accepted GAMBIT .jou used to audit the learned split/pave/interval/Cooper recipe",
+    )
+    sweep_mesh.add_argument("--output", required=True)
+    sweep_mesh.set_defaults(func=_build_sweep_mesh_source)
+
+    reference_mesh = subparsers.add_parser(
+        "inspect-reference-mesh",
+        help="register and structurally validate the GAMBIT/Fluent reference mesh",
+    )
+    reference_source = reference_mesh.add_mutually_exclusive_group(required=True)
+    reference_source.add_argument("--archive", help="mesh.zip containing the four GAMBIT files")
+    reference_source.add_argument("--mesh", help="Fluent ASCII .msh file")
+    reference_mesh.add_argument("--output", required=True)
+    reference_mesh.set_defaults(func=_inspect_reference_mesh)
 
     animation_check = subparsers.add_parser(
         "validate-animations", help="verify MP4 structure, temporal changes and viewer controls"

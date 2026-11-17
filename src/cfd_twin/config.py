@@ -49,6 +49,12 @@ REVIEWED_PORT_DIAMETERS_BY_SOURCE = {
     "C05_TOP_INLET_C19_BOTTOM_OUTLET_PHI21_600K_20260923": 0.021,
 }
 
+# Reviewed asymmetric inlet/outlet pairs.  The frustum uses its actual far
+# inlet face for the fixed-velocity boundary and keeps the D19 outlet.
+REVIEWED_PORT_PAIRS_BY_SOURCE = {
+    "C05_TOP_FRUSTUM_D33_TO_D22_OUTLET_D19_20261101": (0.033, 0.019),
+}
+
 
 def _mapping(value: object, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -504,11 +510,13 @@ def load_config(
         # the user-reviewed phi-23 sensitivity run identified by its explicit
         # provenance tag; this prevents an unrelated overlay from silently
         # changing the production geometry.
-        reviewed_diameter = REVIEWED_PORT_DIAMETERS_BY_SOURCE.get(
-            ports.center_source,
-            0.019,
-        )
-        reviewed_port_pair = (reviewed_diameter, reviewed_diameter)
+        reviewed_port_pair = REVIEWED_PORT_PAIRS_BY_SOURCE.get(ports.center_source)
+        if reviewed_port_pair is None:
+            reviewed_diameter = REVIEWED_PORT_DIAMETERS_BY_SOURCE.get(
+                ports.center_source,
+                0.019,
+            )
+            reviewed_port_pair = (reviewed_diameter, reviewed_diameter)
         for label, actual, expected in (
             ("inlet diameter", ports.inlet_diameter_m, reviewed_port_pair[0]),
             ("outlet diameter", ports.outlet_diameter_m, reviewed_port_pair[1]),

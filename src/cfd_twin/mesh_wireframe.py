@@ -201,7 +201,11 @@ def mesh_wireframes_for_viewer(case_root: str | Path) -> dict[str, dict[str, obj
     return payload
 
 
-def extract_full_mesh_views(case_dir: str | Path) -> dict[str, object]:
+def extract_full_mesh_views(
+    case_dir: str | Path,
+    *,
+    steady_run_dir: str | Path | None = None,
+) -> dict[str, object]:
     """Export real boundary edges and exact internal-cell cuts, without thinning.
 
     The existing simulation overlay deliberately samples about 13k edges. This
@@ -293,7 +297,11 @@ def extract_full_mesh_views(case_dir: str | Path) -> dict[str, object]:
                 )
         return clipped_groups
 
-    foam_file = case / "runs/steady_cht/steady_cht.foam"
+    foam_file = (
+        Path(steady_run_dir).resolve() / "steady_cht.foam"
+        if steady_run_dir is not None
+        else case / "runs/steady_cht/steady_cht.foam"
+    )
     backend = OpenFoamResultReader(foam_file)
     numeric_times = []
     for item in foam_file.parent.iterdir():

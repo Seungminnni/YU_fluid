@@ -82,6 +82,21 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(changed.ports.inlet_center_xy_m, (0.0136, 0.1052))
                 self.assertEqual(changed.ports.outlet_center_xy_m, (0.0896, 0.0152))
 
+    def test_reviewed_d33_frustum_inlet_with_d19_outlet_is_accepted(self) -> None:
+        changed = load_config(
+            BASELINE,
+            overrides=(
+                'geometry.ports.inlet_diameter="33 mm"',
+                'geometry.ports.outlet_diameter="19 mm"',
+                'geometry.ports.center_source="C05_TOP_FRUSTUM_D33_TO_D22_OUTLET_D19_20261101"',
+                'boundary.inlet_velocity="0.4 m/s"',
+            ),
+        )
+        self.assertAlmostEqual(changed.ports.inlet_diameter_m, 0.033)
+        self.assertAlmostEqual(changed.ports.outlet_diameter_m, 0.019)
+        self.assertAlmostEqual(changed.boundary.inlet_velocity_m_s, 0.4)
+        self.assertAlmostEqual(changed.derived.mass_flow_kg_s, 0.34150362498397185)
+
     def test_pao2_phi25_overlay_preserves_geometry_and_sets_manufacturer_properties(self) -> None:
         reference = load_config(
             BASELINE,

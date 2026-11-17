@@ -66,3 +66,19 @@ class OutletBoundaryTests(unittest.TestCase):
             self.assertEqual(list(case.iterdir()), [])
             with self.assertRaises(ValueError):
                 apply_profile(case, 'typo')
+
+    def test_flux_corrected_outflow_profile_uses_flux_consistent_velocity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            case = Path(temp)
+            fields = _fluid_fields(load_config(BASE_CONFIG))
+            for name, text in fields.items():
+                path = case / '0/coolant' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding='utf-8')
+            apply_profile(case, 'flux_corrected_outflow')
+            velocity = (case / '0/coolant/U').read_text(encoding='utf-8')
+            self.assertIn('type fluxCorrectedVelocity;', velocity)
+            self.assertNotIn('type inletOutlet;', velocity)
+            audit = json.loads((case / 'reports/outlet_boundary.json').read_text())
+            self.assertEqual(audit['after_type'], 'fluxCorrectedVelocity')
+            self.assertFalse(audit['operating_inputs_changed'])

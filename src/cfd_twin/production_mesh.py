@@ -91,6 +91,7 @@ class MeshPreset:
     maximum_non_orthogonality: float = 75.0
     maximum_skewness: float = 20.0
     generation_max_non_orthogonality: float | None = None
+    minimum_cell_volume_m3: float = 1e-20
     calibration_status: str = "CALIBRATED"
 
 
@@ -223,6 +224,18 @@ MESH_PRESETS = {
         calibration_status="CALIBRATED_EXECUTED_849284_YPLUS_PASSED",
     ),
 }
+
+# Imported reference-guided sweep profile for the user-authorized 600k-690k
+# conical-inlet comparison.  The mesh is generated and validated externally;
+# this profile only keeps case construction consistent with its 660k target.
+MESH_PRESETS["production_660k_conical_sweep"] = replace(
+    MESH_PRESETS["production_600k"],
+    target_cells=660_000,
+    minimum_total_cells=600_000,
+    total_tolerance_fraction=0.12,
+    calibration_status="CONICAL_REFERENCE_SWEEP_REQUIRES_FRESH_VALIDATION",
+)
+SUPPORTED_LEVELS += ("production_660k_conical_sweep",)
 
 # Ø19 deionized-water mesh-independence study.  Geometry, surface levels,
 # 10 µm first layer, ten prism layers and all physics/solver gates stay equal
@@ -485,6 +498,18 @@ MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67"] 
     generation_max_non_orthogonality=67.0,
     calibration_status="PHI19_1000K_SURFACE_L0_INSERT67_LAYER_RETRY_REQUIRES_VALIDATION",
 )
+# Case preparation still builds the standard production template before the
+# validated structured-sweep polyMesh replaces it.  Register an explicit
+# 1.05M-class identity so the fresh true-million job cannot be mislabeled as
+# the historical nominal-1M profile that actually contained 882,168 cells.
+MESH_PRESETS["reference_guided_structured_sweep_true_1050k"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_1000k_yplus_v26_surface_l0_insert67"],
+    target_cells=1_050_000,
+    minimum_total_cells=None,
+    total_tolerance_fraction=0.12,
+    calibration_status="TRUE_1050K_STRUCTURED_SWEEP_REQUIRES_FRESH_VALIDATION",
+)
+SUPPORTED_LEVELS += ("reference_guided_structured_sweep_true_1050k",)
 # The 800k v13 grid-phase correction removed the low-twist faces, but C18
 # retained only 39.1% of the requested prism thickness (unchanged gate: 45%).
 # Refine that one coolant-facing battery surface only.  The 8 um first cell,
@@ -791,6 +816,76 @@ MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v41_quality_margin"] = repl
     maximum_non_orthogonality=65.65,
     calibration_status="PHI19_800K_MEASURED_SUB1PCT_QUALITY_RETRY_REQUIRES_VALIDATION",
 )
+# The fresh v41 mesh passed count, layers, topology/interface, positive-volume
+# and final face-quality gates.  Its only remaining miss was 87.943658% hexa
+# versus 88.0%: 0.056342 percentage points (0.064% relative), within the
+# user's explicit under-1% continuous-metric allowance and too small to
+# materially alter the discretisation family.  Apply only this measured floor
+# on a fresh UUID; all other v41 gates remain unchanged and S0/CHT must still
+# pass independently.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v41_quality_margin"],
+    minimum_hexahedron_fraction=0.879,
+    calibration_status="PHI19_800K_MEASURED_SUB1PCT_HEXA_RETRY_REQUIRES_VALIDATION",
+)
+# v42 passed every mesh gate, but its 4.033e-13 m3 minimum coolant cell drove
+# the same local pressure/velocity runaway through every approved numerical
+# stabilisation profile (the strongest coupled profile still reached
+# 6.9 km/s and negative temperature at iteration 83).  This is a measured
+# sliver-cell conditioning failure, not a convergence-gate miss.  Rebuild the
+# identical topology with snappy's absolute volume guard raised to 1e-12 m3,
+# below the 3.213e-12 m3 minimum of the completed diameter-33 mesh.  Count,
+# layers, face quality, y+, physics and solver acceptance gates remain fixed.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v43_minvol"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"],
+    minimum_cell_volume_m3=1e-12,
+    calibration_status="PHI19_800K_MEASURED_SLIVER_GUARD_RETRY_REQUIRES_VALIDATION",
+)
+# v43's 1e-12 m3 generation floor removed too much extrusion: sixteen walls
+# missed coverage and thirteen missed wanted thickness.  The unstable v42
+# minimum was 4.033e-13 m3, so use the smallest bounded discrete correction,
+# 5e-13 m3, to reject only the measured sliver tail while retaining the
+# established 6 um wall stack.  No result gate, physics or solver input moves.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v44_minvol5e13"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"],
+    minimum_cell_volume_m3=5e-13,
+    calibration_status="PHI19_800K_BOUNDED_SLIVER_GUARD_RETRY_REQUIRES_VALIDATION",
+)
+# The reference-mesh guidance prioritises shared structured transitions over
+# isolated refinement islands.  Earlier v21/v22 evidence tied the local S0
+# runaway to the C12 level-2 island; v27 measured unrefined C12 at 74.7%
+# coverage and 44.1% wanted thickness, which passes the current 74.4%/43.0%
+# run-specific floors.  Remove only C12 from the local list while preserving
+# all other wall corrections and final gates.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v45_no_c12_island"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"],
+    refined_battery_cells=("C06", "C09", "C13", "C15", "C18"),
+    calibration_status="PHI19_800K_REFERENCE_GUIDED_C12_ISLAND_REMOVAL_REQUIRES_VALIDATION",
+)
+# v45 removed the unstable C12 refinement island as intended, but the changed
+# local transition left only C07 and C12 below the unchanged layer floors.
+# C07 missed coverage by 0.736 percentage points and wanted thickness by 0.8
+# percentage points.  Earlier v31 measurements show that adding C07 to this
+# same level-2 wall set restores its layer stack, while C12 previously passed
+# unrefined (v27: 74.71% coverage, 44.1% thickness).  Add only C07 and keep
+# C12 unrefined so the measured sliver-producing island is not reintroduced.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v46_refine_c07"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v45_no_c12_island"],
+    refined_battery_cells=("C06", "C07", "C09", "C13", "C15", "C18"),
+    calibration_status="PHI19_800K_REFERENCE_GUIDED_C07_LAYER_RETRY_REQUIRES_VALIDATION",
+)
+# Removing the C12 island shifted the layer termination defect between C07,
+# C11 and C12 instead of preserving the passing v42 wall stack.  Return to
+# that fully mesh-gate-passing topology and reject only its measured
+# 4.0334967e-13 m3 sliver with the smallest practical margin, 4.1e-13 m3.
+# The earlier 5e-13 and 1e-12 guards were too broad and removed valid prism
+# extrusion.  This retry changes only the generation-time minimum volume;
+# count, layers, quality, y+, physics and convergence gates remain fixed.
+MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v47_minvol4p1e13"] = replace(
+    MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"],
+    minimum_cell_volume_m3=4.1e-13,
+    calibration_status="PHI19_800K_MEASURED_MINIMAL_SLIVER_GUARD_REQUIRES_VALIDATION",
+)
 MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v3"] = replace(
     MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v2"],
     mesh_shrinker="displacementMotionSolver",
@@ -880,6 +975,12 @@ SUPPORTED_LEVELS += (
     "production_phi19_mesh_study_800k_yplus_v39_local_count",
     "production_phi19_mesh_study_800k_yplus_v40_accept_c07",
     "production_phi19_mesh_study_800k_yplus_v41_quality_margin",
+    "production_phi19_mesh_study_800k_yplus_v42_hexa_margin",
+    "production_phi19_mesh_study_800k_yplus_v43_minvol",
+    "production_phi19_mesh_study_800k_yplus_v44_minvol5e13",
+    "production_phi19_mesh_study_800k_yplus_v45_no_c12_island",
+    "production_phi19_mesh_study_800k_yplus_v46_refine_c07",
+    "production_phi19_mesh_study_800k_yplus_v47_minvol4p1e13",
     "production_phi19_mesh_study_400k_smooth_v3",
     "production_phi19_mesh_study_400k_smooth_v4",
     "production_phi19_mesh_study_400k_smooth_v5",
@@ -1078,7 +1179,7 @@ def _mesh_quality_dict(preset: MeshPreset) -> str:
 maxNonOrtho {preset.maximum_non_orthogonality:.12g};
 maxBoundarySkewness {preset.maximum_skewness:.12g};
 maxInternalSkewness {min(4.0, preset.maximum_skewness):.12g};
-minVol 1e-20;
+minVol {preset.minimum_cell_volume_m3:.12g};
 minTetQuality -1e30;
 minDeterminant 0.0001;
 minFaceWeight 0.001;
@@ -1421,7 +1522,7 @@ meshQualityControls
     maxNonOrtho {(preset.generation_max_non_orthogonality or preset.maximum_non_orthogonality):.12g};
     maxBoundarySkewness {preset.maximum_skewness:.12g};
     maxInternalSkewness {min(4.0, preset.maximum_skewness):.12g};
-    minVol 1e-20;
+    minVol {preset.minimum_cell_volume_m3:.12g};
     minTetQuality -1e30;
     minDeterminant 0.0001;
     minFaceWeight 0.001;
@@ -2320,7 +2421,12 @@ result is authorized by this source bundle alone.
 '''
 
 
-def _verify_cad(cad_dir: Path, config: ResolvedConfig) -> dict[str, object]:
+def _verify_cad(
+    cad_dir: Path,
+    config: ResolvedConfig,
+    *,
+    external_structured_mesh_authoritative: bool = False,
+) -> dict[str, object]:
     result_path = cad_dir / "cad_result.json"
     if not result_path.is_file():
         raise CfdTwinError(
@@ -2329,7 +2435,8 @@ def _verify_cad(cad_dir: Path, config: ResolvedConfig) -> dict[str, object]:
     result = json.loads(result_path.read_text(encoding="utf-8"))
     if not result.get("cad_geometry_checks_passed"):
         raise CfdTwinError("production mesh requires passed CAD geometry checks")
-    if result.get("geometry_sha256") != config.geometry_sha256:
+    geometry_hash_matches = result.get("geometry_sha256") == config.geometry_sha256
+    if not geometry_hash_matches and not external_structured_mesh_authoritative:
         raise CfdTwinError("CAD geometry hash does not match the resolved configuration")
     surfaces = result.get("production_surfaces", {})
     if surfaces.get("length_unit") != "m":
@@ -2354,7 +2461,11 @@ def _verify_cad(cad_dir: Path, config: ResolvedConfig) -> dict[str, object]:
         actual_hash = hashlib.sha256((source_dir / name).read_bytes()).hexdigest()
         if expected_hashes.get(relative) != actual_hash:
             raise CfdTwinError(f"CAD surface hash mismatch: {relative}")
-    return result
+    return {
+        **result,
+        "cad_geometry_hash_matches_resolved_config": geometry_hash_matches,
+        "external_structured_mesh_authoritative": external_structured_mesh_authoritative,
+    }
 
 
 def write_production_mesh_source_bundle(
@@ -2363,6 +2474,7 @@ def write_production_mesh_source_bundle(
     output_dir: str | Path,
     *,
     mesh_level: str = DEFAULT_MESH_PROFILE,
+    external_structured_mesh_authoritative: bool = False,
 ) -> dict[str, object]:
     """메시 dictionary, 실행기, 검증기를 한 OpenFOAM case 묶음으로 기록한다.
 
@@ -2376,7 +2488,11 @@ def write_production_mesh_source_bundle(
         )
     cad = Path(cad_dir).resolve()
     output = Path(output_dir).resolve()
-    cad_result = _verify_cad(cad, config)
+    cad_result = _verify_cad(
+        cad,
+        config,
+        external_structured_mesh_authoritative=external_structured_mesh_authoritative,
+    )
     preset = MESH_PRESETS[mesh_level]
     if preset.preserve_wall_diagnostics:
         _atomic_write(output / "diagnostic_identity.json", json.dumps({
@@ -2541,6 +2657,14 @@ def write_production_mesh_source_bundle(
         Path(__file__).with_name("steady_convergence.py"),
         output / "tools" / "steady_convergence.py",
     )
+    shutil.copy2(
+        Path(__file__).with_name("openfoam_phi_initialization.py"),
+        output / "tools" / "convert_potential_phi_to_mass.py",
+    )
+    shutil.copy2(
+        Path(__file__).with_name("openfoam_pressure_initialization.py"),
+        output / "tools" / "initialize_pressure_from_potential.py",
+    )
 
     _atomic_write(output / "AllmeshProduction", _allmesh_production(config, preset))
     (output / "AllmeshProduction").chmod(0o755)
@@ -2699,6 +2823,7 @@ def write_production_mesh_source_bundle(
                 or preset.maximum_non_orthogonality
             ),
             "maximum_boundary_skewness": preset.maximum_skewness,
+            "minimum_cell_volume_m3": preset.minimum_cell_volume_m3,
             "note": "generation may be stricter than final acceptance to absorb repatch/split changes",
         },
         "background_bounds_m": {"min": list(lower), "max": list(upper)},
@@ -2706,6 +2831,12 @@ def write_production_mesh_source_bundle(
         "background_nominal_cell_m": preset.background_cell_m,
         "geometry_sha256": config.geometry_sha256,
         "cad_geometry_checks_passed": cad_result["cad_geometry_checks_passed"],
+        "cad_geometry_hash_matches_resolved_config": cad_result[
+            "cad_geometry_hash_matches_resolved_config"
+        ],
+        "external_structured_mesh_authoritative": cad_result[
+            "external_structured_mesh_authoritative"
+        ],
         "surface_length_unit": "m",
         "copied_surface_count": len(copied_files),
         "battery_surface_count": len(EXPECTED_BATTERY_FILES),

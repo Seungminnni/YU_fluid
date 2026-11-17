@@ -5,6 +5,16 @@
 - 현재 실행 경로는 OpenFOAM full-order model(FOM)만 지원한다. ROM 학습·검증·온라인 추론 경로는 아직 없다.
 - ROM은 첫 기준 계산을 대체하지 않는다. 동일한 형상/메시 계열에서 충분한 FOM snapshot을 만든 뒤, 검증 범위 안의 반복 질의에 사용한다.
 - 자동 메시 실패는 셀 수, 벽면층, 기하 품질, 위상/영역/계면 실패를 서로 다른 원인으로 다뤄야 한다.
+- 사용자 제작 GAMBIT/Fluent 기준 메시는 `cfd-twin inspect-reference-mesh`로 등록하며, 원본 SHA-256·영역·연결 성분·혼합 wall 계면을 검사한다. 이 기준은 구조 재현의 근거이지 `checkMesh` 또는 FOM 검증을 대신하지 않는다.
+
+## 사용자 제작 기준 메시
+
+- 기준 원본: `mesh.zip`의 `20260831_1633.{msh,jou,trn,dbs}`
+- 기준 메시 SHA-256: `ccb2f7e7002e9c708f9c2d5767c186966421cfef07e23d9916da72537e5d4e8c`
+- 확인 계약: 166,704개 전육면체 셀, 69,920 solid + 96,784 fluid, 23개 solid 연결 성분 + 1개 fluid 연결 성분
+- `wall` zone은 21,712개 유체-고체 계면과 12,132개 외부면이 섞여 있으므로 이름만으로 외벽에 할당하지 않는다.
+- Fluent ASCII `.msh`를 Gmsh MSH로 해석하지 않는다. OpenFOAM 변환은 별도 작업에서 단위 스케일, paired interface, 영역 수와 `checkMesh`를 재검증한다.
+- 실행 중인 snappyHexMesh/FOM 작업에는 이 기준 메시 등록을 소급 적용하지 않는다. 기준 메시 import/Cooper 계열 재현은 별도 UUID·별도 출력 폴더에서 검증한다.
 
 ## 라이브러리 선택
 
@@ -17,11 +27,11 @@
 
 ### 권장안
 
-1. **단기:** EZyRB의 POD+RBF로 `입구속도, 입구온도, 발열량 -> T_max, T_avg, 출구온도, 압력강하`와 온도장 snapshot을 학습한다.
+1. **단기:** EZyRB의 POD+RBF로 공통 배터리 좌표의 **23개 배터리 내부 온도장**을 학습한다. 첫 연속 입력은 원형 포트의 크기 또는 위치 중 하나이며, 속도·입구온도·발열량·물성은 고정한다.
 2. **중기:** 현재 OpenFOAM v2512 컨테이너에 ITHACA-FV를 별도 이미지로 고정하고, 유동/온도 field ROM을 검증한다.
 3. **장기:** pyMOR를 오류 추정과 FOM fallback을 포함한 다중충실도 실행 관리자에 사용한다.
 
-따라서 하나만 고르면 **ITHACA-FV가 현재 OpenFOAM 기반 프로그램에 가장 직접적인 선택**이다. 다만 구현 위험이 가장 낮은 첫 단계는 EZyRB다. 난류 CHT에서 검증되지 않은 ROM 결과는 release 결과로 게시하지 않는다.
+현재 첫 구현은 **EZyRB POD-RBF**로 고정한다. ITHACA-FV는 방정식 투영형 후속 확장이다. 최고온도·평균온도만 회귀한 모델을 온도장 POD-ROM으로 표시하지 않으며, 난류 CHT에서 검증되지 않은 ROM 결과는 release 결과로 게시하지 않는다.
 
 ## 예상 시간 단축
 
@@ -43,8 +53,20 @@
 
 ## ROM 승인 기준
 
-- 훈련/검증/시험 case를 분리한다.
+- 동일 case의 인접 시간 snapshot이 아니라 전체 형상 case 단위로 훈련/검증/시험을 분리한다.
 - 검증 범위를 벗어나면 ROM 대신 FOM으로 자동 fallback한다.
-- `T_max`, `T_avg`, 출구온도, 압력강하, 질량/에너지 수지에 개별 오차 한계를 둔다.
+- 배터리 내부에 semantic battery ID와 공통 `(r, theta, z)` 샘플 좌표·체적 가중치를 두고, 재메시 후 cell ID 순서를 snapshot 좌표로 사용하지 않는다.
+- `T_max`, 배터리별 체적 평균온도, 고온점 위치, 가중 RMS/최대 pointwise 온도장 오차에 개별 검증값을 기록한다.
+- 출구온도·압력강하는 별도 모델과 검증 데이터가 생기기 전까지 배터리 온도장 ROM의 출력으로 표시하지 않는다.
 - 400k/800k/1000k 격자 수렴 결과로 FOM 자체의 격자 불확실도를 먼저 확정한다.
 - ROM 오차와 격자 오차를 한 숫자로 합치지 않는다.
+
+## 구현 순서
+
+1. 기준 Fluent 메시 구조 등록 및 해시/zone/interface 검사
+2. `fluentMeshToFoam` 호환 변환을 별도 UUID에서 수행하고 23 solid/1 fluid 및 paired CHT interface 검증
+3. 기준 형상의 실제 CHT 수렴·질량/에너지 수지 확인
+4. 포트 형상 변수 한 개와 선택된 기준 해상도로 FOM case 집합 생성
+5. 공통 배터리 좌표 snapshot 추출 및 샘플링 오차 기록
+6. EZyRB POD-RBF 학습·저장·재로딩, 미학습 형상 FOM hold-out 비교
+7. 승인 범위 밖 요청은 기존 FOM 작업 큐로 fallback

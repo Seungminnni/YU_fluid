@@ -1,0 +1,145 @@
+campaign:
+  name: high_confidence_thermal_rom_v1
+  execution_order: after_true_1050k_production_release
+  solver: OpenFOAM
+  concurrent_with_mesh_independence_batch: false
+  maximum_fom_cases: 60
+  initial_fom_cases: 48
+  adaptive_enrichment_cases: 12
+  random_seed: 20261023
+
+fom_policy:
+  production_mesh: true_1050k_user_selected
+  mesh_selection_metric:
+    - battery_global_tmax_k
+    - battery_volume_average_temperature_k
+    - coolant_outlet_temperature_k
+    - pressure_drop_pa
+  reuse_mesh_within_campaign: true
+  reuse_flow_only_when:
+    constant_properties: true
+    gravity_m_s2: 0.0
+    inlet_velocity_m_s_is_identical: true
+  minimum_mesh_gates: 31
+  require_s0_validation: true
+  require_s1_validation: true
+  require_s2_validation: true
+  transient_end_time_s: 1800
+  transient_output_interval_s: 1
+  mpi_ranks: 20
+
+parameters:
+  inlet_velocity_m_s:
+    minimum: 0.25
+    baseline: 0.4
+    maximum: 0.55
+    distribution: maximin_latin_hypercube
+  coolant_inlet_temperature_k:
+    minimum: 288.15
+    baseline: 293.0
+    maximum: 303.15
+    distribution: maximin_latin_hypercube
+  heat_source_multiplier:
+    minimum: 0.7
+    baseline: 1.0
+    maximum: 1.3
+    distribution: maximin_latin_hypercube
+    interpretation: scenario multiplier applied to the validated 2C time-dependent qvol table; do not label as a different C-rate
+
+design:
+  mandatory_anchor_cases:
+    - [0.4, 293.0, 1.0]
+    - [0.25, 288.15, 0.7]
+    - [0.25, 288.15, 1.3]
+    - [0.25, 303.15, 0.7]
+    - [0.25, 303.15, 1.3]
+    - [0.55, 288.15, 0.7]
+    - [0.55, 288.15, 1.3]
+    - [0.55, 303.15, 0.7]
+    - [0.55, 303.15, 1.3]
+  initial_split:
+    train_cases: 30
+    validation_cases: 10
+    blind_test_cases: 8
+  split_unit: complete_fom_case
+  cross_validation:
+    folds: 5
+    grouped_by_complete_case: true
+  enrichment:
+    batch_size: 4
+    maximum_batches: 3
+    acquisition: weighted_maximum_of_rom_uncertainty_and_holdout_error
+
+snapshots:
+  fields:
+    - batterySolid.T
+    - coolant.T
+  sample_times_s:
+    start: 0
+    stop: 1800
+    interval: 5
+    always_include:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 10
+      - 30
+      - 60
+  spatial_contract:
+    coordinate_system: per_battery_semantic_cylindrical_r_theta_z
+    cell_id_as_cross_mesh_coordinate: false
+    volume_weighted: true
+    record_sampling_error: true
+
+rom:
+  method: weighted_pod_rbf
+  fallback_method: full_order_model
+  pod:
+    retained_energy_fraction: 0.9999
+    maximum_modes_per_field: 80
+    center_by_parameterized_initial_condition: true
+  coefficient_model:
+    inputs:
+      - time_s
+      - inlet_velocity_m_s
+      - coolant_inlet_temperature_k
+      - heat_source_multiplier
+    model: rbf_with_regularization_selected_by_grouped_cross_validation
+  uncertainty:
+    method: ensemble_and_distance_to_training_hull
+    out_of_domain_action: reject_and_queue_fom
+
+acceptance:
+  blind_test_only_for_final_acceptance: true
+  battery_temperature_field:
+    volume_weighted_relative_l2_max: 0.03
+    volume_weighted_rmse_k_max: 0.30
+    pointwise_p95_absolute_error_k_max: 0.50
+    pointwise_max_absolute_error_k_max: 1.00
+  battery_kpi:
+    per_battery_volume_average_mae_k_max: 0.20
+    global_max_temperature_error_k_max: 0.50
+    hot_spot_location_error_mm_max: 5.0
+  coolant_kpi:
+    outlet_temperature_error_k_max: 0.20
+  conservation:
+    final_window_energy_imbalance_fraction_max: 0.02
+  coverage:
+    all_blind_test_cases_must_pass: true
+    extrapolation_is_not_releaseable: true
+
+artifacts:
+  root: build/rom/high_confidence_thermal_rom_v1
+  preserve:
+    - campaign_manifest.json
+    - doe_cases.csv
+    - case_split.json
+    - fom_validation_reports
+    - sampling_contract.json
+    - pod_basis.npz
+    - coefficient_model
+    - cross_validation_report.json
+    - blind_test_report.json
+    - model_card.md
+    - inference_package

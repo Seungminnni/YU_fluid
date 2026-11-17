@@ -548,6 +548,14 @@ class ProductionMeshTests(unittest.TestCase):
             SUPPORTED_LEVELS,
         )
 
+    def test_true_1050k_structured_sweep_has_distinct_case_identity(self) -> None:
+        profile = MESH_PRESETS["reference_guided_structured_sweep_true_1050k"]
+        self.assertEqual(profile.target_cells, 1_050_000)
+        self.assertEqual(profile.first_layer_thickness_m, 6e-6)
+        self.assertEqual(profile.prism_layer_count, 11)
+        self.assertEqual(profile.maximum_non_orthogonality, 65.0)
+        self.assertIn("reference_guided_structured_sweep_true_1050k", SUPPORTED_LEVELS)
+
     def test_phi19_400k_v6_changes_only_first_cell_and_diagnostics_label(self) -> None:
         previous = MESH_PRESETS["production_phi19_mesh_study_400k_smooth_v5"]
         retry = MESH_PRESETS["production_phi19_mesh_study_400k_yplus_v6"]
@@ -999,6 +1007,73 @@ class ProductionMeshTests(unittest.TestCase):
         self.assertEqual(retry.minimum_layer_coverage_fraction, 0.744)
         self.assertEqual(retry.refined_battery_cells, previous.refined_battery_cells)
         self.assertEqual(retry.maximum_non_orthogonality, 65.6)
+
+    def test_phi19_mesh_study_v43_adds_only_measured_sliver_guard(self) -> None:
+        previous = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v43_minvol"]
+        changed = {
+            name
+            for name in previous.__dataclass_fields__
+            if getattr(previous, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"minimum_cell_volume_m3", "calibration_status"})
+        self.assertEqual(retry.minimum_cell_volume_m3, 1e-12)
+        self.assertEqual(retry.minimum_hexahedron_fraction, 0.879)
+        self.assertEqual(retry.maximum_non_orthogonality, 65.65)
+        self.assertEqual(retry.maximum_skewness, 5.05)
+
+    def test_phi19_mesh_study_v44_uses_bounded_sliver_guard(self) -> None:
+        baseline = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v44_minvol5e13"]
+        changed = {
+            name
+            for name in baseline.__dataclass_fields__
+            if getattr(baseline, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"minimum_cell_volume_m3", "calibration_status"})
+        self.assertEqual(retry.minimum_cell_volume_m3, 5e-13)
+        self.assertEqual(retry.first_layer_thickness_m, 6e-6)
+        self.assertEqual(retry.prism_layer_count, 11)
+
+    def test_phi19_mesh_study_v45_removes_only_c12_refinement_island(self) -> None:
+        baseline = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v45_no_c12_island"]
+        changed = {
+            name
+            for name in baseline.__dataclass_fields__
+            if getattr(baseline, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"refined_battery_cells", "calibration_status"})
+        self.assertEqual(retry.refined_battery_cells, ("C06", "C09", "C13", "C15", "C18"))
+        self.assertNotIn("C12", retry.refined_battery_cells)
+
+    def test_phi19_mesh_study_v46_adds_only_c07_to_v45(self) -> None:
+        baseline = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v45_no_c12_island"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v46_refine_c07"]
+        changed = {
+            name
+            for name in baseline.__dataclass_fields__
+            if getattr(baseline, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"refined_battery_cells", "calibration_status"})
+        self.assertEqual(retry.refined_battery_cells, ("C06", "C07", "C09", "C13", "C15", "C18"))
+        self.assertNotIn("C12", retry.refined_battery_cells)
+        self.assertEqual(retry.minimum_layer_coverage_fraction, 0.744)
+        self.assertEqual(retry.minimum_wanted_thickness_fraction, 0.430)
+
+    def test_phi19_mesh_study_v47_uses_minimal_measured_sliver_guard(self) -> None:
+        baseline = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v42_hexa_margin"]
+        retry = MESH_PRESETS["production_phi19_mesh_study_800k_yplus_v47_minvol4p1e13"]
+        changed = {
+            name
+            for name in baseline.__dataclass_fields__
+            if getattr(baseline, name) != getattr(retry, name)
+        }
+        self.assertEqual(changed, {"minimum_cell_volume_m3", "calibration_status"})
+        self.assertEqual(retry.minimum_cell_volume_m3, 4.1e-13)
+        self.assertEqual(retry.refined_battery_cells, baseline.refined_battery_cells)
+        self.assertEqual(retry.minimum_layer_coverage_fraction, 0.744)
+        self.assertEqual(retry.minimum_wanted_thickness_fraction, 0.430)
 
     def test_frame_fit_800k_trial_keeps_the_passing_wall_treatment(self) -> None:
         preset = MESH_PRESETS["production_frame_fit_800k_6um_11layers_motion"]
@@ -1583,7 +1658,15 @@ class ProductionMeshTests(unittest.TestCase):
             self.assertIn("validate_yplus.py", cold_script)
             self.assertIn("validate_cold_flow.py", cold_script)
             self.assertIn("potentialFoam", cold_script)
-            self.assertNotIn("-writephi", cold_script)
+            self.assertIn("-writephi", cold_script)
+            self.assertIn("convert_potential_phi_to_mass.py", cold_script)
+            self.assertIn("initialize_pressure_from_potential.py", cold_script)
+            self.assertTrue(
+                (output / "tools" / "convert_potential_phi_to_mass.py").is_file()
+            )
+            self.assertTrue(
+                (output / "tools" / "initialize_pressure_from_potential.py").is_file()
+            )
             self.assertIn("decomposePar -case \"$run_dir\" -allRegions", frozen_script)
             self.assertNotIn("-copyZero", frozen_script)
             self.assertIn("chtMultiRegionFoamAdaptive -case \"$run_dir\" -parallel", frozen_script)
