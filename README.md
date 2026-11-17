@@ -9,6 +9,12 @@
 - [보존한 네 결과의 위치](build/result/README.md)
 - [시작 화면](viewer/index.html) · [결과 뷰어](viewer/results.html) · [CAD 도면](viewer/cad/index.html) · [3D 메시](viewer/mesh.html)
 
+## License
+
+Copyright © 2026 Seungmin Lee and Heonje Woo. All rights reserved.
+
+Approved collaborators may work on YU_fluid internally for noncommercial purposes under [LICENSE.md](LICENSE.md). Both copyright holders must give prior written permission to use the original project materials outside that scope, share them externally, or use them commercially. OpenFOAM and other third-party components are governed by their respective licenses.
+
 ## 다른 작업자를 위한 인수인계
 
 ### 새 체크아웃 준비

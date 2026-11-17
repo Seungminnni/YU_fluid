@@ -10,13 +10,13 @@ The Copyright Holders retain copyright in the Original Materials. Copies and mod
 
 ## 2. Internal Laboratory Collaboration
 
-A laboratory member who accepts an invitation approved by both Copyright Holders to collaborate in the private YU_fluid repository and agrees to these terms receives a nonexclusive license to do the following within the approved scope of collaboration.
+A laboratory member receives a nonexclusive license to work on YU_fluid for internal, noncommercial purposes by accepting an invitation to the private repository approved by both Copyright Holders and agreeing to these terms. This grant covers the following activities within the approved scope of collaboration.
 
 1. Access and review the handover materials, clone the repository locally, and install, run, test, and verify the project.
 2. Modify and adapt the Original Materials, fix issues, and add features for internal noncommercial research, maintenance, and joint development of YU_fluid.
 3. Work on branches in the private repository, submit pull requests, and review and merge changes with authorized collaborators as permitted by the member's repository permissions.
 
-This grant applies for the agreed collaboration period and ends when that period or the collaboration ends, or when repository access is revoked. Any separate permission under Section 3 remains subject to its own terms.
+The grant ends when the agreed period expires, the collaboration ends, or repository access is revoked, whichever comes first. Any separate permission under Section 3 remains subject to its own terms.
 
 Copyright in each new contribution belongs to its applicable rights holder under applicable law and any separate agreement. By submitting a contribution for inclusion, the contributor grants the Copyright Holders and authorized collaborators a nonexclusive license to review, merge, copy, run, and modify that contribution within the private YU_fluid project for its internal operation, maintenance, and further development. This internal license continues after the contributor's participation ends.
 
@@ -33,9 +33,9 @@ External sharing and commercial use require this permission during and after the
 
 ## 4. OpenFOAM and Third-Party Materials
 
-OpenFOAM, GPL-covered modifications to the OpenFOAM solver, associated materials covered by the GPL, and other third-party components remain subject to their respective upstream licenses and notices. Recipients retain the rights granted under those licenses, including any rights to modify, redistribute, or use those components commercially. Use of the Yeungnam University emblem is subject to the applicable rights holder's terms.
+OpenFOAM, GPL-covered solver modifications and associated materials, and other third-party components are governed by their respective upstream licenses and notices. The permission requirements for the Original Materials apply to the project-owned portions of copies and modified versions. Recipients may exercise the rights granted by the applicable third-party licenses for their respective components, including any rights to modify, redistribute, or use those components commercially. Use of the Yeungnam University emblem is subject to the applicable rights holder's terms.
 
-The project uses the OpenCFD OpenFOAM v2512 base image `opencfd/openfoam-default:2512`. It uses `src/cfd_twin/patch_adaptive_cht_solver.py` to modify the OpenFOAM `chtMultiRegionFoam` solver and builds `chtMultiRegionFoamAdaptive`. When conveying the modified solver or a container image containing it, comply with the applicable GNU GPL terms. Preserve upstream notices, include the GPL text, identify the modifications and their dates, and provide the Corresponding Source for the conveyed binaries as required by GPL Sections 5 and 6. This includes the applicable upstream source, the changes, and the scripts and build definitions required to build and install the covered work.
+The project uses the OpenCFD OpenFOAM v2512 base image `opencfd/openfoam-default:2512`. It uses `src/cfd_twin/patch_adaptive_cht_solver.py` to modify the OpenFOAM `chtMultiRegionFoam` solver and builds `chtMultiRegionFoamAdaptive`. When conveying GPL-covered source code, the modified solver binary, or a container image containing it, preserve upstream notices, include the GPL text, and identify modifications and their dates as required by the GNU GPL. When conveying binaries, also make the Corresponding Source available as required by GPL Sections 5 and 6. This includes the matching upstream source, the changes, and the build and installation scripts required by the GPL.
 
 [OpenFOAM v2512 source](https://dl.openfoam.com/source/v2512/) · [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.html)
 
