@@ -50,4 +50,3 @@ python tools/run_experiment.py --output build/experiments/water_trial_01 --run
 Windows에서는 `distribution/run_windows.cmd`로 웹앱을 시작한다. 배치 준비·실행·재시도, Docker 확인, 로그와 결과 위치, Windows 잠금 처리와 Python 환경은 [Windows 설치·새 실험 안내](docs/windows_and_new_experiments.md)에 명령 단위로 기록돼 있다.
 
 압축을 풀어 HTML을 직접 여는 형태는 발표용 화면이다. 새 CFD 계산을 실제로 실행하려면 로컬 Python 서버와 Docker/OpenFOAM 환경이 필요하다. 과거 상세 기록은 `docs/archive/`에 원문 그대로 보관했으며 현행 상태의 기준은 [통합 안내](docs/README.md)다.
-
